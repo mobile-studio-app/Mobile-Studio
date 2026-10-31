@@ -128,6 +128,8 @@
   /* CodeMirror's base theme forces display:flex !important, so hiding needs the same weight. */
   #editor-container .cm-editor[hidden] { display: none !important; }
   .cm-content { -webkit-user-select: text; user-select: text; -webkit-touch-callout: none; }
+  /* No rubber-banding past the left or right edge (see scroll-lock.js for the direction lock). */
+  .cm-scroller { overscroll-behavior-x: none; }
 
   /* Merge conflicts, in VS Code's merge colours. */
   #editor-container .cm-conflict-current-header { background-color: rgba(64, 200, 174, .5) !important; }

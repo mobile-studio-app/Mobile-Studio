@@ -1,6 +1,7 @@
 // View: Split Editor. A second editor beside the main one (below it on a narrow screen), with
 // its own file. When both show the same file they share its text: an edit in one appears in the
 // other. The side editor saves as you type, as the main one does with Auto Save.
+import { lockScrollDirection } from './scroll-lock.js';
 import { EditorState, Annotation } from '@codemirror/state';
 import {
   EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, highlightSpecialChars, drawSelection,
@@ -109,7 +110,10 @@ export async function openToSide(file) {
   path = file;
   dirty = false;
   const state = EditorState.create({ doc: text, extensions: extensions(file) });
-  if (!view) view = new EditorView({ parent: $('side-container'), state });
+  if (!view) {
+    view = new EditorView({ parent: $('side-container'), state });
+    lockScrollDirection(view.scrollDOM);
+  }
   else view.setState(state);
   $('side-editor').hidden = false;
   document.getElementById('editor-row').classList.add('split');

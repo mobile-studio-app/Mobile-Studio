@@ -19,6 +19,7 @@ import { longPressDocs, hideDocsSheet } from './docs.js';
 import { kindOf, ICONS, showBinary, showError, hideViewer } from './viewer.js';
 import { mergeConflicts, mergeInfo } from './conflicts.js';
 import { loadExtensions } from './ext/registry.js';
+import { lockScrollDirection } from './scroll-lock.js';
 import { resetGrammars } from './ext/textmate.js';
 import { loadExtensionTheme, forgetExtensionThemes } from './ext/themes.js';
 import { setSnippetContext, resetSnippets } from './ext/snippets.js';
@@ -176,6 +177,7 @@ const view = new EditorView({
   parent: $('editor-container'),
   state: EditorState.create({ doc: '', extensions: baseExtensions('untitled.txt') }),
 });
+lockScrollDirection(view.scrollDOM);
 
 // Installed VS Code extensions: their grammars, themes and snippets (see ext/).
 async function refreshExtensions() {
