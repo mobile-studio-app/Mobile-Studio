@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive DuoCode on a phone over Wi-Fi (Settings → Developer → Test Automation over Wi-Fi).
+"""Drive Mobile Studio on a phone over Wi-Fi (Settings → Developer → Test Automation over Wi-Fi).
 
   python tools/duo.py pair 192.168.1.20 123456     # once: the address and code from Settings
   python tools/duo.py shot screen.png              # screenshot of the app
@@ -62,7 +62,7 @@ def call(method, path, body=None, raw=False, timeout=120):
             message = payload.decode(errors="replace")
         sys.exit(f"Error {error.code}: {message}")
     except urllib.error.URLError as error:
-        sys.exit(f"Can't reach DuoCode at {host}: {error.reason}. Is the app open with Test Automation on?")
+        sys.exit(f"Can't reach Mobile Studio at {host}: {error.reason}. Is the app open with Test Automation on?")
     return payload if raw else json.loads(payload)
 
 

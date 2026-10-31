@@ -37,7 +37,11 @@ Mobile Studio isn't on the App Store. You install it yourself ("sideloading"), s
 ## Using it
 ### Screens
 - **Portrait** stacks the output above the editor; **landscape** puts them side by side. Swap flips either.
+- **iPad** and wide screens keep the side bar open beside the editor.
 - **iPhone Duo inner display:** each pane gets one half of the screen, with the seam on the hinge.
+
+You can try the layout on different iPhones and iPads in your browser with the
+**[layout simulator](https://mobile-studio-app.github.io/Mobile-Studio/)**.
 
 ### Keyboard shortcuts
 | Keys | Action |

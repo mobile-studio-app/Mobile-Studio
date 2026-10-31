@@ -227,7 +227,7 @@ int dc_zip_extract(const char *zip_path, const char *target_dir, char *error, si
             make_dirs(path, 1);
             continue;
         }
-        if (method != 0 && method != 8) { result = fail(error, error_size, "%s uses a compression DuoCode can't read.", name); break; }
+        if (method != 0 && method != 8) { result = fail(error, error_size, "%s uses a compression Mobile Studio can't read.", name); break; }
 
         uint8_t header[30];
         if (!read_at(fp, local, header, 30) || u32(header) != 0x04034b50) { result = fail(error, error_size, "%s is damaged.", name); break; }

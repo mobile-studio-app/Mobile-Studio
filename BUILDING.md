@@ -37,6 +37,11 @@ scripts/                build and packaging scripts
 project.yml             XcodeGen spec
 ```
 
+## Layout simulator
+`tools/simulator/index.html` is a single-page model of the app's layout on each device, ported
+from the layout code in `App/Shell`. Changes to it on `main` are published to GitHub Pages by
+`.github/workflows/pages.yml`. When the app's layout code changes, update it to match.
+
 ## Runtime plug-ins
 A runtime is an embedded `.framework` that exports one symbol, `duocode_runtime_entry`, and ships
 a `runtime.json` manifest (id, language, files that detect it, priority). The host `dlopen`s it

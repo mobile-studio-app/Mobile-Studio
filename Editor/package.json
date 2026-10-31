@@ -1,7 +1,7 @@
 {
   "name": "duocode-editor",
   "private": true,
-  "description": "CodeMirror 6 editor bundled into App/Resources/Editor for DuoCode's WKWebView",
+  "description": "CodeMirror 6 editor bundled into App/Resources/Editor for Mobile Studio's WKWebView",
   "type": "module",
   "scripts": {
     "docs": "node scripts/build-love-docs.mjs",

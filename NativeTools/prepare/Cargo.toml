@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 license = "MIT"
-description = "Turns a macOS ARM64 program into a library DuoCode can load on iOS, signed with the user's certificate."
+description = "Turns a macOS ARM64 program into a library Mobile Studio can load on iOS, signed with the user's certificate."
 
 [lib]
 name = "duocode_prepare"

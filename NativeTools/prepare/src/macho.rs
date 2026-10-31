@@ -306,7 +306,7 @@ fn dyld_info_binds(data: &mut [u8], start: usize, size: usize, segments: &[Segme
                     offset = offset.wrapping_add(8).wrapping_add(skip);
                 }
             }
-            _ => return fail(format!("It uses a kind of symbol binding DuoCode doesn't know (0x{byte:02x}).")),
+            _ => return fail(format!("It uses a kind of symbol binding Mobile Studio doesn't know (0x{byte:02x}).")),
         }
     }
     Ok(())
@@ -321,7 +321,7 @@ fn chained_binds(data: &mut [u8], start: usize, segments: &[Segment], base: u64,
     let count = u32_at(data, start + 16)? as usize;
     let format = u32_at(data, start + 20)?;
     if u32_at(data, start + 24)? != 0 {
-        return fail("Its symbol names are compressed, which DuoCode can't read.");
+        return fail("Its symbol names are compressed, which Mobile Studio can't read.");
     }
     // The import table: (library ordinal, name) per import, and the weak bit set on each.
     let mut table = Vec::with_capacity(count);
@@ -339,7 +339,7 @@ fn chained_binds(data: &mut [u8], start: usize, segments: &[Segment], base: u64,
                 put64(data, at, value | 0x1_0000);
                 ((value & 0xffff) as u16 as i16 as i64, (value >> 32) as usize, value & 0x1_0000 != 0)
             }
-            _ => return fail(format!("It uses an import format DuoCode doesn't know ({format}).")),
+            _ => return fail(format!("It uses an import format Mobile Studio doesn't know ({format}).")),
         };
         table.push((ordinal, c_string(data, start + symbols_offset + name_offset)?, weak));
     }
@@ -356,7 +356,7 @@ fn chained_binds(data: &mut [u8], start: usize, segments: &[Segment], base: u64,
         let pointer_format = u16_at(data, at + 6)?;
         let page_count = u16_at(data, at + 20)? as usize;
         if pointer_format != 2 && pointer_format != 6 {
-            return fail(format!("It uses a pointer format DuoCode doesn't know ({pointer_format})."));
+            return fail(format!("It uses a pointer format Mobile Studio doesn't know ({pointer_format})."));
         }
         let segment = segments.get(s).ok_or_else(|| Error("A fixup refers to a missing segment.".into()))?;
         for page in 0..page_count {

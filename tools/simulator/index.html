@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>DuoCode Device Simulator</title>
-  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <title>Mobile Studio Layout Simulator</title>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
   <style>
     /*
      * Every size inside #screen is in iOS points (1px = 1pt) and mirrors the constants in
@@ -163,7 +163,7 @@
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 class="text-base font-bold flex items-center gap-2">
-            📱 DuoCode Device Simulator
+            📱 Mobile Studio Layout Simulator
             <span id="deviceBadge" class="text-xs bg-blue-600/30 text-blue-400 border border-blue-500/30 px-2 py-0.5 rounded font-mono"></span>
           </h2>
           <p id="deviceSubtitle" class="text-xs text-[var(--muted-foreground,#a1a1aa)] mt-0.5"></p>
@@ -179,6 +179,9 @@
             <option value="iphone_16e">📱 iPhone 16e (6.1" Notch)</option>
             <option value="iphone_x">📱 iPhone X (5.8" Notch)</option>
             <option value="iphone_se_2">📱 iPhone SE 2 (4.7" Home Button)</option>
+            <option value="ipad_mini">📱 iPad mini (8.3")</option>
+            <option value="ipad">📱 iPad (11")</option>
+            <option value="ipad_pro_13">📱 iPad Pro 13"</option>
           </select>
         </div>
       </div>
@@ -355,6 +358,26 @@
         cutout: null, seBezels: 110,
         safe: { portrait: [20, 0, 0], landscape: [0, 0, 0] },
       },
+      // iPads: the camera is in the bezel (no cutout), and the status bar and home indicator
+      // stay in both orientations. idiom 'pad' keeps them off the Duo's hinge layout.
+      ipad_mini: {
+        name: 'iPad mini (8.3")', idiom: 'pad',
+        subtitle: '8.3" Liquid Retina • A17 Pro • Top button Touch ID',
+        screen: [744, 1133], screenRadius: 22, pad: [30, 30, 30, 30], bezelRadius: 52,
+        cutout: null, safe: { portrait: [24, 20, 0], landscape: [24, 20, 0] },
+      },
+      ipad: {
+        name: 'iPad (11")', idiom: 'pad',
+        subtitle: '11" Liquid Retina • A16 • Top button Touch ID',
+        screen: [820, 1180], screenRadius: 18, pad: [34, 34, 34, 34], bezelRadius: 52,
+        cutout: null, safe: { portrait: [24, 20, 0], landscape: [24, 20, 0] },
+      },
+      ipad_pro_13: {
+        name: 'iPad Pro 13"', idiom: 'pad',
+        subtitle: '13" Ultra Retina XDR • M5 • Face ID in the landscape edge',
+        screen: [1032, 1376], screenRadius: 30, pad: [26, 26, 26, 26], bezelRadius: 56,
+        cutout: null, safe: { portrait: [24, 20, 0], landscape: [24, 20, 0] },
+      },
     };
 
     // Bundled sample project (App/Resources/SampleProjects/hello)
@@ -363,12 +386,12 @@
       'conf.lua':
 `function love.conf(t)
     t.identity = "duocode-hello"
-    t.window.title = "Hello DuoCode"
+    t.window.title = "Hello Mobile Studio"
     t.window.resizable = true
 end
 `,
       'main.lua':
-`-- Sample LÖVE project bundled with DuoCode.
+`-- Sample LÖVE project bundled with Mobile Studio.
 local t = 0
 
 function love.load()
@@ -386,7 +409,7 @@ function love.draw()
     love.graphics.setColor(0.91, 0.29, 0.6)
     love.graphics.circle("fill", w / 2 + math.cos(t) * w / 4, h / 2 + math.sin(t * 1.3) * h / 4, 32)
     love.graphics.setColor(1, 1, 1)
-    love.graphics.print("Edit main.lua in DuoCode and press Run", 12, 12)
+    love.graphics.print("Edit main.lua in Mobile Studio and press Run", 12, 12)
 end
 
 function love.keypressed(key)
@@ -544,7 +567,8 @@ end
 
     function currentLayout() {
       const [w, h] = screenSize();
-      const display = Math.min(w, h) >= 600 ? 'duoInner' : 'phone';
+      // DuoLayoutManager: only an iPhone that wide is the Duo's inner display; iPads aren't.
+      const display = DEVICES[deviceKey].idiom !== 'pad' && Math.min(w, h) >= 600 ? 'duoInner' : 'phone';
       return { display, isVertical: h >= w };
     }
 
@@ -816,7 +840,7 @@ end
       ctx.fillStyle = '#fff';
       ctx.font = '12px "DejaVu Sans", Verdana, sans-serif';
       ctx.textBaseline = 'top';
-      ctx.fillText('Edit main.lua in DuoCode and press Run', 12, 12);
+      ctx.fillText('Edit main.lua in Mobile Studio and press Run', 12, 12);
       if (running) frameHandle = requestAnimationFrame(drawGame);
     }
 
@@ -902,7 +926,7 @@ end
     window.addEventListener('resize', fitToStage);
 
     // Launch state: game idle, editor fills the IDE pane.
-    logLine(`DuoCode ready. Runtimes: [${RUNTIME_IDS.join(', ')}]`);
+    logLine(`Mobile Studio ready. Runtimes: [${RUNTIME_IDS.join(', ')}]`);
     openFile('main.lua');
     renderSidebar();
     updateStatus();
