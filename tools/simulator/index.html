@@ -58,22 +58,23 @@
     #contentArea { position: absolute; overflow: hidden; }
     #idePane { overflow: hidden; background: #1f1f1f; }
 
-    /* LeftActivityRail */
-    #rail { position: absolute; left: 0; top: 0; width: 44px; background: #1f1f21; box-shadow: inset -0.5px 0 0 rgba(255,255,255,0.08); z-index: 3; }
-    .rail-top { position: absolute; top: 8px; left: 0; right: 0; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+    /* VS Code's icon font (App/Resources/Fonts/codicon.ttf, CC BY 4.0: codicon-LICENSE.txt) */
+    @font-face { font-family: codicon; src: url("codicon.ttf") format("truetype"); }
+    .ci { font-family: codicon !important; font-weight: normal; font-style: normal; line-height: 1; }
+
+    /* LeftActivityRail: 36×40 buttons 8 apart, 16 after Run; Accounts, Settings, Welcome at the bottom */
+    #rail { position: absolute; left: 0; top: 0; width: 44px; background: #1f1f21; box-shadow: inset -0.5px 0 0 rgba(255,255,255,0.08); z-index: 3; overflow: hidden; }
+    .rail-top, .rail-bottom { position: absolute; left: 0; right: 0; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+    .rail-top { top: 8px; }
+    .rail-bottom { bottom: 8px; }
     .rail-btn {
-      position: relative; width: 36px; height: 36px; border: 0; background: none;
+      position: relative; width: 36px; height: 40px; border: 0; background: none; flex: none;
       display: flex; align-items: center; justify-content: center;
-      font-size: 19px; color: #858585; cursor: pointer;
+      font-size: 22px; color: #858585; cursor: pointer;
     }
     .rail-btn.active { color: #fff; }
-    .rail-btn.active::before { content: ''; position: absolute; left: -4px; top: 0; width: 2px; height: 36px; background: #fff; }
-    #runBtn {
-      width: 32px; height: 32px; border-radius: 8px; border: 0; margin-bottom: 6px;
-      color: #fff; font-size: 13px; font-weight: 700; cursor: pointer;
-      display: flex; align-items: center; justify-content: center;
-    }
-    #importBtn { position: absolute; bottom: 8px; left: 4px; }
+    .rail-btn.active::before { content: ''; position: absolute; left: -4px; top: 0; width: 2px; height: 40px; background: #fff; }
+    #runBtn { margin-bottom: 8px; }
 
     /* LeftSidebarView */
     #sidebar { background: #242426; box-shadow: inset -0.5px 0 0 rgba(255,255,255,0.08); display: flex; flex-direction: column; z-index: 2; }
@@ -98,11 +99,24 @@
     .section-h { font-size: 12px; color: #8e8e93; padding: 16px 16px 6px; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .result-row { min-height: 44px; display: flex; align-items: center; padding: 0 16px; font: 11px ui-monospace, Menlo, Consolas, monospace; color: #d9d9d9; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .git-btn { height: 28px; border: 0; border-radius: 2px; font-size: 13px; padding: 0 8px; cursor: pointer; white-space: nowrap; }
+    .hint { font-size: 12px; color: #8e8e93; line-height: 1.4; }
+    .tree-h { height: 26px; flex: none; display: flex; align-items: center; gap: 2px; padding: 0 6px; font-size: 11px; font-weight: 700; color: #bfbfbf; text-transform: uppercase; border-top: 0.5px solid rgba(255,255,255,0.08); }
+    .tree-h .ci { font-size: 16px; }
+    .ext-row { display: flex; gap: 10px; padding: 8px 12px; align-items: flex-start; }
+    .ext-icon { width: 40px; height: 40px; flex: none; border-radius: 4px; display: flex; align-items: center; justify-content: center; font: 700 15px -apple-system, "Segoe UI", sans-serif; color: #fff; }
+    .ext-text { flex: 1; min-width: 0; }
+    .ext-name { font-size: 13px; font-weight: 600; color: #e6e6e6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ext-desc { font-size: 11.5px; color: #a6a6a6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ext-pub { font-size: 11px; color: #8e8e93; }
+    .ext-btn { flex: none; align-self: center; border: 0; border-radius: 2px; padding: 3px 8px; font-size: 11px; cursor: pointer; }
 
     #scrim { background: rgba(0,0,0,0.45); z-index: 1; cursor: pointer; }
 
     /* editor.html */
     #editorView { display: flex; flex-direction: column; background: #1e1e1e; }
+    #crumbs { height: 22px; flex: none; display: flex; align-items: center; gap: 4px; padding: 0 12px; font-size: 12px; color: #a6a6a6; white-space: nowrap; overflow: hidden; }
+    #crumbs .ci { font-size: 14px; }
+    #lang { color: #888; margin-right: 6px; }
     #tabbar { height: 32px; flex: none; display: flex; align-items: center; background: #252526; border-bottom: 1px solid #1a1a1a; padding: 0 12px; }
     .tab {
       display: flex; align-items: center; gap: 6px; background: #1e1e1e; border-top: 2px solid #007acc;
@@ -152,12 +166,29 @@
     #statusBackdrop { position: absolute; left: 0; right: 0; bottom: 0; background: #007acc; }
     #statusBar { position: absolute; height: 22px; display: flex; align-items: center; gap: 12px; padding: 0 10px; font: 500 11px ui-monospace, Menlo, Consolas, monospace; color: #fff; }
     #statusLeft { flex: 1; min-width: 0; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+    #interp { position: relative; flex: none; white-space: pre; cursor: pointer; }
+    #interpSelect { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; }
     #statusRight { flex: none; white-space: pre; }
+    #consoleInput { position: absolute; left: 4px; height: 26px; display: none; background: #1e1e1e; color: #ddd; border: 0.5px solid rgba(255,255,255,0.2); border-radius: 4px; padding: 0 8px; font: 12px ui-monospace, Menlo, Consolas, monospace; outline: none; }
+
+    /* WelcomeViewController */
+    #welcome { position: absolute; inset: 0; z-index: 50; background: #1e1e1e; display: none; overflow-y: auto; }
+    #welcome.shown { display: block; }
+    .wl-inner { max-width: 760px; margin: 0 auto; padding: 72px 40px 40px; }
+    .wl-title { font-size: 34px; font-weight: 300; color: #ebebeb; }
+    .wl-sub { font-size: 17px; color: #9d9d9d; margin-top: 4px; }
+    .wl-cols { display: flex; flex-wrap: wrap; gap: 48px; margin-top: 32px; }
+    .wl-col { flex: 1; min-width: 220px; display: flex; flex-direction: column; gap: 6px; }
+    .wl-h { font-size: 19px; color: #ebebeb; margin-bottom: 4px; }
+    .wl-link { display: flex; align-items: center; gap: 8px; color: #3794ff; font-size: 14px; cursor: pointer; padding: 3px 0; background: none; border: 0; text-align: left; }
+    .wl-recent { display: flex; gap: 10px; align-items: baseline; color: #3794ff; font-size: 14px; cursor: pointer; padding: 3px 0; }
+    .wl-recent span { color: #9d9d9d; font-size: 12px; }
+    #toast { position: absolute; left: 50%; bottom: 60px; transform: translateX(-50%); z-index: 90; background: rgba(40,40,44,0.95); color: #eee; font-size: 12px; padding: 8px 12px; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.5); opacity: 0; transition: opacity .25s; pointer-events: none; white-space: nowrap; }
     #homeIndicator { position: absolute; bottom: 8px; left: 50%; width: 134px; height: 5px; margin-left: -67px; border-radius: 3px; background: rgba(255,255,255,0.6); z-index: 60; }
   </style>
 </head>
 <body class="bg-transparent text-[var(--foreground,#fafafa)] antialiased p-3">
-  <div class="bg-[var(--card,#18181b)] text-[var(--foreground,#fafafa)] border border-[var(--border,#27272a)] rounded-2xl p-5 shadow-lg max-w-5xl mx-auto">
+  <div class="bg-[var(--card,#18181b)] text-[var(--foreground,#fafafa)] border border-[var(--border,#27272a)] rounded-2xl p-5 shadow-lg max-w-[1800px] mx-auto">
 
     <div class="flex flex-col gap-4 pb-4 mb-4 border-b border-[var(--border,#27272a)]">
       <div class="flex flex-wrap items-center justify-between gap-3">
@@ -216,9 +247,10 @@
               <div id="idePane" class="anim">
                 <div id="editorView" class="anim">
                   <div id="tabbar">
-                    <div class="tab"><span>📄</span><span id="tabName">main.lua</span><span id="dirtyDot" class="dirty-dot"></span></div>
-                    <span id="pos">Ln 1, Col 1</span>
+                    <div class="tab"><span class="ci" style="font-size:14px">&#xEA7B;</span><span id="tabName">main.lua</span><span id="dirtyDot" class="dirty-dot"></span></div>
+                    <span id="pos"><span id="lang">Lua</span>·  <span id="cursor">Ln 1, Col 1</span></span>
                   </div>
+                  <div id="crumbs"></div>
                   <textarea id="code" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea>
                 </div>
 
@@ -256,16 +288,39 @@
                     <div class="section-h">Changes (0)</div>
                     <div class="section-h">Commits (0)</div>
                   </div>
+                  <div id="panel-debug" class="sb-panel">
+                    <div class="controls">
+                      <button class="git-btn" style="background:#0e639c;color:#fff" onclick="run()">Run and Debug</button>
+                      <div class="hint">Tap left of a line number to add a breakpoint. The program pauses there, and you can step through it and see its variables.</div>
+                    </div>
+                    <div class="tree-h"><span class="ci">&#xEAB6;</span>Variables</div>
+                    <div class="tree-h"><span class="ci">&#xEAB6;</span>Watch</div>
+                    <div class="tree-h"><span class="ci">&#xEAB6;</span>Call Stack</div>
+                    <div class="tree-h"><span class="ci">&#xEAB4;</span>Breakpoints</div>
+                    <div class="file-row" style="color:#ccc"><input type="checkbox"> Uncaught Errors</div>
+                  </div>
+                  <div id="panel-extensions" class="sb-panel">
+                    <div class="controls"><input class="field" placeholder="Search Extensions in Open VSX" autocomplete="off" spellcheck="false"></div>
+                    <div class="tree-h"><span class="ci">&#xEAB4;</span>Installed (0)</div>
+                    <div class="tree-h"><span class="ci">&#xEAB4;</span>Popular</div>
+                    <div id="extList"></div>
+                  </div>
                 </div>
 
                 <div id="rail" class="anim">
                   <div class="rail-top">
-                    <button id="runBtn" onclick="running ? stopGame() : run()"></button>
-                    <button class="rail-btn" data-tab="files" onclick="toggleSidebar('files')" title="Explorer">⧉</button>
-                    <button class="rail-btn" data-tab="search" onclick="toggleSidebar('search')" title="Search">⌕</button>
-                    <button class="rail-btn" data-tab="git" onclick="toggleSidebar('git')" title="Source Control">⑂</button>
+                    <button id="runBtn" class="rail-btn ci" onclick="running ? stopGame() : run()"></button>
+                    <button class="rail-btn ci" data-tab="files" onclick="toggleSidebar('files')" title="Explorer">&#xEAF0;</button>
+                    <button class="rail-btn ci" data-tab="search" onclick="toggleSidebar('search')" title="Search">&#xEA6D;</button>
+                    <button class="rail-btn ci" data-tab="git" onclick="toggleSidebar('git')" title="Source Control">&#xEA68;</button>
+                    <button class="rail-btn ci" data-tab="debug" onclick="toggleSidebar('debug')" title="Run and Debug">&#xEB91;</button>
+                    <button class="rail-btn ci" data-tab="extensions" onclick="toggleSidebar('extensions')" title="Extensions">&#xEAE6;</button>
                   </div>
-                  <button id="importBtn" class="rail-btn" onclick="logLine('(document picker: import .love archive)')" title="Import .love">⤓</button>
+                  <div class="rail-bottom">
+                    <button class="rail-btn ci" onclick="toast('Accounts: Sign in with GitHub to use Source Control')" title="Accounts">&#xEB99;</button>
+                    <button class="rail-btn ci" onclick="toast('Settings opens as a sheet over the IDE')" title="Settings">&#xEB51;</button>
+                    <button class="rail-btn ci" onclick="showWelcome(true)" title="Welcome">&#xEB06;</button>
+                  </div>
                 </div>
               </div>
 
@@ -282,11 +337,32 @@
                   <button id="barStop" class="bar-btn" onclick="stopGame()" title="Stop">■</button>
                 </div>
                 <pre id="console" class="anim"></pre>
+                <input id="consoleInput" placeholder="Input for the program" autocomplete="off" spellcheck="false">
               </div>
             </div>
 
             <div id="statusBackdrop"></div>
-            <div id="statusBar"><span id="statusLeft"></span><span id="statusRight"></span></div>
+            <div id="statusBar"><span id="statusLeft"></span><label id="interp" title="Select Interpreter"><span id="interpText"></span><select id="interpSelect" onchange="chooseInterpreter(this.value)"></select></label><span id="statusRight"></span></div>
+            <div id="welcome">
+              <div class="wl-inner">
+                <div class="wl-title">Mobile Studio</div>
+                <div class="wl-sub">Write, run and debug code on your phone</div>
+                <div class="wl-cols">
+                  <div class="wl-col">
+                    <div class="wl-h">Start</div>
+                    <button class="wl-link" onclick="toast('New Project: name it, then pick a template')">＋ New Project…</button>
+                    <button class="wl-link" onclick="toast('Clone Git Repository: paste a GitHub URL')">⤓ Clone Git Repository…</button>
+                    <button class="wl-link" onclick="toast('Import .love File: opens the Files picker')">⇩ Import .love File…</button>
+                    <button class="wl-link" style="margin-top:10px" onclick="toast('Sign in to GitHub with a device code')">◯ Sign in to GitHub…</button>
+                  </div>
+                  <div class="wl-col">
+                    <div class="wl-h">Recent</div>
+                    <div id="recentList"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div id="toast"></div>
             <div id="homeIndicator"></div>
 
             <div id="sysStatus"><span>9:41</span><span>●●● ▮</span></div>
@@ -380,17 +456,18 @@
       },
     };
 
-    // Bundled sample project (App/Resources/SampleProjects/hello)
-    const PROJECT_NAME = 'hello';
-    const files = {
-      'conf.lua':
+    // Sample projects: the bundled LÖVE one (App/Resources/SampleProjects/hello), and one each
+    // for the console runtimes. `output` is what running it prints.
+    const PROJECTS = {
+      hello: { files: {
+        'conf.lua':
 `function love.conf(t)
     t.identity = "duocode-hello"
     t.window.title = "Hello Mobile Studio"
     t.window.resizable = true
 end
 `,
-      'main.lua':
+        'main.lua':
 `-- Sample LÖVE project bundled with Mobile Studio.
 local t = 0
 
@@ -416,11 +493,53 @@ function love.keypressed(key)
     print("keypressed", key)
 end
 `,
+      } },
+      'hello-python': { files: {
+        'main.py':
+`# A Python program: its output goes to the console under the editor.
+import sys
+
+
+def greet(name):
+    return f"Hello, {name}!"
+
+
+print(greet("Mobile Studio"))
+print("Python", sys.version.split()[0])
+for i in range(3):
+    print("tick", i)
+`,
+      }, output: ['Hello, Mobile Studio!', 'Python 3.14.8', 'tick 0', 'tick 1', 'tick 2'] },
+      'hello-js': { files: {
+        'main.js':
+`// A JavaScript program, run by Node.js: its output goes to the console.
+const greet = (name) => \`Hello, \${name}!\`;
+
+console.log(greet('Mobile Studio'));
+console.log('Node.js', process.version);
+setTimeout(() => console.log('done'), 500);
+`,
+      }, output: ['Hello, Mobile Studio!', 'Node.js v18.20.4', 'done'] },
     };
-    // RuntimeManager.resolve(): no settings.json or t.version, so the highest-priority
-    // runtime whose detect files exist wins: love-12.0 (priority 20).
-    const RUNTIME = { id: 'love-12.0', displayName: 'LÖVE 12.0', version: '12.0.0' };
-    const RUNTIME_IDS = ['love-12.0', 'love-11.5', 'demo'];
+    let PROJECT_NAME = 'hello';
+    let files = PROJECTS.hello.files;
+
+    // Runtimes/*/runtime.json: the selectable ones, as the status bar's interpreter menu lists them.
+    const RUNTIMES = [
+      { id: 'love-12.0', name: 'LÖVE 12.0', console: false, available: true, detect: 'main.lua', priority: 20, version: '12.0.0' },
+      { id: 'love-11.5', name: 'LÖVE 11.5', console: false, available: false, detect: 'main.lua', priority: 10 },
+      { id: 'lua-5.4', name: 'Lua 5.4', console: true, available: true, detect: 'main.lua', priority: 5 },
+      { id: 'python-3.14', name: 'Python 3.14', console: true, available: true, detect: 'main.py', priority: 4 },
+      { id: 'node-18', name: 'JavaScript (Node.js 18)', console: true, available: true, detect: 'main.js', priority: 3 },
+    ];
+    const chosenRuntime = {};   // project -> runtime id (.duocode/settings.json); unset: detect
+
+    /** RuntimeManager.resolve(for:): the chosen runtime, else the highest priority one whose detect file exists. */
+    function resolveRuntime() {
+      const chosen = RUNTIMES.find((r) => r.id === chosenRuntime[PROJECT_NAME]);
+      if (chosen) return chosen;
+      return RUNTIMES.filter((r) => files[r.detect] !== undefined).sort((a, b) => b.priority - a.priority)[0] || null;
+    }
 
     // Constants from the Swift sources
     const RAIL_WIDTH = 44;                    // LeftActivityRail.width
@@ -444,6 +563,7 @@ end
     let isGameMaximized = false;
     let screensSwapped = false;
     let isConsoleVisible = true;
+    let showsGamePane = true;   // GameStageView.showsGamePane: false while a console program runs
     let isSidebarOpen = true;
     let isSidebarDocked = null;
     let sidebarTab = 'files';
@@ -555,8 +675,10 @@ end
     function fitToStage() {
       const bezel = $('bezel');
       const bw = bezel.offsetWidth, bh = bezel.offsetHeight;
-      const availW = $('stage').clientWidth;
-      const availH = Math.max(420, Math.min(760, window.innerHeight - 40));
+      const stage = $('stage');
+      const availW = stage.clientWidth;
+      // The room below the header, however big the window (full screen included).
+      const availH = Math.max(320, window.innerHeight - stage.getBoundingClientRect().top - 24);
       const s = Math.min(1, availW / bw, availH / bh);
       bezel.style.transform = `scale(${s})`;
       $('fit').style.width = bw * s + 'px';
@@ -671,23 +793,34 @@ end
 
     function layoutGameStage(w, h) {
       const available = Math.max(0, h - BAR_HEIGHT);
-      const gameH = isConsoleVisible ? Math.max(0, Math.min(available - MIN_CONSOLE, w * GAME_ASPECT)) : available;
+      const gameH = !showsGamePane ? 0
+        : isConsoleVisible ? Math.max(0, Math.min(available - MIN_CONSOLE, w * GAME_ASPECT)) : available;
+      $('gamePane').style.display = showsGamePane ? 'block' : 'none';
       place($('gamePane'), 0, 0, w, gameH);
       place($('controlBar'), 0, gameH, w, BAR_HEIGHT);
       const consoleTop = gameH + BAR_HEIGHT;
-      place($('console'), 0, consoleTop, w, h - consoleTop);
-      $('console').style.opacity = isConsoleVisible ? 1 : 0;
+      // A running console program takes input on a line under its output.
+      const acceptsInput = running && !showsGamePane;
+      const inputH = acceptsInput ? 34 : 0;
+      place($('console'), 0, consoleTop, w, h - consoleTop - inputH);
+      $('console').style.opacity = (isConsoleVisible || !showsGamePane) ? 1 : 0;
+      const input = $('consoleInput');
+      input.style.display = acceptsInput ? 'block' : 'none';
+      place(input, 4, h - inputH + 4, w - 8, 26);
     }
 
     function updateStatus() {
       const jit = jitAttached ? 'JIT' : 'Interp';
-      $('statusLeft').textContent = running ? `● Running  ${PROJECT_NAME} · ${RUNTIME.displayName}` : `○ Idle  ${PROJECT_NAME}`;
+      const runtime = resolveRuntime();
+      $('statusLeft').textContent = running ? `● Running  ${PROJECT_NAME} · ${runningName}` : `○ Idle  ${PROJECT_NAME}`;
+      $('interpText').textContent = `{ } ${runtime ? runtime.name : 'No interpreter'}`;
       $('statusRight').textContent = `Focus: ${gameFocused ? 'Game' : 'Editor'}  LuaJIT: ${jit}`;
       $('gamePane').classList.toggle('focused', gameFocused);
 
+      // LeftActivityRail.setRunning: a green play icon, or a red stop icon.
       const runBtn = $('runBtn');
-      runBtn.textContent = running ? '■' : '▶︎';
-      runBtn.style.background = running ? 'rgb(217,56,64)' : 'rgb(26,158,77)';
+      runBtn.innerHTML = running ? '&#xEAD7;' : '&#xEB2C;';
+      runBtn.style.color = running ? '#F48771' : '#89D185';
       runBtn.title = running ? 'Stop' : 'Run';
 
       $('barConsole').classList.toggle('on', isConsoleVisible);
@@ -695,7 +828,7 @@ end
       $('barSwap').style.display = isGameMaximized ? 'none' : 'flex';
 
       const btn = $('btnGame');
-      btn.textContent = running ? 'Game: Running ▶' : 'Game: Stopped ■';
+      btn.textContent = running ? 'Running ▶' : 'Stopped ■';
       btn.className = 'px-3 py-1 font-medium rounded-md text-white shadow-sm transition ' + (running ? 'bg-emerald-700' : 'bg-zinc-700');
     }
 
@@ -722,11 +855,12 @@ end
     function renderSidebar() {
       document.querySelectorAll('.rail-btn[data-tab]').forEach(b =>
         b.classList.toggle('active', isSidebarOpen && b.dataset.tab === sidebarTab));
-      ['files', 'search', 'git'].forEach(t => $('panel-' + t).classList.toggle('shown', t === sidebarTab));
-      const titles = { files: 'EXPLORER: ' + PROJECT_NAME.toUpperCase(), search: 'SEARCH', git: 'SOURCE CONTROL' };
-      const actions = { files: ['＋', '↻'], search: ['↻'], git: ['↻', '⋯'] };
+      ['files', 'search', 'git', 'debug', 'extensions'].forEach(t => $('panel-' + t).classList.toggle('shown', t === sidebarTab));
+      const titles = { files: 'EXPLORER: ' + PROJECT_NAME.toUpperCase(), search: 'SEARCH', git: 'SOURCE CONTROL', debug: 'RUN AND DEBUG', extensions: 'EXTENSIONS' };
+      // Codicons: new file, refresh, ellipsis, filter, clear all
+      const actions = { files: ['EA7F', 'EB37', 'EA7C'], search: ['EB37'], git: ['EB37', 'EA7C'], debug: [], extensions: ['EAF1', 'EB37', 'EABF'] };
       $('sbTitle').textContent = titles[sidebarTab];
-      $('sbActions').innerHTML = actions[sidebarTab].map(a => `<button>${a}</button>`).join('');
+      $('sbActions').innerHTML = actions[sidebarTab].map(a => `<button class="ci" style="font-size:16px">&#x${a};</button>`).join('');
       $('panel-files').innerHTML = Object.keys(files).sort().map(f =>
         `<div class="file-row${f === currentFile ? ' active' : ''}" onclick="selectFile('${f}')"><span class="file-icon">&lt;/&gt;</span>  ${f}</div>`).join('');
     }
@@ -780,6 +914,9 @@ end
       dirty = false;
       $('dirtyDot').style.display = 'none';
       $('tabName').textContent = path;
+      const ext = path.split('.').pop();
+      $('lang').textContent = { lua: 'Lua', py: 'Python', js: 'JavaScript' }[ext] || 'Plain Text';
+      $('crumbs').innerHTML = `<span class="ci">&#xEA7B;</span>${path}`;
       updateCursorPos();
     }
 
@@ -798,7 +935,7 @@ end
     function updateCursorPos() {
       const code = $('code');
       const lines = code.value.substring(0, code.selectionStart).split('\n');
-      $('pos').textContent = `Ln ${lines.length}, Col ${lines[lines.length - 1].length + 1}`;
+      $('cursor').textContent = `Ln ${lines.length}, Col ${lines[lines.length - 1].length + 1}`;
     }
 
     function saveAll() {
@@ -844,33 +981,145 @@ end
       if (running) frameHandle = requestAnimationFrame(drawGame);
     }
 
+    let runningName = '';
+    let programTimers = [];
+
     function run() {
       if (running) { restartGame(); return; }
       saveAll();
-      logLine(`▶ Running ${PROJECT_NAME} with ${RUNTIME.displayName}`);
-      if (!runtimeInitialised) {
-        logLine(`[rt] ${RUNTIME.displayName} initialized`);
-        runtimeInitialised = true;
+      const rt = resolveRuntime();
+      if (!rt) { logLine('No runtime available.'); return; }
+      showsGamePane = !rt.console;
+      if (!rt.available) {
+        logLine(`${rt.name} isn't bundled in this build yet. Pick another interpreter from the status bar.`);
+        layoutPanes();
+        return;
       }
+      if (files[rt.detect] === undefined) {
+        logLine(`${rt.name} runs ${rt.detect}, and ${PROJECT_NAME} has none.`);
+        return;
+      }
+      logLine(`▶ Running ${PROJECT_NAME} with ${rt.name}`);
       running = true;
-      gameFocused = true;
-      $('barTitleText').textContent = `${PROJECT_NAME} · ${RUNTIME.displayName}`;
-      logLine(`Hello from LÖVE ${RUNTIME.version}`);
-      logLine(`LuaJIT: LuaJIT 2.1  JIT on: ${jitAttached}`);
-      gameT = 0; lastFrame = 0;
-      frameHandle = requestAnimationFrame(drawGame);
+      runningName = rt.name;
+      $('barTitleText').textContent = `${PROJECT_NAME} · ${rt.name}`;
+      if (rt.console) {
+        // A console program: no game pane; it prints, then exits.
+        gameFocused = false;
+        const lines = programOutput(rt);
+        lines.forEach((line, i) => programTimers.push(setTimeout(() => logLine(line), 250 + i * 250)));
+        programTimers.push(setTimeout(() => finishProgram(lines.error ? 1 : 0), 400 + lines.length * 250));
+      } else {
+        if (!runtimeInitialised) {
+          logLine(`[rt] ${rt.name} initialized`);
+          runtimeInitialised = true;
+        }
+        gameFocused = true;
+        logLine(`Hello from LÖVE ${rt.version}`);
+        logLine(`LuaJIT: LuaJIT 2.1  JIT on: ${jitAttached}`);
+        gameT = 0; lastFrame = 0;
+        frameHandle = requestAnimationFrame(drawGame);
+      }
+      updateStatus();
+      layoutPanes();
+    }
+
+    /** What a console program prints (Lua 5.4 running the LÖVE sample has no `love`). */
+    function programOutput(rt) {
+      if (PROJECTS[PROJECT_NAME].output && files[rt.detect] !== undefined && rt.id !== 'lua-5.4') return PROJECTS[PROJECT_NAME].output.slice();
+      const source = files[rt.detect] || '';
+      const at = source.split('\n').findIndex((l) => /\blove\./.test(l));
+      if (at >= 0) {
+        const out = [`lua: ${rt.detect}:${at + 1}: attempt to index a nil value (global 'love')`];
+        out.error = true;
+        return out;
+      }
+      return [];
+    }
+
+    function finishProgram(code) {
+      if (!running) return;
+      logLine(`[rt] Program exited with code ${code}`);
+      running = false;
+      programTimers = [];
       updateStatus();
       layoutPanes();
     }
 
     function stopGame() {
-      if (running) logLine('[rt] Game exited with code 0');
+      programTimers.forEach(clearTimeout);
+      programTimers = [];
+      if (running) logLine(showsGamePane ? '[rt] Game exited with code 0' : 'Stopped.');
       running = false;
       cancelAnimationFrame(frameHandle);
       gameFocused = false;
       isGameMaximized = false;
       updateStatus();
       layoutPanes();
+    }
+
+    // --- Interpreter menu, Welcome page, projects ---------------------------
+
+    function renderInterpreters() {
+      const chosen = chosenRuntime[PROJECT_NAME] || '';
+      $('interpSelect').innerHTML = RUNTIMES.map((r) =>
+        `<option value="${r.id}"${r.available ? '' : ' disabled'}${chosen === r.id ? ' selected' : ''}>${r.name}${r.available ? (r.console ? ' (console program)' : ' (game)') : ' (coming soon)'}</option>`).join('')
+        + `<option value=""${chosen ? '' : ' selected'}>Detect from Project Files</option>`;
+    }
+
+    function chooseInterpreter(id) {
+      if (id) chosenRuntime[PROJECT_NAME] = id; else delete chosenRuntime[PROJECT_NAME];
+      const name = resolveRuntime()?.name || '?';
+      logLine(running ? `Interpreter set to ${name}; it's used from the next run.` : `Interpreter set to ${name}.`);
+      renderInterpreters();
+      updateStatus();
+    }
+
+    function openProject(name) {
+      if (running) stopGame();
+      if (dirty) files[currentFile] = $('code').value;
+      PROJECT_NAME = name;
+      files = PROJECTS[name].files;
+      showsGamePane = !(resolveRuntime()?.console);
+      openFile(Object.keys(files).find((f) => f.startsWith('main.')) || Object.keys(files)[0]);
+      showWelcome(false);
+      renderInterpreters();
+      renderSidebar();
+      updateStatus();
+      layoutPanes();
+    }
+
+    function showWelcome(shown) {
+      $('welcome').classList.toggle('shown', shown);
+      $('recentList').innerHTML = Object.keys(PROJECTS).map((name) =>
+        `<div class="wl-recent" onclick="openProject('${name}')">${name}<span>~/Projects/${name}</span></div>`).join('');
+    }
+
+    let toastTimer = 0;
+    function toast(text) {
+      const el = $('toast');
+      el.textContent = text;
+      el.style.opacity = 1;
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { el.style.opacity = 0; }, 2200);
+    }
+
+    // Extensions panel: what Open VSX's popular list looks like, with DuoCode's compatibility labels.
+    const EXTENSIONS = [
+      { name: 'Python', pub: 'ms-python', desc: 'Python language support', color: '#3572A5', initials: 'Py', level: 'partial' },
+      { name: 'Prettier - Code formatter', pub: 'esbenp', desc: 'Code formatter using prettier', color: '#56B3B4', initials: 'P', level: 'full' },
+      { name: 'Lua', pub: 'sumneko', desc: 'Lua language server', color: '#000080', initials: 'Lua', level: 'partial' },
+      { name: 'One Dark Pro', pub: 'zhuangtongfa', desc: "Atom's iconic One Dark theme", color: '#282c34', initials: '1D', level: 'full' },
+      { name: 'Ruff', pub: 'charliermarsh', desc: 'Linter and formatter for Python', color: '#d7ff64', initials: 'R', level: 'partial' },
+    ];
+    function renderExtensions() {
+      $('extList').innerHTML = EXTENSIONS.map((e) => `
+        <div class="ext-row">
+          <div class="ext-icon" style="background:${e.color}">${e.initials}</div>
+          <div class="ext-text"><div class="ext-name">${e.name}</div><div class="ext-desc">${e.desc}</div><div class="ext-pub">${e.pub}</div></div>
+          <button class="ext-btn" style="${e.level === 'partial' ? 'background:#cca700;color:#1e1e1e' : 'background:#0e639c;color:#fff'}"
+            title="${e.level === 'partial' ? 'Partly supported' : 'Works in Mobile Studio'}" onclick="toast('Installs from Open VSX')">Install</button>
+        </div>`).join('');
     }
 
     function restartGame() {
@@ -926,8 +1175,10 @@ end
     window.addEventListener('resize', fitToStage);
 
     // Launch state: game idle, editor fills the IDE pane.
-    logLine(`Mobile Studio ready. Runtimes: [${RUNTIME_IDS.join(', ')}]`);
+    logLine(`Mobile Studio ready. Runtimes: [${RUNTIMES.map((r) => r.id).join(', ')}]`);
     openFile('main.lua');
+    renderInterpreters();
+    renderExtensions();
     renderSidebar();
     updateStatus();
     selectDevice('duo_unfolded');
