@@ -1,0 +1,11 @@
+{
+  "id": "love-12.0",
+  "displayName": "LÖVE 12.0",
+  "abi": 2,
+  "language": "lua",
+  "detect": [
+    "main.lua"
+  ],
+  "priority": 20,
+  "kind": "game"
+}

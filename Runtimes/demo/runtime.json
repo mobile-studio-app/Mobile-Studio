@@ -1,0 +1,9 @@
+{
+  "id": "demo",
+  "displayName": "Demo Runtime",
+  "abi": 2,
+  "language": "none",
+  "detect": [],
+  "priority": 0,
+  "kind": "demo"
+}

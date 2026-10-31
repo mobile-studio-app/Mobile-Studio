@@ -1,0 +1,35 @@
+{
+  "name": "duocode-editor",
+  "private": true,
+  "description": "CodeMirror 6 editor bundled into App/Resources/Editor for DuoCode's WKWebView",
+  "type": "module",
+  "scripts": {
+    "docs": "node scripts/build-love-docs.mjs",
+    "build": "esbuild src/ext/node-host.js --bundle --minify --platform=node --format=cjs --target=node18 --outfile=../App/Resources/Editor/node-host.js && esbuild src/ext/worker.js --bundle --minify --format=iife --target=safari16 --outfile=build/ext-worker.txt && esbuild src/main.js --bundle --minify --format=iife --target=safari16 --loader:.wasm=binary --loader:.txt=text --outfile=../App/Resources/Editor/editor.bundle.js"
+  },
+  "dependencies": {
+    "@codemirror/autocomplete": "6.20.4",
+    "@codemirror/commands": "6.11.1",
+    "@codemirror/lang-cpp": "6.0.3",
+    "@codemirror/lang-css": "6.3.1",
+    "@codemirror/lang-html": "6.4.9",
+    "@codemirror/lang-javascript": "6.2.4",
+    "@codemirror/lang-json": "6.0.2",
+    "@codemirror/lang-markdown": "6.5.2",
+    "@codemirror/lang-python": "6.2.1",
+    "@codemirror/language": "6.13.1",
+    "@codemirror/legacy-modes": "6.5.5",
+    "@codemirror/lint": "6.9.7",
+    "@codemirror/merge": "6.12.2",
+    "@codemirror/search": "6.7.2",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.15",
+    "@lezer/highlight": "1.2.5",
+    "luaparse": "0.3.1",
+    "vscode-oniguruma": "2.0.1",
+    "vscode-textmate": "9.3.2"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

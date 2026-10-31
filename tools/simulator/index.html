@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DuoCode Device Simulator</title>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    /*
+     * Every size inside #screen is in iOS points (1px = 1pt) and mirrors the constants in
+     * App/Shell/*.swift and App/Resources/Editor/editor.html. The layout functions below are
+     * ports of IDEViewController.layoutPanes / layoutIDEPane and GameStageView.layoutSubviews.
+     * The whole device is then scaled down to fit the stage.
+     */
+    * { box-sizing: border-box; }
+
+    #stage { display: flex; justify-content: center; align-items: flex-start; overflow: hidden; padding: 8px 0; }
+    #fit { position: relative; flex: none; }
+
+    #bezel {
+      position: absolute; top: 0; left: 0;
+      transform-origin: 0 0;
+      display: flex; align-items: center;
+      background: #0b0b0d;
+      box-shadow: 0 25px 60px -15px rgba(0,0,0,0.85), 0 0 0 1px rgba(255,255,255,0.12);
+    }
+
+    /* iPhone SE 2 forehead / chin */
+    .se-part { display: none; flex: none; position: relative; align-items: center; justify-content: center; }
+    .earpiece { width: 70px; height: 6px; border-radius: 3px; background: #2a2a2e; box-shadow: inset 0 1px 2px rgba(0,0,0,0.9); }
+    .se-camera { position: absolute; width: 12px; height: 12px; border-radius: 6px; background: #0c1824; border: 1px solid #1e293b; box-shadow: inset 0 0 2px #38bdf8; }
+    .home-button {
+      width: 70px; height: 70px; border-radius: 35px; background: #111113;
+      border: 2px solid #2e2e34; box-shadow: inset 0 2px 4px rgba(0,0,0,0.8);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .home-button::after { content: ''; width: 58px; height: 58px; border-radius: 29px; border: 1px solid rgba(255,255,255,0.12); }
+
+    #screen {
+      position: relative; flex: none; overflow: hidden;
+      background: #141414; /* IDEViewController view: white 0.08 */
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #ccc; user-select: none; -webkit-user-select: none;
+    }
+
+    .cutout { position: absolute; background: #000; z-index: 80; display: none; }
+
+    #sysStatus {
+      position: absolute; left: 0; right: 0; top: 0; z-index: 70; pointer-events: none;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 32px; color: #fff; font: 600 16px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    /* Animated frames: the Swift side animates the same frames with a spring. */
+    .anim { position: absolute; transition: left .4s cubic-bezier(.2,.9,.3,1), top .4s cubic-bezier(.2,.9,.3,1),
+            width .4s cubic-bezier(.2,.9,.3,1), height .4s cubic-bezier(.2,.9,.3,1), opacity .3s ease; }
+
+    #contentArea { position: absolute; overflow: hidden; }
+    #idePane { overflow: hidden; background: #1f1f1f; }
+
+    /* LeftActivityRail */
+    #rail { position: absolute; left: 0; top: 0; width: 44px; background: #1f1f21; box-shadow: inset -0.5px 0 0 rgba(255,255,255,0.08); z-index: 3; }
+    .rail-top { position: absolute; top: 8px; left: 0; right: 0; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+    .rail-btn {
+      position: relative; width: 36px; height: 36px; border: 0; background: none;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 19px; color: #858585; cursor: pointer;
+    }
+    .rail-btn.active { color: #fff; }
+    .rail-btn.active::before { content: ''; position: absolute; left: -4px; top: 0; width: 2px; height: 36px; background: #fff; }
+    #runBtn {
+      width: 32px; height: 32px; border-radius: 8px; border: 0; margin-bottom: 6px;
+      color: #fff; font-size: 13px; font-weight: 700; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+    }
+    #importBtn { position: absolute; bottom: 8px; left: 4px; }
+
+    /* LeftSidebarView */
+    #sidebar { background: #242426; box-shadow: inset -0.5px 0 0 rgba(255,255,255,0.08); display: flex; flex-direction: column; z-index: 2; }
+    #sidebar.overlay { box-shadow: 4px 0 16px rgba(0,0,0,0.5); }
+    .sb-header { height: 38px; flex: none; background: #1c1c1c; display: flex; align-items: center; justify-content: space-between; padding: 0 8px 0 12px; }
+    .sb-title { font-size: 11px; font-weight: 700; color: #bfbfbf; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .sb-actions { display: flex; gap: 8px; flex: none; }
+    .sb-actions button { font-size: 14px; font-weight: 600; color: #bfbfbf; background: none; border: 0; cursor: pointer; padding: 0 2px; }
+    .sb-panel { flex: 1; overflow-y: auto; display: none; flex-direction: column; min-height: 0; }
+    .sb-panel.shown { display: flex; }
+    .file-row { height: 28px; flex: none; display: flex; align-items: center; gap: 4px; padding: 0 16px; font-size: 12px; color: #e0e0e0; cursor: pointer; white-space: nowrap; }
+    .file-row.active { background: #38383d; }
+    .file-icon { color: #3399ff; font: 700 11px ui-monospace, Menlo, Consolas, monospace; width: 18px; }
+    .controls { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; flex: none; }
+    .field {
+      height: 28px; width: 100%; min-width: 0; background: #333; color: #fff; font-size: 12px;
+      border: 0.5px solid rgba(255,255,255,0.15); border-radius: 2px; padding: 0 8px; outline: none;
+    }
+    .pills { display: flex; gap: 6px; height: 24px; }
+    .pill { flex: 1; font: 700 11px ui-monospace, Menlo, Consolas, monospace; color: #999; background: #383838; border: 0.5px solid rgba(255,255,255,0.15); border-radius: 2px; cursor: pointer; }
+    .pill.on { color: #fff; background: #0d73cc; }
+    .section-h { font-size: 12px; color: #8e8e93; padding: 16px 16px 6px; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .result-row { min-height: 44px; display: flex; align-items: center; padding: 0 16px; font: 11px ui-monospace, Menlo, Consolas, monospace; color: #d9d9d9; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .git-btn { height: 28px; border: 0; border-radius: 2px; font-size: 13px; padding: 0 8px; cursor: pointer; white-space: nowrap; }
+
+    #scrim { background: rgba(0,0,0,0.45); z-index: 1; cursor: pointer; }
+
+    /* editor.html */
+    #editorView { display: flex; flex-direction: column; background: #1e1e1e; }
+    #tabbar { height: 32px; flex: none; display: flex; align-items: center; background: #252526; border-bottom: 1px solid #1a1a1a; padding: 0 12px; }
+    .tab {
+      display: flex; align-items: center; gap: 6px; background: #1e1e1e; border-top: 2px solid #007acc;
+      padding: 6px 12px; font: 12px ui-monospace, Menlo, Consolas, monospace; color: #fff; border-radius: 2px 2px 0 0; white-space: nowrap;
+    }
+    .dirty-dot { display: none; width: 6px; height: 6px; background: #007acc; border-radius: 50%; }
+    #pos { margin-left: auto; font: 11px ui-monospace, Menlo, Consolas, monospace; color: #888; white-space: nowrap; }
+    #editorView.narrow #pos { display: none; }
+    #editorView.narrow #tabbar { padding: 0 6px; }
+    #code {
+      flex: 1; width: 100%; min-height: 0; border: 0; margin: 0; resize: none; outline: none;
+      background: #1e1e1e; color: #d4d4d4; font: 13px/1.5 ui-monospace, Menlo, Consolas, monospace;
+      padding: 8px 12px; tab-size: 4; white-space: pre; overflow: auto; user-select: text; -webkit-user-select: text;
+    }
+
+    /* PaneSeparatorView */
+    #seam { background: #333; }
+    #seam.hinge { background: #080808; }
+    #seam i { position: absolute; display: none; background: rgba(255,255,255,0.08); }
+    #seam.hinge i { display: block; }
+
+    /* GameStageView */
+    #gameStage { background: #000; overflow: hidden; }
+    #gamePane { position: absolute; left: 0; top: 0; background: #000; border: 1px solid rgba(255,255,255,0.1); overflow: hidden; cursor: pointer; }
+    #gamePane.focused { border-color: #0a84ff; }
+    #gameCanvas { display: block; width: 100%; height: 100%; object-fit: contain; }
+    #controlBar {
+      position: absolute; left: 0; height: 36px; display: flex; align-items: center; gap: 8px; padding: 0 4px 0 10px;
+      background: rgba(30,30,32,0.82); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+      box-shadow: inset 0 0.5px 0 rgba(255,255,255,0.12);
+    }
+    #barTitle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; color: #e6e6e6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #barTitle i { width: 7px; height: 7px; border-radius: 3.5px; background: #33d973; flex: none; }
+    .bar-btn {
+      width: 28px; height: 28px; border-radius: 14px; border: 0; flex: none;
+      background: rgba(255,255,255,0.1); color: #d9d9d9; font-size: 13px; font-weight: 700; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .bar-btn.on { color: #59bfff; }
+    #barStop { background: rgba(217,56,64,0.95); color: #fff; }
+    #console {
+      position: absolute; left: 0; background: #121212; color: #d9d9d9; font: 11px/1.35 ui-monospace, Menlo, Consolas, monospace;
+      padding: 6px 11px; margin: 0; white-space: pre-wrap; word-break: break-word; overflow-y: auto; user-select: text;
+    }
+
+    /* Status bar */
+    #statusBackdrop { position: absolute; left: 0; right: 0; bottom: 0; background: #007acc; }
+    #statusBar { position: absolute; height: 22px; display: flex; align-items: center; gap: 12px; padding: 0 10px; font: 500 11px ui-monospace, Menlo, Consolas, monospace; color: #fff; }
+    #statusLeft { flex: 1; min-width: 0; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+    #statusRight { flex: none; white-space: pre; }
+    #homeIndicator { position: absolute; bottom: 8px; left: 50%; width: 134px; height: 5px; margin-left: -67px; border-radius: 3px; background: rgba(255,255,255,0.6); z-index: 60; }
+  </style>
+</head>
+<body class="bg-transparent text-[var(--foreground,#fafafa)] antialiased p-3">
+  <div class="bg-[var(--card,#18181b)] text-[var(--foreground,#fafafa)] border border-[var(--border,#27272a)] rounded-2xl p-5 shadow-lg max-w-5xl mx-auto">
+
+    <div class="flex flex-col gap-4 pb-4 mb-4 border-b border-[var(--border,#27272a)]">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 class="text-base font-bold flex items-center gap-2">
+            📱 DuoCode Device Simulator
+            <span id="deviceBadge" class="text-xs bg-blue-600/30 text-blue-400 border border-blue-500/30 px-2 py-0.5 rounded font-mono"></span>
+          </h2>
+          <p id="deviceSubtitle" class="text-xs text-[var(--muted-foreground,#a1a1aa)] mt-0.5"></p>
+        </div>
+        <div class="flex items-center gap-2">
+          <label for="deviceSelect" class="text-xs font-semibold text-zinc-400">Device:</label>
+          <select id="deviceSelect" onchange="selectDevice(this.value)" class="bg-[#1f1f23] text-white text-xs border border-zinc-700 rounded-lg px-3 py-1.5 focus:outline-none focus:border-blue-500 cursor-pointer">
+            <option value="duo_unfolded" selected>📱 iPhone Duo Unfolded (7.6")</option>
+            <option value="duo_folded">📱 iPhone Duo Folded (5.4")</option>
+            <option value="iphone_18_pro_max">📱 iPhone 18 Pro Max (6.9")</option>
+            <option value="iphone_18_pro">📱 iPhone 18 Pro (6.3")</option>
+            <option value="iphone_17">📱 iPhone 17 (6.3")</option>
+            <option value="iphone_16e">📱 iPhone 16e (6.1" Notch)</option>
+            <option value="iphone_x">📱 iPhone X (5.8" Notch)</option>
+            <option value="iphone_se_2">📱 iPhone SE 2 (4.7" Home Button)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-2 bg-[#121215] p-2 rounded-xl border border-zinc-800 text-xs">
+        <div class="flex items-center gap-2">
+          <span class="text-zinc-400 font-medium">Orientation:</span>
+          <div class="flex bg-zinc-900 p-0.5 rounded-lg border border-zinc-800">
+            <button id="btnPortrait" onclick="setOrientation(false)" class="px-2.5 py-1 font-medium rounded-md">Portrait</button>
+            <button id="btnLandscape" onclick="setOrientation(true)" class="px-2.5 py-1 font-medium rounded-md">Landscape</button>
+          </div>
+        </div>
+        <label class="flex items-center gap-1.5 text-zinc-300 cursor-pointer" title="RuntimeHost.jitAvailable: a debugger such as StikDebug is attached">
+          <input id="jitToggle" type="checkbox" onchange="jitAttached = this.checked; updateStatus()"> JIT enabled
+        </label>
+        <div class="flex items-center gap-2 ml-auto">
+          <button id="btnGame" onclick="running ? stopGame() : run()" class="px-3 py-1 font-medium rounded-md text-white shadow-sm transition"></button>
+        </div>
+      </div>
+      <p class="text-[11px] text-zinc-500 -mt-2">
+        Shortcuts: ⌘/Ctrl+R run · ⌘/Ctrl+. stop · Ctrl+Shift+G focus · Ctrl+Shift+S swap · Ctrl+Shift+M maximize · Esc Esc editor focus · Tap the game or editor to focus it
+      </p>
+    </div>
+
+    <div id="stage">
+      <div id="fit">
+        <div id="bezel">
+          <div id="seForehead" class="se-part"><div class="se-camera"></div><div class="earpiece"></div></div>
+
+          <div id="screen">
+            <div id="contentArea">
+              <div id="idePane" class="anim">
+                <div id="editorView" class="anim">
+                  <div id="tabbar">
+                    <div class="tab"><span>📄</span><span id="tabName">main.lua</span><span id="dirtyDot" class="dirty-dot"></span></div>
+                    <span id="pos">Ln 1, Col 1</span>
+                  </div>
+                  <textarea id="code" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea>
+                </div>
+
+                <div id="scrim" class="anim" onclick="closeOverlaySidebar()"></div>
+
+                <div id="sidebar" class="anim">
+                  <div class="sb-header">
+                    <span id="sbTitle" class="sb-title"></span>
+                    <span id="sbActions" class="sb-actions"></span>
+                  </div>
+                  <div id="panel-files" class="sb-panel"></div>
+                  <div id="panel-search" class="sb-panel">
+                    <div class="controls">
+                      <input id="searchField" class="field" placeholder="Search (text or regex)" oninput="performSearch()" autocomplete="off" spellcheck="false">
+                      <div class="pills">
+                        <button class="pill" data-opt="matchCase" onclick="toggleSearchOpt(this)">Aa</button>
+                        <button class="pill" data-opt="matchWord" onclick="toggleSearchOpt(this)">ab</button>
+                        <button class="pill" data-opt="regex" onclick="toggleSearchOpt(this)">.*</button>
+                      </div>
+                    </div>
+                    <div id="searchResults"></div>
+                  </div>
+                  <div id="panel-git" class="sb-panel">
+                    <div class="controls">
+                      <button class="git-btn" style="background:#383838;color:#59b3ff;font-size:12px">Sign In with GitHub Personal Token</button>
+                      <div style="display:flex;gap:6px">
+                        <button class="git-btn" style="flex:1;background:#3a3a3c;color:#0a84ff">⑂ main</button>
+                        <button class="git-btn" style="flex:1;background:rgba(10,132,255,0.2);color:#0a84ff">⟳ Sync</button>
+                      </div>
+                      <div style="display:flex;gap:6px">
+                        <input class="field" placeholder="Commit message" style="flex:1">
+                        <button class="git-btn" style="width:80px;flex:none;background:#0d7ad9;color:#fff">✓ Commit</button>
+                      </div>
+                    </div>
+                    <div class="section-h">Changes (0)</div>
+                    <div class="section-h">Commits (0)</div>
+                  </div>
+                </div>
+
+                <div id="rail" class="anim">
+                  <div class="rail-top">
+                    <button id="runBtn" onclick="running ? stopGame() : run()"></button>
+                    <button class="rail-btn" data-tab="files" onclick="toggleSidebar('files')" title="Explorer">⧉</button>
+                    <button class="rail-btn" data-tab="search" onclick="toggleSidebar('search')" title="Search">⌕</button>
+                    <button class="rail-btn" data-tab="git" onclick="toggleSidebar('git')" title="Source Control">⑂</button>
+                  </div>
+                  <button id="importBtn" class="rail-btn" onclick="logLine('(document picker: import .love archive)')" title="Import .love">⤓</button>
+                </div>
+              </div>
+
+              <div id="seam" class="anim"><i></i></div>
+
+              <div id="gameStage" class="anim">
+                <div id="gamePane" class="anim" onclick="setGameFocused(true)"><canvas id="gameCanvas" width="800" height="600"></canvas></div>
+                <div id="controlBar" class="anim">
+                  <div id="barTitle"><i></i><span id="barTitleText"></span></div>
+                  <button class="bar-btn" onclick="restartGame()" title="Restart">↺</button>
+                  <button id="barConsole" class="bar-btn on" onclick="toggleConsole()" title="Console" style="font:700 10px ui-monospace,Menlo,monospace">&gt;_</button>
+                  <button id="barSwap" class="bar-btn" onclick="swapScreens()" title="Swap panes">⇄</button>
+                  <button id="barMax" class="bar-btn" onclick="toggleMaximizeGame()" title="Maximize game">⤢</button>
+                  <button id="barStop" class="bar-btn" onclick="stopGame()" title="Stop">■</button>
+                </div>
+                <pre id="console" class="anim"></pre>
+              </div>
+            </div>
+
+            <div id="statusBackdrop"></div>
+            <div id="statusBar"><span id="statusLeft"></span><span id="statusRight"></span></div>
+            <div id="homeIndicator"></div>
+
+            <div id="sysStatus"><span>9:41</span><span>●●● ▮</span></div>
+            <div id="cutout" class="cutout"></div>
+          </div>
+
+          <div id="seChin" class="se-part"><div class="home-button"></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ---------------------------------------------------------------------
+    // Device profiles (points). safe: [top, bottom, side] per orientation.
+    // The iPhone Duo is not a shipping device: its sizes are derived from the
+    // stated diagonal and aspect ratio at iPhone point density (~152 pt/in).
+    // ---------------------------------------------------------------------
+    const ISLAND = { kind: 'island', w: 126, h: 37, top: 11 };
+    const DEVICES = {
+      duo_unfolded: {
+        name: 'iPhone Duo Unfolded (7.6")',
+        subtitle: 'Book-style inner display (≈4:3) • No cutout • Hinge crease',
+        screen: [696, 928], screenRadius: 20, pad: [14, 14, 14, 14], bezelRadius: 32,
+        cutout: null,
+        safe: { portrait: [24, 20, 0], landscape: [24, 20, 0] },
+      },
+      duo_folded: {
+        name: 'iPhone Duo Folded (5.4")',
+        subtitle: 'Cover display (1:1.41) • Top-right hole-punch camera • Spine on left',
+        screen: [476, 671], screenRadius: 36, pad: [12, 12, 12, 22], bezelRadius: 46,
+        cutout: { kind: 'hole', w: 14, h: 14, top: 14, right: 18 },
+        safe: { portrait: [44, 34, 0], landscape: [0, 21, 44] },
+      },
+      iphone_18_pro_max: {
+        name: 'iPhone 18 Pro Max (6.9")',
+        subtitle: '6.9" Super Retina XDR • Aluminum unibody • Dynamic Island',
+        screen: [440, 956], screenRadius: 55, pad: [10, 10, 10, 10], bezelRadius: 65,
+        cutout: ISLAND, safe: { portrait: [62, 34, 0], landscape: [0, 21, 62] },
+      },
+      iphone_18_pro: {
+        name: 'iPhone 18 Pro (6.3")',
+        subtitle: '6.3" Super Retina XDR • Aluminum unibody • Dynamic Island',
+        screen: [402, 874], screenRadius: 55, pad: [10, 10, 10, 10], bezelRadius: 65,
+        cutout: ISLAND, safe: { portrait: [62, 34, 0], landscape: [0, 21, 62] },
+      },
+      iphone_17: {
+        name: 'iPhone 17 (6.3")',
+        subtitle: '6.3" ProMotion OLED • Aluminum • Dynamic Island',
+        screen: [402, 874], screenRadius: 55, pad: [11, 11, 11, 11], bezelRadius: 66,
+        cutout: ISLAND, safe: { portrait: [62, 34, 0], landscape: [0, 21, 62] },
+      },
+      iphone_16e: {
+        name: 'iPhone 16e (6.1")',
+        subtitle: '6.1" Super Retina XDR OLED • Aluminum • Face ID notch',
+        screen: [390, 844], screenRadius: 47, pad: [12, 12, 12, 12], bezelRadius: 59,
+        cutout: { kind: 'notch', w: 162, h: 33 }, safe: { portrait: [47, 34, 0], landscape: [0, 21, 47] },
+      },
+      iphone_x: {
+        name: 'iPhone X (5.8")',
+        subtitle: '5.8" Super Retina HD OLED • Stainless steel • Face ID notch',
+        screen: [375, 812], screenRadius: 39, pad: [12, 12, 12, 12], bezelRadius: 51,
+        cutout: { kind: 'notch', w: 209, h: 30 }, safe: { portrait: [44, 34, 0], landscape: [0, 21, 44] },
+      },
+      iphone_se_2: {
+        name: 'iPhone SE 2 (4.7")',
+        subtitle: '4.7" Retina HD LCD • 16:9 • Touch ID Home Button',
+        screen: [375, 667], screenRadius: 0, pad: [0, 28, 0, 28], bezelRadius: 56,
+        cutout: null, seBezels: 110,
+        safe: { portrait: [20, 0, 0], landscape: [0, 0, 0] },
+      },
+    };
+
+    // Bundled sample project (App/Resources/SampleProjects/hello)
+    const PROJECT_NAME = 'hello';
+    const files = {
+      'conf.lua':
+`function love.conf(t)
+    t.identity = "duocode-hello"
+    t.window.title = "Hello DuoCode"
+    t.window.resizable = true
+end
+`,
+      'main.lua':
+`-- Sample LÖVE project bundled with DuoCode.
+local t = 0
+
+function love.load()
+    love.graphics.setBackgroundColor(0.08, 0.09, 0.12)
+    print("Hello from LÖVE " .. table.concat({ love.getVersion() }, ".", 1, 3))
+    print("LuaJIT: " .. (jit and jit.version or "n/a") .. "  JIT on: " .. tostring(jit and jit.status()))
+end
+
+function love.update(dt)
+    t = t + dt
+end
+
+function love.draw()
+    local w, h = love.graphics.getDimensions()
+    love.graphics.setColor(0.91, 0.29, 0.6)
+    love.graphics.circle("fill", w / 2 + math.cos(t) * w / 4, h / 2 + math.sin(t * 1.3) * h / 4, 32)
+    love.graphics.setColor(1, 1, 1)
+    love.graphics.print("Edit main.lua in DuoCode and press Run", 12, 12)
+end
+
+function love.keypressed(key)
+    print("keypressed", key)
+end
+`,
+    };
+    // RuntimeManager.resolve(): no settings.json or t.version, so the highest-priority
+    // runtime whose detect files exist wins: love-12.0 (priority 20).
+    const RUNTIME = { id: 'love-12.0', displayName: 'LÖVE 12.0', version: '12.0.0' };
+    const RUNTIME_IDS = ['love-12.0', 'love-11.5', 'demo'];
+
+    // Constants from the Swift sources
+    const RAIL_WIDTH = 44;                    // LeftActivityRail.width
+    const SIDEBAR_DOCKED_WIDTH = 240;         // IDEViewController.sidebarDockedWidth
+    const SIDEBAR_OVERLAY_MAX = 280;          // IDEViewController.sidebarOverlayMaxWidth
+    const MIN_WIDTH_FOR_DOCKED = 600;         // IDEViewController.minWidthForDockedSidebar
+    const STATUS_BAR_HEIGHT = 22;
+    const CREASE = 24;                        // DuoLayoutManager.creaseThickness
+    const BAR_HEIGHT = 36;                    // GameStageView.barHeight
+    const PHONE_CONSOLE = 96;                 // GameStageView.phoneConsoleHeight
+    const MIN_CONSOLE = 64;                   // GameStageView.minConsoleHeight
+    const GAME_ASPECT = 600 / 800;
+
+    // State (names follow IDEViewController)
+    let deviceKey = 'duo_unfolded';
+    let landscape = false;
+    let jitAttached = false;
+    let running = false;
+    let runtimeInitialised = false;
+    let gameFocused = false;
+    let isGameMaximized = false;
+    let screensSwapped = false;
+    let isConsoleVisible = true;
+    let isSidebarOpen = true;
+    let isSidebarDocked = null;
+    let sidebarTab = 'files';
+    let currentFile = 'main.lua';
+    let dirty = false;
+    const searchOpts = { matchCase: false, matchWord: false, regex: false };
+
+    const $ = (id) => document.getElementById(id);
+    const place = (el, x, y, w, h) => Object.assign(el.style, { left: x + 'px', top: y + 'px', width: Math.max(0, w) + 'px', height: Math.max(0, h) + 'px' });
+
+    // --- Device geometry -------------------------------------------------
+
+    function selectDevice(key) {
+      deviceKey = key;
+      const dev = DEVICES[key];
+      $('deviceSelect').value = key;
+      $('deviceBadge').textContent = dev.name;
+      $('deviceSubtitle').textContent = dev.subtitle;
+      applyDevice();
+    }
+
+    function setOrientation(isLandscape) {
+      landscape = isLandscape;
+      applyDevice();
+    }
+
+    function screenSize() {
+      const [pw, ph] = DEVICES[deviceKey].screen;
+      return landscape ? [ph, pw] : [pw, ph];
+    }
+
+    function applyDevice() {
+      const dev = DEVICES[deviceKey];
+      const [sw, sh] = screenSize();
+      const [safeTop, safeBottom, safeSide] = landscape ? dev.safe.landscape : dev.safe.portrait;
+
+      // Rotating 90° counter-clockwise: the top edge (cutout, forehead) moves to the left.
+      const [pt, pr, pb, pl] = dev.pad;
+      const pad = landscape ? [pr, pb, pl, pt] : [pt, pr, pb, pl];
+
+      const bezel = $('bezel');
+      bezel.style.flexDirection = landscape ? 'row' : 'column';
+      bezel.style.padding = pad.map(v => v + 'px').join(' ');
+      bezel.style.borderRadius = dev.bezelRadius + 'px';
+
+      const screen = $('screen');
+      screen.style.width = sw + 'px';
+      screen.style.height = sh + 'px';
+      screen.style.borderRadius = dev.screenRadius + 'px';
+
+      ['seForehead', 'seChin'].forEach(id => {
+        const el = $(id);
+        el.style.display = dev.seBezels ? 'flex' : 'none';
+        el.style.width = landscape ? dev.seBezels + 'px' : '100%';
+        el.style.height = landscape ? '100%' : dev.seBezels + 'px';
+        el.style.alignSelf = 'stretch';
+      });
+      const earpiece = document.querySelector('.earpiece');
+      const seCam = document.querySelector('.se-camera');
+      earpiece.style.width = landscape ? '6px' : '70px';
+      earpiece.style.height = landscape ? '70px' : '6px';
+      seCam.style.left = landscape ? 'calc(50% - 6px)' : '30%';
+      seCam.style.top = landscape ? '30%' : 'calc(50% - 6px)';
+
+      const cut = $('cutout');
+      const c = dev.cutout;
+      cut.removeAttribute('style');
+      if (c) {
+        cut.style.display = 'block';
+        if (c.kind === 'island') {
+          Object.assign(cut.style, landscape
+            ? { width: c.h + 'px', height: c.w + 'px', left: c.top + 'px', top: (sh - c.w) / 2 + 'px', borderRadius: c.h / 2 + 'px' }
+            : { width: c.w + 'px', height: c.h + 'px', top: c.top + 'px', left: (sw - c.w) / 2 + 'px', borderRadius: c.h / 2 + 'px' });
+        } else if (c.kind === 'notch') {
+          Object.assign(cut.style, landscape
+            ? { width: c.h + 'px', height: c.w + 'px', left: 0, top: (sh - c.w) / 2 + 'px', borderRadius: '0 20px 20px 0' }
+            : { width: c.w + 'px', height: c.h + 'px', top: 0, left: (sw - c.w) / 2 + 'px', borderRadius: '0 0 20px 20px' });
+        } else if (c.kind === 'hole') {
+          Object.assign(cut.style, {
+            width: c.w + 'px', height: c.h + 'px', borderRadius: '50%',
+            border: '1px solid rgba(255,255,255,0.15)',
+            top: (landscape ? c.right : c.top) + 'px',
+            ...(landscape ? { left: c.top + 'px' } : { right: c.right + 'px' }),
+          });
+        }
+      }
+
+      const sys = $('sysStatus');
+      sys.style.display = safeTop > 0 ? 'flex' : 'none';
+      sys.style.height = safeTop + 'px';
+      sys.style.fontSize = safeTop < 30 ? '12px' : '16px';
+      sys.style.paddingRight = (c && c.kind === 'hole' && !landscape) ? '48px' : '32px';
+
+      // contentArea and the status bar sit inside the safe area; the status colour runs under the home indicator.
+      Object.assign($('contentArea').style, { left: safeSide + 'px', right: safeSide + 'px', top: safeTop + 'px', bottom: (safeBottom + STATUS_BAR_HEIGHT) + 'px' });
+      Object.assign($('statusBar').style, { left: safeSide + 'px', right: safeSide + 'px', bottom: safeBottom + 'px' });
+      $('statusBackdrop').style.height = (safeBottom + STATUS_BAR_HEIGHT) + 'px';
+      $('homeIndicator').style.display = safeBottom > 0 ? 'block' : 'none';
+
+      const on = 'px-2.5 py-1 font-medium rounded-md bg-blue-600 text-white';
+      const off = 'px-2.5 py-1 font-medium rounded-md text-zinc-400 hover:text-white';
+      $('btnPortrait').className = landscape ? off : on;
+      $('btnLandscape').className = landscape ? on : off;
+
+      layoutPanes();
+      fitToStage();
+    }
+
+    function fitToStage() {
+      const bezel = $('bezel');
+      const bw = bezel.offsetWidth, bh = bezel.offsetHeight;
+      const availW = $('stage').clientWidth;
+      const availH = Math.max(420, Math.min(760, window.innerHeight - 40));
+      const s = Math.min(1, availW / bw, availH / bh);
+      bezel.style.transform = `scale(${s})`;
+      $('fit').style.width = bw * s + 'px';
+      $('fit').style.height = bh * s + 'px';
+    }
+
+    // --- DuoLayoutManager.layout(for:screenSize:) --------------------------
+
+    function currentLayout() {
+      const [w, h] = screenSize();
+      const display = Math.min(w, h) >= 600 ? 'duoInner' : 'phone';
+      return { display, isVertical: h >= w };
+    }
+
+    // --- IDEViewController.layoutPanes -------------------------------------
+
+    function layoutPanes() {
+      const area = $('contentArea');
+      const bw = area.clientWidth, bh = area.clientHeight;
+      if (!bw || !bh) return;
+
+      const { display, isVertical: vertical } = currentLayout();
+      const isDuo = display === 'duoInner';
+      const gameFirst = vertical !== screensSwapped;
+      const length = vertical ? bh : bw;
+      const cross = vertical ? bw : bh;
+      const seam = isDuo ? CREASE : 1;
+
+      let gameExtent;
+      if (isDuo) {
+        // Centre the seam on the hinge (the middle of the screen).
+        const [sw, sh] = screenSize();
+        const hinge = vertical ? sh / 2 - area.offsetTop : sw / 2 - area.offsetLeft;
+        const firstExtent = hinge - seam / 2;
+        gameExtent = gameFirst ? firstExtent : length - firstExtent - seam;
+      } else {
+        const preferred = vertical ? preferredHeight(cross) : preferredWidth(cross);
+        gameExtent = Math.min(preferred, length * 0.55);
+      }
+      const minExtent = Math.min(160, length / 3);
+      gameExtent = Math.max(minExtent, Math.min(gameExtent, length - seam - minExtent));
+      const ideExtent = length - seam - gameExtent;
+
+      const slice = (start, extent) => vertical ? [0, start, bw, extent] : [start, 0, extent, bh];
+      let gameFrame = gameFirst ? slice(0, gameExtent) : slice(ideExtent + seam, gameExtent);
+      const seamFrame = gameFirst ? slice(gameExtent, seam) : slice(ideExtent, seam);
+      let ideFrame = gameFirst ? slice(gameExtent + seam, ideExtent) : slice(0, ideExtent);
+
+      const maximized = running && isGameMaximized;
+      if (!running) {
+        const offset = (gameExtent + seam) * (gameFirst ? -1 : 1);
+        gameFrame = vertical ? [gameFrame[0], gameFrame[1] + offset, gameFrame[2], gameFrame[3]]
+                             : [gameFrame[0] + offset, gameFrame[1], gameFrame[2], gameFrame[3]];
+        ideFrame = [0, 0, bw, bh];
+      } else if (maximized) {
+        gameFrame = [0, 0, bw, bh];
+      }
+
+      const stage = $('gameStage'), seamEl = $('seam'), ide = $('idePane');
+      place(stage, ...gameFrame);
+      stage.style.opacity = running ? 1 : 0;
+      place(seamEl, ...seamFrame);
+      seamEl.classList.toggle('hinge', isDuo);
+      const line = seamEl.querySelector('i');
+      Object.assign(line.style, vertical
+        ? { left: 0, right: 0, top: (seam / 2 - 0.5) + 'px', height: '1px', width: 'auto', bottom: 'auto' }
+        : { top: 0, bottom: 0, left: (seam / 2 - 0.5) + 'px', width: '1px', height: 'auto', right: 'auto' });
+      seamEl.style.opacity = (running && !maximized) ? 1 : 0;
+      place(ide, ...ideFrame);
+      ide.style.opacity = maximized ? 0 : 1;
+      ide.style.pointerEvents = maximized ? 'none' : 'auto';
+
+      layoutGameStage(gameFrame[2], gameFrame[3]);
+      layoutIDEPane(ideFrame[2], ideFrame[3]);
+    }
+
+    // --- IDEViewController.layoutIDEPane -------------------------------------
+
+    function layoutIDEPane(w, h) {
+      place($('rail'), 0, 0, RAIL_WIDTH, h);
+
+      const docked = w >= MIN_WIDTH_FOR_DOCKED;
+      if (isSidebarDocked !== docked) {
+        isSidebarDocked = docked;
+        isSidebarOpen = docked;
+        renderSidebar();
+      }
+
+      const sbWidth = docked ? SIDEBAR_DOCKED_WIDTH : Math.min(SIDEBAR_OVERLAY_MAX, Math.max(0, w - RAIL_WIDTH - 32));
+      const sb = $('sidebar');
+      place(sb, isSidebarOpen ? RAIL_WIDTH : RAIL_WIDTH - sbWidth, 0, sbWidth, h);
+      sb.style.opacity = isSidebarOpen ? 1 : 0;
+      sb.classList.toggle('overlay', !docked && isSidebarOpen);
+
+      const editorX = (docked && isSidebarOpen) ? RAIL_WIDTH + sbWidth : RAIL_WIDTH;
+      place($('editorView'), editorX, 0, w - editorX, h);
+      $('editorView').classList.toggle('narrow', w - editorX <= 300);
+
+      const showScrim = !docked && isSidebarOpen;
+      const scrim = $('scrim');
+      place(scrim, RAIL_WIDTH, 0, w - RAIL_WIDTH, h);
+      scrim.style.opacity = showScrim ? 1 : 0;
+      scrim.style.pointerEvents = showScrim ? 'auto' : 'none';
+    }
+
+    // --- GameStageView -------------------------------------------------------
+
+    function reservedHeight() { return BAR_HEIGHT + (isConsoleVisible ? PHONE_CONSOLE : 0); }
+    function preferredHeight(width) { return width * GAME_ASPECT + reservedHeight(); }
+    function preferredWidth(height) { return Math.max(0, height - reservedHeight()) / GAME_ASPECT; }
+
+    function layoutGameStage(w, h) {
+      const available = Math.max(0, h - BAR_HEIGHT);
+      const gameH = isConsoleVisible ? Math.max(0, Math.min(available - MIN_CONSOLE, w * GAME_ASPECT)) : available;
+      place($('gamePane'), 0, 0, w, gameH);
+      place($('controlBar'), 0, gameH, w, BAR_HEIGHT);
+      const consoleTop = gameH + BAR_HEIGHT;
+      place($('console'), 0, consoleTop, w, h - consoleTop);
+      $('console').style.opacity = isConsoleVisible ? 1 : 0;
+    }
+
+    function updateStatus() {
+      const jit = jitAttached ? 'JIT' : 'Interp';
+      $('statusLeft').textContent = running ? `● Running  ${PROJECT_NAME} · ${RUNTIME.displayName}` : `○ Idle  ${PROJECT_NAME}`;
+      $('statusRight').textContent = `Focus: ${gameFocused ? 'Game' : 'Editor'}  LuaJIT: ${jit}`;
+      $('gamePane').classList.toggle('focused', gameFocused);
+
+      const runBtn = $('runBtn');
+      runBtn.textContent = running ? '■' : '▶︎';
+      runBtn.style.background = running ? 'rgb(217,56,64)' : 'rgb(26,158,77)';
+      runBtn.title = running ? 'Stop' : 'Run';
+
+      $('barConsole').classList.toggle('on', isConsoleVisible);
+      $('barMax').textContent = isGameMaximized ? '⤡' : '⤢';
+      $('barSwap').style.display = isGameMaximized ? 'none' : 'flex';
+
+      const btn = $('btnGame');
+      btn.textContent = running ? 'Game: Running ▶' : 'Game: Stopped ■';
+      btn.className = 'px-3 py-1 font-medium rounded-md text-white shadow-sm transition ' + (running ? 'bg-emerald-700' : 'bg-zinc-700');
+    }
+
+    // --- Sidebar ---------------------------------------------------------
+
+    function toggleSidebar(tab) {
+      if (isSidebarOpen && sidebarTab === tab) {
+        isSidebarOpen = false;
+      } else {
+        isSidebarOpen = true;
+        sidebarTab = tab;
+      }
+      renderSidebar();
+      layoutPanes();
+    }
+
+    function closeOverlaySidebar() {
+      if (isSidebarDocked !== false || !isSidebarOpen) return;
+      isSidebarOpen = false;
+      renderSidebar();
+      layoutPanes();
+    }
+
+    function renderSidebar() {
+      document.querySelectorAll('.rail-btn[data-tab]').forEach(b =>
+        b.classList.toggle('active', isSidebarOpen && b.dataset.tab === sidebarTab));
+      ['files', 'search', 'git'].forEach(t => $('panel-' + t).classList.toggle('shown', t === sidebarTab));
+      const titles = { files: 'EXPLORER: ' + PROJECT_NAME.toUpperCase(), search: 'SEARCH', git: 'SOURCE CONTROL' };
+      const actions = { files: ['＋', '↻'], search: ['↻'], git: ['↻', '⋯'] };
+      $('sbTitle').textContent = titles[sidebarTab];
+      $('sbActions').innerHTML = actions[sidebarTab].map(a => `<button>${a}</button>`).join('');
+      $('panel-files').innerHTML = Object.keys(files).sort().map(f =>
+        `<div class="file-row${f === currentFile ? ' active' : ''}" onclick="selectFile('${f}')"><span class="file-icon">&lt;/&gt;</span>  ${f}</div>`).join('');
+    }
+
+    function selectFile(path) {
+      openFile(path);
+      renderSidebar();
+      closeOverlaySidebar();
+    }
+
+    function toggleSearchOpt(btn) {
+      searchOpts[btn.dataset.opt] = !searchOpts[btn.dataset.opt];
+      btn.classList.toggle('on', searchOpts[btn.dataset.opt]);
+      performSearch();
+    }
+
+    function performSearch() {
+      const q = $('searchField').value;
+      const out = $('searchResults');
+      if (!q) { out.innerHTML = ''; return; }
+      const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+      let html = '';
+      for (const f of Object.keys(files).sort()) {
+        const matches = [];
+        files[f].split('\n').forEach((line, i) => {
+          let hit = false;
+          if (searchOpts.regex) {
+            try { hit = new RegExp(q, searchOpts.matchCase ? '' : 'i').test(line); } catch (e) {}
+          } else if (searchOpts.matchWord) {
+            hit = line.split(/[^\p{L}\p{N}]+/u).some(w => searchOpts.matchCase ? w === q : w.toLowerCase() === q.toLowerCase());
+          } else {
+            hit = searchOpts.matchCase ? line.includes(q) : line.toLowerCase().includes(q.toLowerCase());
+          }
+          if (hit) matches.push([i + 1, line.trim()]);
+        });
+        if (matches.length) {
+          html += `<div class="section-h" style="text-transform:none">${f} (${matches.length})</div>`;
+          html += matches.map(([ln, text]) =>
+            `<div class="result-row" onclick="jumpToLine('${f}', ${ln}); closeOverlaySidebar()">${ln}: ${esc(text)}</div>`).join('');
+        }
+      }
+      out.innerHTML = html;
+    }
+
+    // --- Editor (editor.html) ---------------------------------------------
+
+    function openFile(path) {
+      if (dirty) files[currentFile] = $('code').value;
+      currentFile = path;
+      $('code').value = files[path] ?? '';
+      dirty = false;
+      $('dirtyDot').style.display = 'none';
+      $('tabName').textContent = path;
+      updateCursorPos();
+    }
+
+    function jumpToLine(path, line) {
+      openFile(path);
+      const code = $('code');
+      const lines = code.value.split('\n');
+      let idx = 0;
+      for (let i = 0; i < line - 1 && i < lines.length; i++) idx += lines[i].length + 1;
+      code.focus();
+      code.setSelectionRange(idx, idx + (lines[line - 1] || '').length);
+      code.scrollTop = Math.max(0, (line - 5) * 19.5);
+      updateCursorPos();
+    }
+
+    function updateCursorPos() {
+      const code = $('code');
+      const lines = code.value.substring(0, code.selectionStart).split('\n');
+      $('pos').textContent = `Ln ${lines.length}, Col ${lines[lines.length - 1].length + 1}`;
+    }
+
+    function saveAll() {
+      files[currentFile] = $('code').value;
+      dirty = false;
+      $('dirtyDot').style.display = 'none';
+    }
+
+    // --- Console -----------------------------------------------------------
+
+    function logLine(line) {
+      const c = $('console');
+      c.textContent += line + '\n';
+      c.scrollTop = c.scrollHeight;
+    }
+
+    function toggleConsole() {
+      isConsoleVisible = !isConsoleVisible;
+      updateStatus();
+      layoutPanes();
+    }
+
+    // --- Game execution ----------------------------------------------------
+
+    let frameHandle = 0, lastFrame = 0, gameT = 0;
+
+    function drawGame(now) {
+      const dt = lastFrame ? (now - lastFrame) / 1000 : 0;
+      lastFrame = now;
+      gameT += dt;
+      const ctx = $('gameCanvas').getContext('2d');
+      const w = 800, h = 600;
+      ctx.fillStyle = 'rgb(20, 23, 31)';
+      ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = 'rgb(232, 74, 153)';
+      ctx.beginPath();
+      ctx.arc(w / 2 + Math.cos(gameT) * w / 4, h / 2 + Math.sin(gameT * 1.3) * h / 4, 32, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.font = '12px "DejaVu Sans", Verdana, sans-serif';
+      ctx.textBaseline = 'top';
+      ctx.fillText('Edit main.lua in DuoCode and press Run', 12, 12);
+      if (running) frameHandle = requestAnimationFrame(drawGame);
+    }
+
+    function run() {
+      if (running) { restartGame(); return; }
+      saveAll();
+      logLine(`▶ Running ${PROJECT_NAME} with ${RUNTIME.displayName}`);
+      if (!runtimeInitialised) {
+        logLine(`[rt] ${RUNTIME.displayName} initialized`);
+        runtimeInitialised = true;
+      }
+      running = true;
+      gameFocused = true;
+      $('barTitleText').textContent = `${PROJECT_NAME} · ${RUNTIME.displayName}`;
+      logLine(`Hello from LÖVE ${RUNTIME.version}`);
+      logLine(`LuaJIT: LuaJIT 2.1  JIT on: ${jitAttached}`);
+      gameT = 0; lastFrame = 0;
+      frameHandle = requestAnimationFrame(drawGame);
+      updateStatus();
+      layoutPanes();
+    }
+
+    function stopGame() {
+      if (running) logLine('[rt] Game exited with code 0');
+      running = false;
+      cancelAnimationFrame(frameHandle);
+      gameFocused = false;
+      isGameMaximized = false;
+      updateStatus();
+      layoutPanes();
+    }
+
+    function restartGame() {
+      stopGame();
+      setTimeout(run, 250);
+    }
+
+    function setGameFocused(focused) {
+      gameFocused = focused;
+      updateStatus();
+    }
+
+    function toggleMaximizeGame() {
+      if (!running) { logLine('Start the game first to maximize'); return; }
+      isGameMaximized = !isGameMaximized;
+      updateStatus();
+      layoutPanes();
+    }
+
+    function swapScreens() {
+      screensSwapped = !screensSwapped;
+      layoutPanes();
+    }
+
+    // --- Keyboard shortcuts (IDEViewController.keyCommands) --------------
+
+    let lastEscape = 0;
+    document.addEventListener('keydown', (e) => {
+      const cmd = e.metaKey || e.ctrlKey;
+      const k = e.key.toLowerCase();
+      if (cmd && !e.shiftKey && k === 'r') { e.preventDefault(); run(); }
+      else if (cmd && !e.shiftKey && k === '.') { e.preventDefault(); stopGame(); }
+      else if (e.ctrlKey && e.shiftKey && k === 'g') { e.preventDefault(); setGameFocused(!gameFocused); }
+      else if (e.ctrlKey && e.shiftKey && k === 's') { e.preventDefault(); swapScreens(); }
+      else if (e.ctrlKey && e.shiftKey && k === 'm') { e.preventDefault(); toggleMaximizeGame(); }
+      else if (e.key === 'Escape' && gameFocused) {
+        const now = performance.now();
+        if (now - lastEscape < 400) setGameFocused(false);
+        lastEscape = now;
+      }
+    });
+
+    const code = $('code');
+    code.addEventListener('input', () => { dirty = true; $('dirtyDot').style.display = 'inline-block'; updateCursorPos(); });
+    code.addEventListener('click', updateCursorPos);
+    code.addEventListener('keyup', updateCursorPos);
+    code.addEventListener('pointerdown', () => { if (gameFocused) setGameFocused(false); });
+    code.addEventListener('keydown', (e) => {
+      if (e.key === 'Tab') { e.preventDefault(); document.execCommand('insertText', false, '    '); }
+      if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); saveAll(); }
+    });
+
+    window.addEventListener('resize', fitToStage);
+
+    // Launch state: game idle, editor fills the IDE pane.
+    logLine(`DuoCode ready. Runtimes: [${RUNTIME_IDS.join(', ')}]`);
+    openFile('main.lua');
+    renderSidebar();
+    updateStatus();
+    selectDevice('duo_unfolded');
+  </script>
+</body>
+</html>

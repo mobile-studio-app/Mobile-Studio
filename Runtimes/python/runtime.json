@@ -1,0 +1,9 @@
+{
+  "id": "python-3.14",
+  "displayName": "Python 3.14",
+  "abi": 2,
+  "kind": "console",
+  "language": "python",
+  "detect": ["main.py"],
+  "priority": 4
+}

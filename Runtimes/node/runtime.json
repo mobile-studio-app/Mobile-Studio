@@ -1,0 +1,9 @@
+{
+  "id": "node-18",
+  "displayName": "JavaScript (Node.js 18)",
+  "abi": 3,
+  "kind": "console",
+  "language": "javascript",
+  "detect": ["main.js"],
+  "priority": 3
+}

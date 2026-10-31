@@ -1,0 +1,230 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths-ignore: ["tools/**", "**.md"]
+  pull_request:
+    paths-ignore: ["tools/**", "**.md"]
+  workflow_dispatch:
+
+# A newer push to the same ref makes the older build pointless.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Node.js for iOS with ICU, built from source in two cached halves: compiling (about 25
+  # minutes; scripts/compile-nodejs.sh) and linking the framework (scripts/build-nodejs.sh).
+  # Once the framework is cached this job only checks for it. Its own job: it needs an older
+  # Xcode than the app.
+  node:
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for a built Node.js
+        id: node-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: third_party/nodejs-mobile
+          key: nodejs-mobile-icu-${{ hashFiles('scripts/compile-nodejs.sh', 'scripts/build-nodejs.sh', 'scripts/patch-nodejs-host-tools.py', 'scripts/patch-zerofill-offsets.py') }}
+          lookup-only: true
+
+      - name: Restore compiled Node.js libraries
+        id: libs-cache
+        if: steps.node-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: third_party/nodejs-libs
+          key: nodejs-libs-${{ hashFiles('scripts/compile-nodejs.sh', 'scripts/patch-nodejs-host-tools.py') }}
+
+      # Node 18's build scripts use parts of Python newer releases removed.
+      - uses: actions/setup-python@v5
+        if: steps.node-cache.outputs.cache-hit != 'true'
+        with:
+          python-version: "3.11"
+
+      # The oldest Xcode 16 on the image: Clang from Xcode 26 rejects parts of V8 10.2.
+      - name: Select Xcode 16
+        if: steps.node-cache.outputs.cache-hit != 'true'
+        run: |
+          ls -d /Applications/Xcode*.app
+          for v in 16.0 16.1 16.2 16.3 16.4; do
+            if [ -d "/Applications/Xcode_$v.app" ]; then sudo xcode-select -s "/Applications/Xcode_$v.app"; break; fi
+          done
+          xcodebuild -version
+
+      # Node.js, V8 and ICU need more room than the runner has free; the other Xcodes,
+      # simulators and Android tools aren't used here.
+      - name: Free disk space
+        if: steps.node-cache.outputs.cache-hit != 'true' && steps.libs-cache.outputs.cache-hit != 'true'
+        run: |
+          df -h /
+          selected="$(cd "$(xcode-select -p)/../.." && pwd -P)"
+          for app in /Applications/Xcode*.app; do
+            [ "$(cd "$app" && pwd -P)" = "$selected" ] || sudo rm -rf "$app"
+          done
+          sudo rm -rf ~/Library/Android /usr/local/share/powershell /Library/Developer/CoreSimulator/Profiles/Runtimes
+          df -h /
+
+      - name: Compile Node.js
+        if: steps.node-cache.outputs.cache-hit != 'true' && steps.libs-cache.outputs.cache-hit != 'true'
+        run: bash scripts/compile-nodejs.sh
+
+      # Saved straight away, so a problem linking doesn't mean compiling again.
+      - name: Save compiled Node.js libraries
+        if: steps.node-cache.outputs.cache-hit != 'true' && steps.libs-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: third_party/nodejs-libs
+          key: nodejs-libs-${{ hashFiles('scripts/compile-nodejs.sh', 'scripts/patch-nodejs-host-tools.py') }}
+
+      - name: Link Node.js
+        if: steps.node-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-nodejs.sh
+
+      - name: Save Node.js
+        if: steps.node-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: third_party/nodejs-mobile
+          key: nodejs-mobile-icu-${{ hashFiles('scripts/compile-nodejs.sh', 'scripts/build-nodejs.sh', 'scripts/patch-nodejs-host-tools.py', 'scripts/patch-zerofill-offsets.py') }}
+
+  build:
+    needs: node
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Xcode 26 has the iOS 26 SDK, which Apple Intelligence (FoundationModels) needs.
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app
+
+      # The git engine's tests run first: they take seconds and stop the build if, say, a
+      # checkout leaves files looking changed or a push re-sends unchanged files.
+      - name: Test git engine
+        run: |
+          swiftc -swift-version 5 App/Git/GitManager.swift App/AI/ConflictResolver.swift App/Extensions/ExtensionCompatibility.swift Tests/GitEngine/*.swift -o "$RUNNER_TEMP/git-tests"
+          "$RUNNER_TEMP/git-tests"
+
+      - name: Install tools
+        run: brew install xcodegen xcbeautify
+
+      # LÖVE 12 takes a while to compile, so it is cached on the pinned commits in
+      # build-love-ios.sh. Saved right after it builds, even if the app build later fails.
+      - name: Restore LÖVE 12 build
+        id: love-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: third_party/love12-ios
+          key: love12-ios-${{ hashFiles('scripts/build-love-ios.sh') }}
+
+      - name: Build LÖVE 12 for iOS
+        if: steps.love-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-love-ios.sh
+
+      - name: Save LÖVE 12 build
+        if: steps.love-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: third_party/love12-ios
+          key: love12-ios-${{ hashFiles('scripts/build-love-ios.sh') }}
+
+      - name: Restore llama.cpp
+        id: llama-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: third_party/llama
+          key: llama-${{ hashFiles('scripts/fetch-llama.sh') }}
+
+      - name: Fetch llama.cpp
+        if: steps.llama-cache.outputs.cache-hit != 'true'
+        run: bash scripts/fetch-llama.sh
+
+      - name: Save llama.cpp
+        if: steps.llama-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: third_party/llama
+          key: llama-${{ hashFiles('scripts/fetch-llama.sh') }}
+
+      - name: Restore Python
+        id: python-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: third_party/python
+          key: python-${{ hashFiles('scripts/fetch-python.sh') }}
+
+      - name: Fetch Python
+        if: steps.python-cache.outputs.cache-hit != 'true'
+        run: bash scripts/fetch-python.sh
+
+      - name: Save Python
+        if: steps.python-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: third_party/python
+          key: python-${{ hashFiles('scripts/fetch-python.sh') }}
+
+      # Built by the node job.
+      - name: Restore Node.js
+        uses: actions/cache/restore@v4
+        with:
+          path: third_party/nodejs-mobile
+          key: nodejs-mobile-icu-${{ hashFiles('scripts/compile-nodejs.sh', 'scripts/build-nodejs.sh', 'scripts/patch-nodejs-host-tools.py', 'scripts/patch-zerofill-offsets.py') }}
+          fail-on-cache-miss: true
+
+      # The Rust library that signs extensions' macOS programs on the phone.
+      - name: Restore program signer
+        id: prepare-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: third_party/prepare
+          key: prepare-${{ hashFiles('scripts/build-prepare.sh', 'NativeTools/prepare/Cargo.*', 'NativeTools/prepare/src/**') }}
+
+      - name: Build program signer
+        if: steps.prepare-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-prepare.sh
+
+      - name: Save program signer
+        if: steps.prepare-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: third_party/prepare
+          key: prepare-${{ hashFiles('scripts/build-prepare.sh', 'NativeTools/prepare/Cargo.*', 'NativeTools/prepare/src/**') }}
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project DuoCode.xcodeproj \
+            -scheme DuoCode \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build | xcbeautify --renderer github-actions
+
+      - name: Package IPA
+        run: bash scripts/package-ipa.sh build/Build/Products/Release-iphoneos/DuoCode.app dist/MobileStudio.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MobileStudio-ipa
+          path: dist/MobileStudio.ipa
+
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/MobileStudio.ipa

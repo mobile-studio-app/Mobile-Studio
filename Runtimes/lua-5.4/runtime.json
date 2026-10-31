@@ -1,0 +1,9 @@
+{
+  "id": "lua-5.4",
+  "displayName": "Lua 5.4",
+  "abi": 2,
+  "kind": "console",
+  "language": "lua",
+  "detect": ["main.lua"],
+  "priority": 5
+}

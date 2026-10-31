@@ -1,0 +1,332 @@
+# XcodeGen spec — the .xcodeproj is generated (on CI or a Mac) and never committed.
+#   brew install xcodegen && xcodegen generate
+name: DuoCode
+options:
+  bundleIdPrefix: com.duocode
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    CLANG_ENABLE_MODULES: YES
+    CLANG_ENABLE_OBJC_ARC: YES
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  DuoCode:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+        excludes:
+          - "Resources/SampleProjects/**"
+          - "Resources/Editor/**"
+          - "DuoCode.entitlements"
+      # Folder references keep directory structure inside the bundle.
+      - path: App/Resources/SampleProjects
+        type: folder
+        buildPhase: resources
+      - path: App/Resources/Editor
+        type: folder
+        buildPhase: resources
+    dependencies:
+      # Node.js for extensions that need it (scripts/build-nodejs.sh, with ICU).
+      # Embedded but not linked: it's opened when Node.js is first needed, so the app still
+      # starts if it can't load.
+      - framework: third_party/nodejs-mobile/NodeMobile.xcframework
+        link: false
+        embed: true
+      # Runtimes are embedded but NOT linked: the host dlopen()s them on demand.
+      - target: DemoRuntime
+        link: false
+        embed: true
+      - target: LoveRuntime11
+        link: false
+        embed: true
+      - target: LoveRuntime12
+        link: false
+        embed: true
+      - target: LuaRuntime
+        link: false
+        embed: true
+      - target: PythonRuntime
+        link: false
+        embed: true
+      - target: NodeRuntime
+        link: false
+        embed: true
+      # CPython for the Python runtime. Needs third_party/python, from scripts/fetch-python.sh.
+      - framework: third_party/python/Python.xcframework
+        link: false
+        embed: true
+      # LÖVE 12's SDL3 is a dynamic framework; it must sit in the app's Frameworks folder.
+      - framework: third_party/love12-ios/Frameworks/SDL3.xcframework
+        link: false
+        embed: true
+      # llama.cpp for local AI code completion. Needs third_party/llama, from scripts/fetch-llama.sh.
+      - framework: third_party/llama/llama.framework
+        embed: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.duocode.ide
+        PRODUCT_NAME: DuoCode
+        SWIFT_OBJC_BRIDGING_HEADER: App/DuoCode-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/Runtimes/include"
+          - "$(SRCROOT)/App/Runtime"
+          - "$(SRCROOT)/App/NativeTools"
+        CODE_SIGN_ENTITLEMENTS: App/DuoCode.entitlements
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ENABLE_BITCODE: NO
+        # FoundationModels (Apple Intelligence) only exists on iOS 26+; weak-link it for iOS 17-25.
+        # libduocode_prepare signs extensions' macOS programs (scripts/build-prepare.sh).
+        LIBRARY_SEARCH_PATHS: ["$(SRCROOT)/third_party/prepare"]
+        OTHER_LDFLAGS: ["-lz", "-weak_framework", "FoundationModels", "-lduocode_prepare",
+                        "-framework", "Security", "-framework", "CoreFoundation"]
+    postBuildScripts:
+      - name: Install Python standard library
+        script: bash "$PROJECT_DIR/scripts/install-python.sh"
+        basedOnDependencyAnalysis: false
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Mobile Studio
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UIRequiresFullScreen: false
+        UIApplicationSupportsIndirectInputEvents: true   # trackpad/mouse pointer events
+        UIFileSharingEnabled: true                        # projects visible in Files.app
+        NSLocalNetworkUsageDescription: Test automation (Settings → Developer) lets a computer on your Wi-Fi control Mobile Studio for testing.
+        LSSupportsOpeningDocumentsInPlace: true
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: LOVE Game
+            CFBundleTypeRole: Editor
+            LSHandlerRank: Owner
+            LSItemContentTypes:
+              - org.love2d.love-game
+              - com.pkware.zip-archive
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: org.love2d.love-game
+            UTTypeDescription: LOVE Game
+            UTTypeConformsTo:
+              - public.data
+              - public.archive
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - love
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationPortraitUpsideDown
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationPortraitUpsideDown
+        GCSupportsControllerUserInteraction: true
+        GCSupportedGameControllers:
+          - ProfileName: ExtendedGamepad
+          - ProfileName: MicroGamepad
+        UIStatusBarHidden: false
+    scheme: {}
+
+  # Minimal dependency-free runtime used to validate the runtime ABI on device.
+  DemoRuntime:
+    type: framework
+    platform: iOS
+    sources:
+      - path: Runtimes/demo
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.duocode.runtime.demo
+        PRODUCT_NAME: DemoRuntime
+        HEADER_SEARCH_PATHS: ["$(SRCROOT)/Runtimes/include"]
+        GENERATE_INFOPLIST_FILE: YES
+        GCC_SYMBOLS_PRIVATE_EXTERN: YES   # hide everything except DC_EXPORT symbols
+        DEFINES_MODULE: NO
+        SKIP_INSTALL: YES
+        OTHER_LDFLAGS: ["-framework", "UIKit", "-framework", "GameController", "-framework", "QuartzCore"]
+
+  # Standard Lua 5.4 (vendored in Runtimes/lua-5.4/lua) as a console runtime.
+  LuaRuntime:
+    type: framework
+    platform: iOS
+    sources:
+      - path: Runtimes/lua-5.4
+        type: group   # otherwise the ".4" makes XcodeGen copy the folder as a resource instead of compiling it
+        # Lua 5.4's headers stay out of the project: Xcode's header maps would otherwise hand
+        # its lua.h to the LÖVE runtimes, which need LuaJIT's. HEADER_SEARCH_PATHS finds them here.
+        excludes: ["lua/*.h", "lua/*.hpp"]
+      - path: Runtimes/common/ConsoleAdapter.mm
+      - path: Runtimes/common/ConsoleAdapter.h
+      - path: Runtimes/common/DebugChannel.mm
+      - path: Runtimes/common/DebugChannel.h
+      - path: Runtimes/common/duocode_debugger.lua
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.duocode.runtime.lua
+        PRODUCT_NAME: LuaRuntime
+        HEADER_SEARCH_PATHS: ["$(SRCROOT)/Runtimes/include", "$(SRCROOT)/Runtimes/common", "$(SRCROOT)/Runtimes/lua-5.4/lua"]
+        GCC_PREPROCESSOR_DEFINITIONS: ["$(inherited)", "LUA_USE_IOS=1", "LUA_USE_POSIX=1"]
+        GCC_WARN_SHADOW: NO
+        CLANG_WARN_DOCUMENTATION_COMMENTS: NO
+        GENERATE_INFOPLIST_FILE: YES
+        GCC_SYMBOLS_PRIVATE_EXTERN: YES
+        DEFINES_MODULE: NO
+        SKIP_INSTALL: YES
+        OTHER_LDFLAGS: ["-framework", "Foundation"]
+
+  # JavaScript as a console runtime: programs run in the app's Node.js (NodeExtensionHost).
+  NodeRuntime:
+    type: framework
+    platform: iOS
+    sources:
+      - path: Runtimes/node
+      - path: Runtimes/common/ConsoleAdapter.mm
+      - path: Runtimes/common/ConsoleAdapter.h
+      - path: Runtimes/common/DebugChannel.mm
+      - path: Runtimes/common/DebugChannel.h
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.duocode.runtime.node
+        PRODUCT_NAME: NodeRuntime
+        HEADER_SEARCH_PATHS: ["$(SRCROOT)/Runtimes/include", "$(SRCROOT)/Runtimes/common"]
+        GENERATE_INFOPLIST_FILE: YES
+        GCC_SYMBOLS_PRIVATE_EXTERN: YES
+        DEFINES_MODULE: NO
+        SKIP_INSTALL: YES
+        OTHER_LDFLAGS: ["-framework", "Foundation"]
+
+  # CPython 3.14 (third_party/python) as a console runtime.
+  PythonRuntime:
+    type: framework
+    platform: iOS
+    sources:
+      - path: Runtimes/python
+        excludes: ["*.py"]
+      - path: Runtimes/python/duocode_debugger.py
+        buildPhase: resources
+      - path: Runtimes/common/ConsoleAdapter.mm
+      - path: Runtimes/common/ConsoleAdapter.h
+      - path: Runtimes/common/DebugChannel.mm
+      - path: Runtimes/common/DebugChannel.h
+    dependencies:
+      - framework: third_party/python/Python.xcframework
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.duocode.runtime.python
+        PRODUCT_NAME: PythonRuntime
+        HEADER_SEARCH_PATHS: ["$(SRCROOT)/Runtimes/include", "$(SRCROOT)/Runtimes/common"]
+        GENERATE_INFOPLIST_FILE: YES
+        GCC_SYMBOLS_PRIVATE_EXTERN: YES
+        DEFINES_MODULE: NO
+        SKIP_INSTALL: YES
+        OTHER_LDFLAGS: ["-framework", "Foundation"]
+
+  LoveRuntime11:
+    type: framework
+    platform: iOS
+    sources:
+      - path: Runtimes/love-11.5
+        type: group   # otherwise the ".5" makes XcodeGen copy the folder as a resource instead of compiling it
+      - path: Runtimes/common
+        excludes: ["*.lua"]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.duocode.runtime.love11
+        PRODUCT_NAME: LoveRuntime11
+        HEADER_SEARCH_PATHS: ["$(SRCROOT)/Runtimes/include", "$(SRCROOT)/Runtimes/common"]
+        GENERATE_INFOPLIST_FILE: YES
+        GCC_SYMBOLS_PRIVATE_EXTERN: YES
+        DEFINES_MODULE: NO
+        SKIP_INSTALL: YES
+        OTHER_LDFLAGS: ["-framework", "UIKit", "-framework", "QuartzCore"]
+
+  # Real LÖVE 12. Needs third_party/love12-ios, produced by scripts/build-love-ios.sh.
+  LoveRuntime12:
+    type: framework
+    platform: iOS
+    sources:
+      - path: Runtimes/love-12.0
+        type: group   # otherwise the ".0" makes XcodeGen copy the folder as a resource instead of compiling it
+        excludes: ["*.lua"]
+      - path: Runtimes/love-12.0/duocode_hooks.lua
+        buildPhase: resources
+      - path: Runtimes/common
+        excludes: ["*.lua"]
+      - path: Runtimes/common/duocode_debugger.lua
+        buildPhase: resources
+    dependencies:
+      - framework: third_party/love12-ios/Frameworks/SDL3.xcframework
+        embed: false
+      - framework: third_party/love12-ios/Frameworks/Lua.xcframework
+        embed: false
+      - framework: third_party/love12-ios/Frameworks/freetype.xcframework
+        embed: false
+      - framework: third_party/love12-ios/Frameworks/harfbuzz.xcframework
+        embed: false
+      - framework: third_party/love12-ios/Frameworks/modplug.xcframework
+        embed: false
+      - framework: third_party/love12-ios/Frameworks/ogg.xcframework
+        embed: false
+      - framework: third_party/love12-ios/Frameworks/theora.xcframework
+        embed: false
+      - framework: third_party/love12-ios/Frameworks/vorbis.xcframework
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.duocode.runtime.love12
+        PRODUCT_NAME: LoveRuntime12
+        CLANG_CXX_LANGUAGE_STANDARD: "c++17"
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/Runtimes/include"
+          - "$(SRCROOT)/Runtimes/common"
+          - "$(SRCROOT)/third_party/love12-ios/include"
+          - "$(SRCROOT)/third_party/love12-ios/Frameworks/Lua.xcframework/ios-arm64/Headers"
+        FRAMEWORK_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(SRCROOT)/third_party/love12-ios/Frameworks/SDL3.xcframework/ios-arm64"
+        GENERATE_INFOPLIST_FILE: YES
+        GCC_SYMBOLS_PRIVATE_EXTERN: YES
+        DEFINES_MODULE: NO
+        SKIP_INSTALL: YES
+        OTHER_LDFLAGS:
+          - "-ObjC"
+          - "$(SRCROOT)/third_party/love12-ios/lib/liblove.a"
+          - "-lz"
+          - "-lbz2"
+          # liblove is built with default visibility; export only the runtime entry point.
+          - "-Wl,-exported_symbol,_duocode_runtime_entry"
+          - "-framework"
+          - "UIKit"
+          - "-framework"
+          - "QuartzCore"
+          - "-framework"
+          - "Metal"
+          - "-framework"
+          - "OpenGLES"
+          - "-framework"
+          - "OpenAL"
+          - "-framework"
+          - "AVFoundation"
+          - "-framework"
+          - "AudioToolbox"
+          - "-framework"
+          - "CoreGraphics"
+          - "-framework"
+          - "CoreHaptics"
+          - "-framework"
+          - "CoreMotion"
+          - "-framework"
+          - "GameController"

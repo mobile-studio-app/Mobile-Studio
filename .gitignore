@@ -1,0 +1,22 @@
+# Generated
+*.xcodeproj/
+*.xcworkspace/
+build/
+dist/
+release/
+DerivedData/
+App/Info.plist
+third_party/
+
+# Workbench build output
+App/Resources/Workbench/
+Workbench/node_modules/
+Workbench/extensions/*/node_modules/
+Workbench/extensions/*/dist/
+
+.DS_Store
+*.ipa
+
+# Editor build inputs (the bundle in App/Resources/Editor is committed)
+Editor/node_modules/
+Editor/build/

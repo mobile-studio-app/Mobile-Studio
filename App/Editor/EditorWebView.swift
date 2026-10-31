@@ -1,0 +1,334 @@
+import UIKit
+import WebKit
+
+/// The code editor: a WKWebView hosting `editor.html` and `editor.bundle.js` (CodeMirror 6,
+/// built from `Editor/`). The page talks to the app through the "duocode" message handler.
+final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
+    let webView: WKWebView
+    var onCommand: ((String, [String: Any]) -> Void)?
+
+    override init() {
+        let config = WKWebViewConfiguration()
+        config.preferences.isElementFullscreenEnabled = false
+        webView = WKWebView(frame: .zero, configuration: config)
+        super.init()
+        webView.configuration.userContentController.addScriptMessageHandler(self, contentWorld: .page, name: "duocode")
+        #if DEBUG
+        webView.isInspectable = true   // Safari Web Inspector from a Mac, if available
+        #endif
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.scrollView.bounces = false
+        webView.scrollView.isScrollEnabled = false
+        webView.isOpaque = false
+        webView.backgroundColor = .black
+        if let url = Bundle.main.url(forResource: "editor", withExtension: "html", subdirectory: "Editor")
+            ?? Bundle.main.url(forResource: "editor", withExtension: "html") {
+            webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+        }
+        // Settings changes and finished model downloads reach the open editor straight away.
+        for name in [AppSettings.didChange, ModelDownloadManager.didChange] {
+            NotificationCenter.default.addObserver(self, selector: #selector(pushSettings), name: name, object: nil)
+        }
+        NotificationCenter.default.addObserver(self, selector: #selector(extensionsChanged), name: ExtensionManager.didChange, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(breakpointsChanged), name: BreakpointStore.didChange, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(gitIndexChanged), name: GitManager.indexDidChange, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(extensionConfigurationChanged),
+                                               name: ExtensionHostBridge.didChangeConfiguration, object: nil)
+    }
+
+    @objc private func extensionConfigurationChanged() {
+        emit("extensionConfiguration", ExtensionHostBridge.configuration)
+    }
+
+    private var settingsPayload: [String: Any] {
+        AppSettings.shared.editorPayload(aiReady: AICompletionService.shared.isReady,
+                                         aiMergeReady: AICompletionService.shared.isMergeReady)
+    }
+
+    private var lastPushedSettings: NSDictionary?
+
+    @objc private func gitIndexChanged() {
+        emit("gitChanged", [:])
+    }
+
+    private var ignoreBreakpointEcho = false
+
+    /// Breakpoints changed outside the editor (the Run and Debug view): show them in the open file.
+    @objc private func breakpointsChanged() {
+        guard !ignoreBreakpointEcho else { return }
+        emit("breakpoints", [:])   // the editor asks again for the open file's
+    }
+
+    /// Where the debugged program is paused (nil: running or ended).
+    func showDebugLocation(file: String?, line: Int) {
+        if let file {
+            emit("debugLocation", ["path": file, "line": line])
+        } else {
+            emit("debugLocation", [:])
+        }
+    }
+
+    func setDebugPaused(_ paused: Bool) {
+        emit("debugState", ["paused": paused])
+    }
+
+    @objc private func extensionsChanged() {
+        emit("extensionsChanged", [:])
+    }
+
+    @objc private func pushSettings() {
+        // Download progress posts often; only tell the page when something it uses changed.
+        let payload = settingsPayload as NSDictionary
+        guard payload != lastPushedSettings else { return }
+        lastPushedSettings = payload
+        emit("settings", payload)
+    }
+
+    /// Push an event to the page: window.duocode.onEvent(name, payload)
+    func emit(_ name: String, _ payload: Any) {
+        guard let data = try? JSONSerialization.data(withJSONObject: ["name": name, "payload": payload]),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView.evaluateJavaScript("window.duocode && window.duocode.onEvent(\(json))")
+    }
+
+    /// A file or folder was renamed (`to`) or deleted (`to` nil): open tabs follow it.
+    func pathMoved(_ from: String, to: String?) {
+        emit("pathMoved", ["from": from, "to": (to as Any?) ?? NSNull()])
+    }
+
+    /// Another project opened: its files replace the open tabs.
+    func projectChanged() {
+        emit("projectChanged", [:])
+    }
+
+    /// VS Code's Quick Open (⌘P).
+    func showQuickOpen() {
+        emit("quickOpen", [:])
+    }
+
+    func openFile(_ path: String) {
+        emit("openFile", ["path": path])
+    }
+
+    /// Opens a file in the split editor, beside the main one.
+    func openFileToSide(_ path: String) {
+        emit("openFileToSide", ["path": path])
+    }
+
+    /// Runs an async function body on the page with `arguments` as its parameters.
+    func call(_ body: String, _ arguments: [String: Any], completion: @escaping (Any?) -> Void) {
+        webView.callAsyncJavaScript(body, arguments: arguments, in: nil, in: .page) { result in
+            if case let .success(value) = result { completion(value) } else { completion(nil) }
+        }
+    }
+
+    func jumpToLine(file: String, line: Int) {
+        emit("jumpToLine", ["file": file, "line": line])
+    }
+
+    /// Opens a file with a range selected (a search result). Column and length are UTF-16, as in JavaScript.
+    func reveal(file: String, line: Int, column: Int, length: Int) {
+        emit("reveal", ["file": file, "line": line, "column": column, "length": length])
+    }
+
+    /// Shows an inline diff. Without `modified` the working file opens editable against `original`.
+    func openDiff(_ request: DiffRequest) {
+        var payload: [String: Any] = ["path": request.path, "original": request.original, "title": request.title]
+        if let modified = request.modified { payload["modified"] = modified }
+        emit("openDiff", payload)
+    }
+
+    /// The bar above the keyboard, in place of WebKit's form bar.
+    let keyBar = EditorKeyBar()
+
+    func installKeyBar() {
+        keyBar.onKey = { [weak self] name in
+            if name == "dismiss" { self?.webView.endEditing(true) }
+            self?.emit("key", ["name": name])
+        }
+        webView.useKeyboardAccessory(keyBar)
+    }
+
+    /// VS Code's Command Palette, over the editor.
+    func showCommandPalette() {
+        emit("commandPalette", [:])
+    }
+
+    func saveAll() {
+        emit("saveAll", [:])
+    }
+
+    /// Re-reads the open file after a pull or discard changed it on disk.
+    func reloadFromDisk() {
+        emit("reload", [:])
+    }
+
+    /// Writes any unsaved edits, then calls `completion` once they're on disk.
+    /// Use before running the game or switching projects.
+    func flushSaves(completion: @escaping () -> Void) {
+        webView.callAsyncJavaScript("if (window.duocode && window.duocode.flush) { await window.duocode.flush(); }",
+                                    arguments: [:], in: nil, in: .page) { _ in
+            completion()
+        }
+    }
+
+    func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage,
+                               replyHandler: @escaping (Any?, String?) -> Void) {
+        guard let body = message.body as? [String: Any], let cmd = body["cmd"] as? String else {
+            replyHandler(nil, "bad message"); return
+        }
+        let store = ProjectStore.shared
+        do {
+            switch cmd {
+            case "list":
+                replyHandler(store.list(), nil)
+            case "read":
+                replyHandler(try store.read(body["path"] as? String ?? ""), nil)
+            case "readBinary":
+                // For the image/audio/font viewer: base64 plus size, capped to keep the bridge responsive.
+                let url = try store.resolve(body["path"] as? String ?? "")
+                let size = (try url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                guard size <= 32 * 1024 * 1024 else {
+                    replyHandler(["size": size, "tooLarge": true], nil); return
+                }
+                let data = try Data(contentsOf: url)
+                replyHandler(["size": data.count, "base64": data.base64EncodedString()], nil)
+            case "openURL":
+                // Links from the docs sheet open in Safari rather than navigating the editor away.
+                if let url = URL(string: body["url"] as? String ?? ""), ["http", "https"].contains(url.scheme) {
+                    UIApplication.shared.open(url)
+                }
+                replyHandler(true, nil)
+            case "stat":
+                let url = try store.resolve(body["path"] as? String ?? "")
+                replyHandler(["size": (try url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0], nil)
+            case "getSettings":
+                replyHandler(settingsPayload, nil)
+            case "aiComplete":
+                AICompletionService.shared.complete(prefix: body["prefix"] as? String ?? "",
+                                                    suffix: body["suffix"] as? String ?? "",
+                                                    path: body["path"] as? String ?? "") { text in
+                    replyHandler(text, nil)
+                }
+            case "aiResolve":
+                let request = ConflictRequest(path: body["path"] as? String ?? "",
+                                              ours: body["ours"] as? String ?? "",
+                                              theirs: body["theirs"] as? String ?? "",
+                                              base: body["base"] as? String,
+                                              before: body["before"] as? String ?? "",
+                                              after: body["after"] as? String ?? "",
+                                              oursLabel: body["oursLabel"] as? String ?? "HEAD",
+                                              theirsLabel: body["theirsLabel"] as? String ?? "incoming")
+                AICompletionService.shared.resolveConflict(request) { text in
+                    replyHandler(text, nil)
+                }
+            case "aiResolveCancel":
+                // The review sheet closed: stop, and swap the suggestions model back in if the merge used another.
+                AICompletionService.shared.endResolveSession()
+                replyHandler(true, nil)
+            case "conflictInfo":
+                // Whether the file is one of the merge's unresolved files (it gets "Mark as Resolved").
+                let path = body["path"] as? String ?? ""
+                replyHandler(["inMerge": GitManager.shared.unresolvedConflicts(in: store.currentProject).contains(path)], nil)
+            case "markResolved":
+                try GitManager.shared.stage([body["path"] as? String ?? ""], in: store.currentProject)
+                NotificationCenter.default.post(name: ProjectStore.filesDidChange, object: store)
+                replyHandler(true, nil)
+            case "extList":
+                replyHandler(ExtensionManager.shared.editorPayload(), nil)
+            case "extRead":
+                // A file from an installed extension: text, or base64 with "binary".
+                let id = body["id"] as? String ?? ""
+                guard let data = ExtensionManager.shared.readFile(id, path: body["path"] as? String ?? "") else {
+                    replyHandler(nil, "Not found"); return
+                }
+                if body["binary"] as? Bool == true {
+                    replyHandler(data.base64EncodedString(), nil)
+                } else {
+                    replyHandler(String(decoding: data, as: UTF8.self), nil)
+                }
+            case "themeColors":
+                ThemeColors.apply(body["colors"] as? [String: Any] ?? [:], dark: body["dark"] as? Bool ?? true)
+                replyHandler(true, nil)
+            case "setTheme":
+                // Preferences: Color Theme in the Command Palette.
+                if let id = body["id"] as? String { AppSettings.shared.editorTheme = id }
+                replyHandler(true, nil)
+            case "gitOriginal":
+                // The staged (or committed) copy of a file, for the editor's change markers. nil when
+                // the project isn't a repository or the file isn't tracked.
+                let path = body["path"] as? String ?? ""
+                let project = store.currentProject
+                guard GitManager.shared.isGitRepo(at: project) else { replyHandler(NSNull(), nil); return }
+                replyHandler((GitManager.shared.text(of: path, at: .index, in: project) as Any?) ?? NSNull(), nil)
+            case "getBreakpoints":
+                let file = body["path"] as? String ?? ""
+                replyHandler(BreakpointStore.shared.breakpoints(in: file).map { bp -> [String: Any] in
+                    var out = bp.json
+                    out["enabled"] = bp.enabled
+                    return out
+                }, nil)
+            case "setBreakpoints":
+                // From the editor's gutter: keeps each line's condition and log message.
+                let file = body["path"] as? String ?? ""
+                let list = (body["breakpoints"] as? [[String: Any]] ?? []).compactMap { entry -> Breakpoint? in
+                    guard let line = entry["line"] as? Int else { return nil }
+                    return Breakpoint(line: line, condition: entry["condition"] as? String,
+                                      logMessage: entry["logMessage"] as? String, enabled: entry["enabled"] as? Bool ?? true)
+                }
+                ignoreBreakpointEcho = true
+                BreakpointStore.shared.set(list, in: file)
+                ignoreBreakpointEcho = false
+                replyHandler(true, nil)
+            case "debugInlineValues":
+                // The paused frame's locals (and upvalues), for values shown at the ends of lines.
+                let session = DebugSession.shared
+                session.scopes { scopes in
+                    let wanted = scopes.filter { ["Locals", "Upvalues", "Closure", "Block"].contains($0.name) }.compactMap(\.ref)
+                    guard !wanted.isEmpty else { replyHandler([], nil); return }
+                    var values: [[String: Any]] = []
+                    var remaining = wanted.count
+                    for ref in wanted {
+                        session.variables(ref) { list in
+                            values += list.map { ["name": $0.name, "value": $0.value] }
+                            remaining -= 1
+                            if remaining == 0 { replyHandler(values, nil) }
+                        }
+                    }
+                }
+            case "debugEvaluate":
+                DebugSession.shared.evaluate(body["expression"] as? String ?? "", context: "hover") { value, error in
+                    if let value {
+                        replyHandler(["value": value.value, "type": value.type], nil)
+                    } else {
+                        replyHandler(["error": error ?? "No value"], nil)
+                    }
+                }
+            case "aiCancel":
+                AICompletionService.shared.cancel()
+                replyHandler(true, nil)
+            case "extViewChanged":
+                NotificationCenter.default.post(name: ExtensionViewsPanelView.viewChanged, object: nil,
+                                                userInfo: ["viewId": body["viewId"] as? String ?? ""])
+                replyHandler(true, nil)
+            case "extSetContext":
+                // setContext from an extension, for its menus' `when` clauses.
+                if let key = body["key"] as? String { ExtensionViewsPanelView.contextKeys[key] = body["value"] ?? NSNull() }
+                replyHandler(true, nil)
+            case "filesChanged":
+                // npm or a task changed the project's files.
+                NotificationCenter.default.post(name: ProjectStore.filesDidChange, object: store)
+                replyHandler(true, nil)
+            case "write":
+                try store.write(body["path"] as? String ?? "", contents: body["contents"] as? String ?? "")
+                replyHandler(true, nil)
+            default:
+                if ExtensionHostBridge.handle(cmd, body, reply: replyHandler) { return }
+                onCommand?(cmd, body)
+                replyHandler(true, nil)
+            }
+        } catch {
+            replyHandler(nil, error.localizedDescription)
+        }
+    }
+}
