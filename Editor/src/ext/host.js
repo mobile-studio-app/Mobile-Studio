@@ -5,7 +5,7 @@
 // quick picks, files, edits) and connects its providers to CodeMirror: completions, hovers,
 // diagnostics, formatting, go to definition, symbols and commands for the Command Palette.
 import { hoverTooltip, keymap, EditorView, Decoration, ViewPlugin, WidgetType } from '@codemirror/view';
-import { RangeSetBuilder } from '@codemirror/state';
+import { RangeSetBuilder, Text } from '@codemirror/state';
 import { linter, forceLinting } from '@codemirror/lint';
 import { snippetCompletion } from '@codemirror/autocomplete';
 import { indentRange } from '@codemirror/language';
@@ -620,6 +620,80 @@ export async function goToDefinition() {
   const from = offsetAt(doc, target.range.start);
   app.view.dispatch({ selection: { anchor: from, head: offsetAt(doc, target.range.end) }, effects: EditorView.scrollIntoView(from, { y: 'center' }) });
   return true;
+}
+
+/** Where the symbol at `pos` is defined, for Peek Definition: { path, from, to, text } or null.
+ * `text` is the file's (null when it's the open file). */
+export async function definitionAt(state, pos) {
+  if (!hosts.length || !app.current()) return null;
+  flushChange();
+  const target = await call('definition', { uri: uriFor(app.current()), position: positionAt(state.doc, pos) }).catch(() => null);
+  if (!target) return null;
+  return locationOf(target, state);
+}
+
+/** A { uri, range } from a host, as { path, range, text } (text: the file's, null for the open file). */
+async function locationOf(target, state) {
+  const path = pathFor(target.uri);
+  let text = null;
+  if (path !== app.current()) {
+    text = await app.native({ cmd: 'read', path }).catch(() => null);
+    if (text == null) return null;
+  }
+  const doc = text == null ? state.doc : Text.of(text.split('\n'));
+  return { path, from: offsetAt(doc, target.range.start), to: offsetAt(doc, target.range.end), text: text == null ? null : text };
+}
+
+/** Where the symbol at `pos` is used, for Peek References: [{ path, from, to, text }]. */
+export async function referencesAt(state, pos) {
+  if (!hosts.length || !app.current()) return [];
+  flushChange();
+  const list = (await call('references', { uri: uriFor(app.current()), position: positionAt(state.doc, pos) }).catch(() => null)) || [];
+  const files = new Map();
+  const out = [];
+  for (const target of list) {
+    const path = pathFor(target.uri);
+    if (!files.has(path)) files.set(path, locationOf(target, state));
+    const file = await files.get(path);
+    if (!file) continue;
+    const doc = file.text == null ? state.doc : Text.of(file.text.split('\n'));
+    out.push({ path, from: offsetAt(doc, target.range.start), to: offsetAt(doc, target.range.end), text: file.text });
+  }
+  return out;
+}
+
+/** Renames the symbol at the cursor everywhere (VS Code's F2). False when no extension can. */
+export async function renameSymbol(newName) {
+  if (!hosts.length || !app.current()) return false;
+  flushChange();
+  const { view } = app;
+  const params = { uri: uriFor(app.current()), position: positionAt(view.state.doc, view.state.selection.main.head), newName };
+  for (const host of hosts) {
+    if (await callHost(host, 'rename', params)) return true;
+  }
+  return false;
+}
+
+/** Quick Fix and refactorings for a range of the open file, from every host: [{ host, id, title, kind, isPreferred }].
+ * `invoked`: asked for (⌘.) rather than checked for the light bulb. */
+export async function codeActionsFor(state, from, to, invoked = false) {
+  if (!hosts.length || !app.current()) return [];
+  flushChange();
+  const params = { uri: uriFor(app.current()), range: { start: positionAt(state.doc, from), end: positionAt(state.doc, to) }, invoked };
+  const answers = await Promise.all(hosts.map((host) => callHost(host, 'codeActions', params).then(
+    (list) => (Array.isArray(list) ? list.map((a) => ({ ...a, host })) : []), () => [])));
+  return answers.flat();
+}
+
+export const runCodeAction = (action) => callHost(action.host, 'runCodeAction', { id: action.id });
+
+/** Inlay hints for a range of the open file: [{ pos, label, kind, paddingLeft, paddingRight, tooltip }]. */
+export async function inlayHintsFor(state, from, to) {
+  if (!hosts.length || !app.current()) return [];
+  flushChange();
+  const params = { uri: uriFor(app.current()), range: { start: positionAt(state.doc, from), end: positionAt(state.doc, to) } };
+  const list = (await call('inlayHints', params).catch(() => null)) || [];
+  return list.map((h) => ({ ...h, pos: offsetAt(state.doc, h.position) }));
 }
 
 /** The open file's symbols from extensions' providers: [{ name, kind, depth, range }]. */

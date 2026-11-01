@@ -70,6 +70,25 @@
   .palette-button[hidden] { display: none; }
   .md-preview { position: absolute; inset: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; background: var(--bg); color: var(--text); z-index: 5; }
   .md-preview[hidden] { display: none; }
+  /* langfeatures.js: the Quick Fix light bulb, inlay hints and the peek box. */
+  .cm-lightbulb { position: absolute; z-index: 6; width: 20px; height: 18px; padding: 0; border: 0; background: transparent; color: #ddb100; font-family: codicon; font-size: 15px; line-height: 18px; cursor: pointer; }
+  .cm-lightbulb.fix { color: #ffcc00; }
+  .cm-lightbulb[hidden] { display: none; }
+  .cm-inlay-hint { display: inline-block; padding: 0 4px; margin: 0 1px; border-radius: 4px; font-size: 0.85em; line-height: 1.3; vertical-align: 1px; color: var(--muted); background: color-mix(in srgb, var(--muted) 16%, transparent); font-style: normal; }
+  .cm-peek { margin: 4px 0; border-top: 2px solid #3794ff; border-bottom: 2px solid #3794ff; background: var(--chrome); font-family: -apple-system, system-ui, sans-serif; }
+  .cm-peek-header { display: flex; align-items: center; gap: 8px; padding: 4px 8px; background: color-mix(in srgb, #3794ff 18%, var(--chrome)); color: var(--text); font-size: 12px; }
+  .cm-peek-title { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .cm-peek-header button { border: 0; background: transparent; color: var(--text); font-size: 12px; padding: 4px 6px; cursor: pointer; }
+  .cm-peek-header button.codicon { font-size: 14px; }
+  .cm-peek-body { display: flex; height: 240px; }
+  .cm-peek-code { flex: 1; min-width: 0; height: 100%; background: var(--bg); }
+  .cm-peek-target { background: color-mix(in srgb, #ffcc00 14%, transparent); }
+  .cm-peek-list { width: 34%; max-width: 260px; overflow-y: auto; border-right: 1px solid var(--border-strong); font-size: 12px; }
+  .cm-peek-item { padding: 4px 8px; cursor: pointer; color: var(--text); }
+  .cm-peek-item.active { background: color-mix(in srgb, #3794ff 30%, transparent); }
+  .cm-peek-where { color: var(--fg); }
+  .cm-peek-preview { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, Menlo, monospace; }
+  @media (max-width: 560px) { .cm-peek-body { flex-direction: column; height: 300px; } .cm-peek-list { width: auto; max-width: none; height: 90px; border-right: 0; border-bottom: 1px solid var(--border-strong); } }
   .md-preview.web { overflow: hidden; background: #fff; }
   .md-preview .web-preview { display: block; width: 100%; height: 100%; border: 0; background: #fff; }
   #editor-container.md-side .cm-editor { width: 50%; }

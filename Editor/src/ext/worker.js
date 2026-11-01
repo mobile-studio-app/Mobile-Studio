@@ -955,10 +955,10 @@ const api = {
     registerColorProvider: () => new Disposable(),
     registerFoldingRangeProvider: () => new Disposable(),
     registerDocumentLinkProvider: () => new Disposable(),
-    registerReferenceProvider: () => new Disposable(),
-    registerRenameProvider: () => new Disposable(),
+    registerReferenceProvider: (sel, provider) => addProvider('references', sel, provider),
+    registerRenameProvider: (sel, provider) => addProvider('rename', sel, provider),
     registerDocumentHighlightProvider: () => new Disposable(),
-    registerInlayHintsProvider: () => new Disposable(),
+    registerInlayHintsProvider: (sel, provider) => addProvider('inlayHints', sel, provider),
     registerCodeLensProvider: () => new Disposable(),
     registerTypeDefinitionProvider: () => new Disposable(),
     registerImplementationProvider: () => new Disposable(),
@@ -1327,6 +1327,8 @@ function plainText(content) {
   return '';
 }
 
+let codeActionList = [];   // the last codeActions answer's actions, by id
+
 const callHandlers = {
   hasCommand: ({ name }) => commands.has(name)
     || [...extensions.values()].some((ext) => (ext.manifest.contributes?.commands || []).some((c) => c.command === name)),
@@ -1400,6 +1402,81 @@ const callHandlers = {
     return [];
   },
   executeCommand: ({ name, args }) => executeCommand(name, args || []),
+
+  // Quick Fix and refactorings for a range: [{ id, title, kind, isPreferred }]; runCodeAction runs one.
+  async codeActions({ uri, range, invoked }) {
+    const doc = documents.get(uri);
+    codeActionList = [];
+    if (!doc) return [];
+    const r = toRange(range);
+    const diagnostics = [...diagnosticCollections].flatMap((entries) => entries.get(uri) || [])
+      .filter((d) => d.range && !d.range.end.isBefore(r.start) && !r.end.isBefore(d.range.start));
+    const context = { diagnostics, only: undefined, triggerKind: invoked ? 1 : 2 };
+    const out = [];
+    for (const { provider } of providersFor('codeActions', doc)) {
+      try {
+        for (const action of (await provider.provideCodeActions(doc, r, context, noCancel)) || []) {
+          if (!action || action.disabled) continue;
+          const id = codeActionList.push({ provider, action }) - 1;
+          const isCommand = typeof action.command === 'string';
+          out.push({ id, title: action.title, kind: isCommand ? '' : String(action.kind?.value ?? ''), isPreferred: !!action.isPreferred });
+        }
+      } catch (e) { /* ignore */ }
+    }
+    return out;
+  },
+  async runCodeAction({ id }) {
+    const entry = codeActionList[id];
+    if (!entry) return false;
+    let { action } = entry;
+    if (typeof action.command === 'string') { await executeCommand(action.command, action.arguments || []); return true; }
+    if (!action.edit && entry.provider.resolveCodeAction) action = (await entry.provider.resolveCodeAction(action, noCancel)) || action;
+    if (action.edit) await api.workspace.applyEdit(action.edit);
+    if (action.command) await executeCommand(action.command.command, action.command.arguments || []);
+    return true;
+  },
+  // Inlay hints in a range: [{ position, label, kind, paddingLeft, paddingRight, tooltip }].
+  async inlayHints({ uri, range }) {
+    const doc = documents.get(uri);
+    if (!doc) return [];
+    const out = [];
+    for (const { provider } of providersFor('inlayHints', doc)) {
+      try {
+        for (const hint of (await provider.provideInlayHints(doc, toRange(range), noCancel)) || []) {
+          const label = typeof hint.label === 'string' ? hint.label : (hint.label || []).map((part) => part.value).join('');
+          if (!label) continue;
+          out.push({ position: hint.position, label, kind: hint.kind || 0, paddingLeft: !!hint.paddingLeft, paddingRight: !!hint.paddingRight, tooltip: plainText(hint.tooltip) });
+        }
+      } catch (e) { /* ignore */ }
+    }
+    return out;
+  },
+  // Where the symbol at a position is used: [{ uri, range }].
+  async references({ uri, position }) {
+    const doc = documents.get(uri);
+    if (!doc) return [];
+    for (const { provider } of providersFor('references', doc)) {
+      try {
+        const list = await provider.provideReferences(doc, toPosition(position), { includeDeclaration: true }, noCancel);
+        if (list && list.length) return list.map((l) => ({ uri: (l.uri || l.targetUri).toString(), range: l.range || l.targetRange }));
+      } catch (e) { /* ignore */ }
+    }
+    return [];
+  },
+  // Renames the symbol at a position everywhere; false when no extension can.
+  async rename({ uri, position, newName }) {
+    const doc = documents.get(uri);
+    if (!doc) return false;
+    for (const { provider } of providersFor('rename', doc)) {
+      try {
+        const edit = await provider.provideRenameEdits(doc, toPosition(position), newName, noCancel);
+        if (edit) { await api.workspace.applyEdit(edit); return true; }
+      } catch (e) {
+        throw new Error(e && e.message ? e.message : String(e));
+      }
+    }
+    return false;
+  },
 
   // Tree views: null when this host doesn't have the view.
   async treeChildren({ viewId, handle }) {

@@ -2,7 +2,8 @@
 // definitions are found by pattern (Lua, Python, JavaScript, C-like), references by whole word,
 // in the open file first and then across the project's files of the same kind.
 import { EditorView } from '@codemirror/view';
-import { goToDefinition as providerDefinition } from './ext/host.js';
+import { goToDefinition as providerDefinition, renameSymbol as providerRename } from './ext/host.js';
+import { peekReferences } from './langfeatures.js';
 import { quickPick, inputBox, notify } from './ext/ui.js';
 
 let api = null;   // { native, view, current, openFile }
@@ -104,22 +105,48 @@ function pickLocation(placeholder, matches, name) {
   }).then((i) => (i == null ? null : matches[i])).then((m) => m && reveal(m.path, m.line, name));
 }
 
-/** F12: an extension's definition provider, else the definition found by pattern. */
-export async function goToDefinition() {
-  if (await providerDefinition()) return;
+/** Definitions of the word at the cursor found by pattern: { word, matches: [{ path, line, text }] }
+ * (one match when the open file has a local definition). */
+async function patternDefinitions() {
   const path = api.current();
   const word = path && wordAtCursor(api.view.state);
-  if (!word) return;
+  if (!word) return null;
   const patterns = definitionPatterns(path, word.name);
   // In the open file: the nearest definition above the cursor (a local), else the first.
   const here = definitionsIn({ path, text: api.view.state.doc.toString() }, patterns).filter((d) => d.line !== word.line || d.rank === 0);
   const above = here.filter((d) => d.line <= word.line);
   const local = above.length ? above.reduce((a, b) => (b.rank < a.rank || (b.rank === a.rank && b.line > a.line) ? b : a)) : here[0];
-  if (local && local.rank <= 2) { reveal(path, local.line, word.name); return; }
+  if (local && local.rank <= 2) return { word, matches: [local] };
   const all = [];
   for (const file of await projectFiles(path)) all.push(...definitionsIn(file, patterns));
   const best = all.length ? Math.min(...all.map((d) => d.rank)) : -1;
-  const matches = all.filter((d) => d.rank === best && !(d.path === path && d.line === word.line));
+  return { word, matches: all.filter((d) => d.rank === best && !(d.path === path && d.line === word.line)) };
+}
+
+/** Peek Definition without an extension: the definitions found by pattern, as { path, from, to, text }. */
+export async function fallbackDefinitions() {
+  const found = await patternDefinitions();
+  if (!found) return [];
+  const out = [];
+  for (const m of found.matches.slice(0, 20)) {
+    const text = m.path === api.current() ? null : await api.native({ cmd: 'read', path: m.path }).catch(() => null);
+    if (m.path !== api.current() && text == null) continue;
+    const lines = (text ?? api.view.state.doc.toString()).split('\n');
+    let from = 0;
+    for (let i = 0; i < m.line - 1; i++) from += lines[i].length + 1;
+    const col = new RegExp(`\\b${escapeRegExp(found.word.name)}\\b`).exec(lines[m.line - 1] || '');
+    if (col) from += col.index;
+    out.push({ path: m.path, from, to: from + (col ? found.word.name.length : 0), text });
+  }
+  return out;
+}
+
+/** F12: an extension's definition provider, else the definition found by pattern. */
+export async function goToDefinition() {
+  if (await providerDefinition()) return;
+  const found = await patternDefinitions();
+  if (!found) return;
+  const { word, matches } = found;
   if (!matches.length) { notify('info', `No definition found for '${word.name}'.`, []); return; }
   if (matches.length === 1) { reveal(matches[0].path, matches[0].line, word.name); return; }
   pickLocation(`Definitions of ${word.name}`, matches, word.name);
@@ -127,6 +154,8 @@ export async function goToDefinition() {
 
 /** Shift-F12: every whole-word use of the name, across the project's files of this kind. */
 export async function findReferences() {
+  // An extension's references show in a peek box, as in VS Code.
+  if (await peekReferences(api.view)) return;
   const path = api.current();
   const word = path && wordAtCursor(api.view.state);
   if (!word) return;
@@ -149,8 +178,17 @@ export async function renameSymbol() {
   const word = wordAtCursor(view.state);
   if (!word) return;
   if (KEYWORDS.has(word.name)) { notify('info', `'${word.name}' is a keyword; it can't be renamed.`, []); return; }
-  const name = await inputBox({ prompt: `Rename '${word.name}' in this file. Press Enter to rename, Escape to cancel.`, value: word.name });
-  if (!name || name === word.name || !/^[A-Za-z_$][\w$]*$/.test(name)) { view.focus(); return; }
+  const name = await inputBox({ prompt: `Rename '${word.name}'. Press Enter to rename, Escape to cancel.`, value: word.name });
+  if (!name || name === word.name) { view.focus(); return; }
+  // An extension's rename provider renames it everywhere; otherwise every use in this file.
+  try {
+    if (await providerRename(name)) { view.focus(); return; }
+  } catch (e) {
+    notify('warning', String(e && e.message ? e.message : e), []);
+    view.focus();
+    return;
+  }
+  if (!/^[A-Za-z_$][\w$]*$/.test(name)) { view.focus(); return; }
   const text = view.state.doc.toString();
   const re = new RegExp(`(^|[^\\w$])(${escapeRegExp(word.name)})(?![\\w$])`, 'g');
   const changes = [];

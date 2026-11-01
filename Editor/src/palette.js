@@ -14,6 +14,7 @@ import { contributions } from './ext/registry.js';
 import { loadExtensionTheme } from './ext/themes.js';
 import { extensionCommands, runCommand, formatDocument, documentSymbols } from './ext/host.js';
 import { goToDefinition, findReferences, renameSymbol } from './navigate.js';
+import { quickFix, peekDefinition } from './langfeatures.js';
 import { toggleOutput } from './ext/output.js';
 import { togglePanel } from './panel.js';
 import { showTerminal } from './terminal.js';
@@ -130,6 +131,9 @@ export function builtinCommands(getView) {
     { command: 'editor.action.revealDefinition', title: 'Go to Definition', keybinding: 'F12', run: () => goToDefinition() },
     { command: 'editor.action.goToReferences', title: 'Find All References', keybinding: '⇧F12', run: () => findReferences() },
     { command: 'editor.action.rename', title: 'Rename Symbol', keybinding: 'F2', run: () => renameSymbol() },
+    { command: 'editor.action.peekDefinition', title: 'Peek Definition', keybinding: '⌥F12', run: () => peekDefinition(getView()) },
+    { command: 'editor.action.referenceSearch.trigger', title: 'Peek References', keybinding: '⇧F12', run: () => findReferences() },
+    { command: 'editor.action.quickFix', title: 'Quick Fix...', keybinding: '⌘.', run: () => quickFix(getView()) },
     { command: 'workbench.action.gotoSymbol', title: 'Go to Symbol in Editor…', keybinding: '⇧⌘O', run: () => showSymbols(getView) },
     { command: 'workbench.action.gotoLine', title: 'Go to Line/Column…', keybinding: '⌃G', run: () => goToLine(getView()) },
     { command: 'workbench.action.quickOpen', title: 'Go to File…', keybinding: '⌘P', run: () => quickOpenAPI && showQuickOpen(quickOpenAPI) },

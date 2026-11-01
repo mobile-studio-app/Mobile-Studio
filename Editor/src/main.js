@@ -32,7 +32,8 @@ import { gitGutter, loadOriginal } from './gitgutter.js';
 import { findWidget } from './findwidget.js';
 import { setupWebviews, reveal as revealWebview, closeWebview } from './ext/webviews.js';
 import { postToHost, extensionFileAt } from './ext/host.js';
-import { setupNavigation, goToDefinition, findReferences, renameSymbol } from './navigate.js';
+import { setupNavigation, goToDefinition, findReferences, renameSymbol, fallbackDefinitions } from './navigate.js';
+import { setupLanguageFeatures, languageFeatures, quickFix, peekDefinition, closePeekView } from './langfeatures.js';
 import { setupMarkdownPreview, setPreview, refreshPreview, fileOpened, previewMode, previewSaved } from './mdpreview.js';
 import { extensionKeys, buildExtensionKeymap, currentExtensionKeymap } from './ext/keybindings.js';
 import { runCommand } from './ext/host.js';
@@ -138,6 +139,7 @@ function baseExtensions(path) {
     debugExtensions(debugApi),
     gitGutter,
     hostExtensions(),
+    languageFeatures(),
     extensionKeys.of(currentExtensionKeymap()),
     keymap.of([
       { key: 'Mod-s', run: () => { save(); return true; } },
@@ -152,6 +154,9 @@ function baseExtensions(path) {
       { key: 'F9', run: () => toggleBreakpointAtCursor(view) },
       { key: 'Shift-F12', run: () => { findReferences(); return true; } },
       { key: 'F2', run: () => { renameSymbol(); return true; } },
+      { key: 'Mod-.', run: (v) => { quickFix(v); return true; } },
+      { key: 'Alt-F12', run: (v) => { peekDefinition(v); return true; } },
+      { key: 'Escape', run: (v) => closePeekView(v) },
       { key: 'Mod-Shift-v', run: () => { setPreview('toggle'); return true; } },
       { key: 'Mod-k Mod-t', run: () => { pickColorTheme(() => view); return true; } },
       { key: 'Mod-k v', run: () => { setPreview('side'); return true; } },
@@ -475,6 +480,17 @@ setupWebviews({
   extensionOf: extensionFileAt,
 });
 setupNavigation({ native, view, current: () => (readOnly ? null : current), openFile: (path) => openFile(path) });
+setupLanguageFeatures({
+  fallbackDefinitions: () => fallbackDefinitions(),
+  // Peek's Open: the file, with the location selected.
+  reveal: async (path, from, to) => {
+    if (path !== current) await openFile(path);
+    if (current !== path || readOnly) return;
+    const end = view.state.doc.length;
+    view.dispatch({ selection: { anchor: Math.min(from, end), head: Math.min(to, end) }, effects: EditorView.scrollIntoView(Math.min(from, end), { y: 'center' }) });
+    view.focus();
+  },
+});
 setupMarkdownPreview({
   native, view, current: () => current, openFile: (path) => openFile(path), openURL,
   nodeAddress: () => nodeAddress(hostAPI),
