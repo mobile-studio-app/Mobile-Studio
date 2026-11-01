@@ -2,6 +2,14 @@
 globalThis.__nodeRequire = require;
 globalThis.self = globalThis;
 
+// nodejs-mobile says the platform is "ios". Extensions only know darwin, linux and win32, and it's
+// their macOS programs that run here (App/NativeTools), so they're told it's macOS: Codex looks for
+// bin/aarch64-apple-darwin/codex, not bin/undefined-aarch64/codex.
+if (process.platform === 'ios') {
+  Object.defineProperty(process, 'platform', { value: 'darwin', enumerable: true });
+  require('os').platform = () => 'darwin';
+}
+
 // Node.js 18's V8 predates RegExp's v flag (unicodeSets), which newer extensions (Codex) pass to
 // new RegExp. Retried with u, which reads the same patterns apart from v's set operations and
 // properties of strings: those still throw, as they would have.

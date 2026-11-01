@@ -10,6 +10,11 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
     override init() {
         let config = WKWebViewConfiguration()
         config.preferences.isElementFullscreenEnabled = false
+        // Extensions' webviews load their files from duocode-res:// URLs; the page knows it can
+        // leave those links as they are rather than inlining the files.
+        config.setURLSchemeHandler(ExtensionResourceSchemeHandler(), forURLScheme: ExtensionResourceSchemeHandler.scheme)
+        config.userContentController.addUserScript(WKUserScript(source: "window.__duocodeResources = true;",
+                                                                injectionTime: .atDocumentStart, forMainFrameOnly: true))
         webView = EditorWKWebView(frame: .zero, configuration: config)
         super.init()
         webView.configuration.userContentController.addScriptMessageHandler(self, contentWorld: .page, name: "duocode")

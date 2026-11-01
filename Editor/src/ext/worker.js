@@ -1124,15 +1124,15 @@ function createWebviewPanel(viewType, title, options = {}) {
   const show = () => notify('webview', { id, title: panel.title, html, viewType, enableScripts: !!(webview.options && webview.options.enableScripts) });
   const webview = {
     options: options || {},
-    // The page inlines the extension's resources as data: URLs (webviews.js), so a policy built on
-    // cspSource (style-src ${cspSource}) has to let those in.
-    cspSource: 'duocode-webview: data:',
+    // The app serves the extension's files at duocode-res://file/<path> (ExtensionResourceSchemeHandler);
+    // a test page without it inlines them as data: URLs (webviews.js). A policy built on cspSource lets both in.
+    cspSource: 'duocode-res: data:',
     get html() { return html; },
     set html(value) { html = String(value); if (!disposed) show(); },
     onDidReceiveMessage: onMessage.event,
     postMessage: async (message) => { if (!disposed) notify('webviewPost', { id, message: JSON.parse(JSON.stringify(message ?? null)) }); return !disposed; },
     // Resources come from the extension's files; the page inlines them into the frame.
-    asWebviewUri: (uri) => Uri.parse('duocode-res://' + encodeURIComponent(uri.path)),
+    asWebviewUri: (uri) => Uri.from({ scheme: 'duocode-res', authority: 'file', path: uri.path }),
   };
   let title_ = title;
   const panel = {

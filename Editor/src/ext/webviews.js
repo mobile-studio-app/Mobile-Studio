@@ -62,8 +62,9 @@ async function inlineResources(html, extensionOf) {
   html.replace(/duocode-res:\/\/([^"'\s)>]+)/g, (_, path) => refs.add(path));
   const urls = new Map();
   for (const ref of refs) {
-    // duocode-res://<encoded path> comes back from Uri.toString() with a "/" on the end.
-    const path = decodeURIComponent(ref.split(/[?#]/)[0]).replace(/\/+$/, '');
+    // duocode-res://file/<path>; or the older duocode-res://<encoded path>/.
+    const bare = ref.split(/[?#]/)[0];
+    const path = bare.startsWith('file/') ? decodeURI(bare.slice(4)) : decodeURIComponent(bare).replace(/\/+$/, '');
     const located = extensionOf(path);
     if (!located) continue;
     const ext = path.split('.').pop().toLowerCase();
@@ -95,7 +96,9 @@ export async function showWebview({ id, title, html, enableScripts }) {
     panels.set(id, panel);
   }
   panel.title = title;
-  const body = await inlineResources(html, host.extensionOf);
+  // The app serves duocode-res:// itself (scripts can then import their other files); a test page
+  // without it gets the files inlined.
+  const body = window.__duocodeResources ? html : await inlineResources(html, host.extensionOf);
   // The bridge and theme go first in <head> (or at the top when there's no head).
   const prefix = BRIDGE(id, panel.state) + THEME_STYLE;
   panel.frame.srcdoc = /<head[^>]*>/i.test(body) ? body.replace(/<head[^>]*>/i, (m) => m + prefix) : prefix + body;
