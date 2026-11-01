@@ -7,7 +7,7 @@ import {
 import { foldAll, unfoldAll, foldCode, unfoldCode } from '@codemirror/language';
 import { openSearchPanel, selectNextOccurrence, selectSelectionMatches } from '@codemirror/search';
 import { quickPick, inputBox, closeQuickInput } from './ext/ui.js';
-import { setPreview } from './mdpreview.js';
+import { setPreview, reloadPreview } from './mdpreview.js';
 import { toggleBreakpointAtCursor } from './debug.js';
 import { settings, updateSettings, settingsEffects } from './settings.js';
 import { contributions } from './ext/registry.js';
@@ -187,6 +187,10 @@ export function builtinCommands(getView) {
     { command: 'workbench.view.explorer', title: 'View: Show Explorer', keybinding: '⇧⌘E', run: () => appCommand('showExplorer') },
     { command: 'markdown.showPreview', title: 'Markdown: Open Preview', keybinding: '⇧⌘V', run: () => setPreview('full') },
     { command: 'markdown.showPreviewToSide', title: 'Markdown: Open Preview to the Side', keybinding: '⌘K V', run: () => setPreview('side') },
+    { command: 'livePreview.start.preview.atFile', title: 'Live Preview: Show Preview', run: () => setPreview('side') },
+    { command: 'livePreview.start.preview.atFileFull', title: 'Live Preview: Show Preview in Place of the Editor', run: () => setPreview('full') },
+    { command: 'livePreview.end', title: 'Live Preview: Stop Preview', run: () => setPreview('off') },
+    { command: 'livePreview.reload', title: 'Live Preview: Reload Preview', run: () => reloadPreview() },
     // The app's own commands (IDEViewController.handle(command:)).
     { command: 'editor.debug.action.toggleBreakpoint', title: 'Debug: Toggle Breakpoint', keybinding: 'F9', run: v(toggleBreakpointAtCursor) },
     { command: 'workbench.action.debug.run', title: 'Run: Run Without Debugging', run: () => appCommand('run') },

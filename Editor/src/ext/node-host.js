@@ -12,6 +12,7 @@ import { runCommand } from './node-tasks.js';
 import { setNativePort } from './node-native.js';
 import { fetchPreloadArgv, installFetch, installHome, isUndiciWasmError, writableHome } from './node-fetch.js';
 import { closeSession, getSession, openSession } from './node-shell.js';
+import { servePreview } from './node-preview.js';
 
 // Extensions get child_process that runs Node.js scripts as worker threads (see node-child.js).
 globalThis.__childProcessShim = childProcess;
@@ -46,6 +47,8 @@ const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers
 http.createServer((req, res) => {
   if (req.method === 'OPTIONS') { res.writeHead(204, cors); res.end(); return; }
   if (req.url === '/ping') { res.writeHead(200, cors); res.end('ok'); return; }
+  // Live Preview of HTML pages (node-preview.js).
+  if (servePreview(req, res, cors)) return;
   if (req.url === '/out') {
     res.writeHead(200, { ...cors, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
     res.write(': connected\n\n');

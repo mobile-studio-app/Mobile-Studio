@@ -70,6 +70,8 @@
   .palette-button[hidden] { display: none; }
   .md-preview { position: absolute; inset: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; background: var(--bg); color: var(--text); z-index: 5; }
   .md-preview[hidden] { display: none; }
+  .md-preview.web { overflow: hidden; background: #fff; }
+  .md-preview .web-preview { display: block; width: 100%; height: 100%; border: 0; background: #fff; }
   #editor-container.md-side .cm-editor { width: 50%; }
   #editor-container.md-side .md-preview { left: 50%; border-left: 1px solid var(--border-strong); }
   .md-body { max-width: 880px; margin: 0 auto; padding: 16px 26px 40px; font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; -webkit-user-select: text; user-select: text; overflow-wrap: anywhere; }

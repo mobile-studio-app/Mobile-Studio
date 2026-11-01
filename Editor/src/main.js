@@ -33,7 +33,7 @@ import { findWidget } from './findwidget.js';
 import { setupWebviews, reveal as revealWebview, closeWebview } from './ext/webviews.js';
 import { postToHost, extensionFileAt } from './ext/host.js';
 import { setupNavigation, goToDefinition, findReferences, renameSymbol } from './navigate.js';
-import { setupMarkdownPreview, setPreview, refreshPreview, fileOpened, previewMode } from './mdpreview.js';
+import { setupMarkdownPreview, setPreview, refreshPreview, fileOpened, previewMode, previewSaved } from './mdpreview.js';
 import { extensionKeys, buildExtensionKeymap, currentExtensionKeymap } from './ext/keybindings.js';
 import { runCommand } from './ext/host.js';
 import { setupBreadcrumbs, updateBreadcrumbs } from './breadcrumbs.js';
@@ -475,7 +475,11 @@ setupWebviews({
   extensionOf: extensionFileAt,
 });
 setupNavigation({ native, view, current: () => (readOnly ? null : current), openFile: (path) => openFile(path) });
-setupMarkdownPreview({ native, view, current: () => current, openFile: (path) => openFile(path), openURL });
+setupMarkdownPreview({
+  native, view, current: () => current, openFile: (path) => openFile(path), openURL,
+  nodeAddress: () => nodeAddress(hostAPI),
+  projectPath: async () => ((await native({ cmd: 'extHostInit' }).catch(() => null)) || {}).projectPath,
+});
 $('md-toggle').addEventListener('click', () => setPreview($('editor-container').clientWidth >= 640 && previewMode() === 'off' ? 'side' : 'toggle'));
 setupTabs($('tabs'), {
   select: (tab) => {
@@ -518,6 +522,7 @@ async function save() {
   if (path === current && view.state.doc.toString() === contents) setDirty(false);
   if (path === '@user/keybindings.json') loadUserKeybindings();
   didSave(path);
+  previewSaved(path);
   states.set(path, view.state);
 }
 
