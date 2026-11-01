@@ -48,6 +48,24 @@ enum AppleIntelligenceEngine {
         throw NSError(domain: "DuoCodeAI", code: -1, userInfo: [NSLocalizedDescriptionKey: unavailableReason ?? "Unavailable"])
     }
 
+    /// The Chat panel's answer to a conversation (AIChatService). Its context is small, so only the
+    /// latest part of a long conversation goes in.
+    static func chat(_ messages: [ChatMessage]) async throws -> String {
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, *) {
+            let instructions = messages.first { $0.role == "system" }?.content ?? ""
+            let turns = messages.filter { $0.role != "system" }
+            let session = LanguageModelSession(instructions: instructions)
+            var history = turns.dropLast().map { "\($0.role == "user" ? "User" : "Assistant"): \($0.content)" }.joined(separator: "\n\n")
+            if history.count > 6000 { history = String(history.suffix(6000)) }
+            let question = turns.last?.content ?? ""
+            let prompt = history.isEmpty ? question : "The conversation so far:\n\n\(history)\n\nUser: \(question)"
+            return try await session.respond(to: prompt).content
+        }
+        #endif
+        throw NSError(domain: "DuoCodeAI", code: -1, userInfo: [NSLocalizedDescriptionKey: unavailableReason ?? "Unavailable"])
+    }
+
     static func complete(prefix: String, suffix: String, path: String, maxTokens: Int) async throws -> String {
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *) {

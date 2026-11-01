@@ -1,11 +1,24 @@
 import Foundation
 
-/// Which model writes inline code suggestions.
-enum AIModelChoice: String, CaseIterable {
-    case off
-    case appleIntelligence = "apple"
-    case fast
-    case regular
+/// Which AI a feature uses: none, Apple Intelligence, or a model from AIModelCatalog, by its id
+/// (Fast AI and Regular AI are "fast" and "regular"; models from Settings → Advanced have their own).
+struct AIModelChoice: Hashable {
+    let rawValue: String
+
+    init?(rawValue: String) {
+        guard !rawValue.isEmpty else { return nil }
+        self.rawValue = rawValue
+    }
+
+    private init(_ rawValue: String) { self.rawValue = rawValue }
+
+    static let off = AIModelChoice("off")
+    static let appleIntelligence = AIModelChoice("apple")
+    static let fast = AIModelChoice("fast")
+    static let regular = AIModelChoice("regular")
+
+    /// A model that downloads and runs with llama.cpp.
+    var isLocal: Bool { self != .off && self != .appleIntelligence }
 }
 
 /// User preferences, stored in UserDefaults. Changing any of them posts `didChange`.
@@ -34,6 +47,7 @@ final class AppSettings {
             Key.codeSuggestions: true,
             Key.aiModel: AIModelChoice.off.rawValue,
             Key.aiMergeModel: "",
+            Key.chatModel: AIModelChoice.appleIntelligence.rawValue,
             Key.useJIT: true,
             Key.downloadOverCellular: false,
             Key.smartCommit: false,
@@ -51,6 +65,7 @@ final class AppSettings {
         static let codeSuggestions = "settings.editor.suggestions"
         static let aiModel = "settings.ai.model"
         static let aiMergeModel = "settings.ai.mergeModel"
+        static let chatModel = "settings.ai.chatModel"
         static let useJIT = "settings.run.jit"
         static let downloadOverCellular = "settings.ai.cellular"
         static let smartCommit = "settings.git.smartCommit"
@@ -106,6 +121,12 @@ final class AppSettings {
     }
 
     var effectiveMergeModel: AIModelChoice { aiMergeModel ?? aiModel }
+
+    /// The model the Chat panel talks to.
+    var chatModel: AIModelChoice {
+        get { AIModelChoice(rawValue: defaults.string(forKey: Key.chatModel) ?? "") ?? .appleIntelligence }
+        set { set(newValue.rawValue, Key.chatModel) }
+    }
 
     var useJIT: Bool {
         get { defaults.bool(forKey: Key.useJIT) }

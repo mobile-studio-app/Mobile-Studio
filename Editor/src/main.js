@@ -35,6 +35,7 @@ import { postToHost, extensionFileAt } from './ext/host.js';
 import { setupNavigation, goToDefinition, findReferences, renameSymbol, fallbackDefinitions } from './navigate.js';
 import { openSideBySide, closeSideBySide, isSideBySide, wantsSideBySide, setSideBySidePreference } from './diffview.js';
 import { setupBlame, fileHistory } from './blame.js';
+import { setupChat, toggleChat, openChat, newChat, chatEvent, chatSelectionChanged } from './chat.js';
 import { setupLanguageFeatures, languageFeatures, quickFix, peekDefinition, closePeekView } from './langfeatures.js';
 import { setupMarkdownPreview, setPreview, refreshPreview, fileOpened, previewMode, previewSaved } from './mdpreview.js';
 import { extensionKeys, buildExtensionKeymap, currentExtensionKeymap } from './ext/keybindings.js';
@@ -157,6 +158,7 @@ function baseExtensions(path) {
       { key: 'Shift-F12', run: () => { findReferences(); return true; } },
       { key: 'F2', run: () => { renameSymbol(); return true; } },
       { key: 'Mod-.', run: (v) => { quickFix(v); return true; } },
+      { key: 'Ctrl-Mod-i', run: () => { toggleChat(); return true; } },
       { key: 'Alt-F12', run: (v) => { peekDefinition(v); return true; } },
       { key: 'Escape', run: (v) => closePeekView(v) },
       { key: 'Mod-Shift-v', run: () => { setPreview('toggle'); return true; } },
@@ -186,7 +188,7 @@ function baseExtensions(path) {
       if (current && !readOnly) {
         if (u.docChanged) mainChanged(current, u.transactions);
         if (u.docChanged) didChange(current, () => u.view.state.doc.toString());
-        if (u.selectionSet) didSelect(current, u.state);
+        if (u.selectionSet) { didSelect(current, u.state); chatSelectionChanged(); }
       }
     }),
   ];
@@ -488,6 +490,17 @@ setupWebviews({
 });
 setupNavigation({ native, view, current: () => (readOnly ? null : current), openFile: (path) => openFile(path) });
 setupBlame({ native, current: () => (readOnly ? null : current) });
+setupChat({
+  native, view, openURL, current: () => (readOnly ? null : current),
+  appCommand: (cmd) => native({ cmd }).catch(() => {}),
+});
+addCommands([
+  { command: 'workbench.action.chat.open', title: 'Chat: Open Chat', keybinding: '⌃⌘I', run: () => openChat() },
+  { command: 'workbench.action.chat.newChat', title: 'Chat: New Chat', run: () => { newChat(); openChat(); } },
+  { command: 'mobilestudio.chat.explain', title: 'Chat: Explain This Code', run: () => openChat('Explain this code.') },
+  { command: 'mobilestudio.chat.fix', title: 'Chat: Fix This Code', run: () => openChat('Find the bugs in this code and show how to fix them.') },
+]);
+$('chat-toggle').addEventListener('click', () => toggleChat());
 setupLanguageFeatures({
   fallbackDefinitions: () => fallbackDefinitions(),
   // Peek's Open: the file, with the location selected.
@@ -706,6 +719,7 @@ window.duocode = {
     if (name === 'jumpToLine' && payload?.file) jumpToLine(payload.file, payload.line || 1);
     if (name === 'reveal' && payload?.file) reveal(payload.file, payload.line || 1, payload.column || 0, payload.length || 0);
     if (name === 'openDiff' && payload?.path) openDiff(payload);
+    if (name === 'aiChatText' || name === 'aiChatDone') chatEvent(name, payload);
     if (name === 'key' && payload?.name) barKey(payload.name);
     if (name === 'saveAll') save();
     if (name === 'reload') reload();

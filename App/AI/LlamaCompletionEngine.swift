@@ -32,7 +32,7 @@ final class LlamaCompletionEngine {
     private var stopTokens = Set<llama_token>()
     private var cached: [llama_token] = []   // tokens currently in the KV cache, in order
 
-    private static let backendReady: Void = {
+    static let backendReady: Void = {
         llama_log_set({ _, _, _ in }, nil)   // llama.cpp is chatty; keep the console for the game
         llama_backend_init()
     }()

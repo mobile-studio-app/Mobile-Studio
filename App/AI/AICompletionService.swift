@@ -30,8 +30,9 @@ final class AICompletionService {
             return false
         case .appleIntelligence:
             return AppleIntelligenceEngine.unavailableReason == nil
-        case .fast, .regular:
-            guard let model = AIModelCatalog.model(for: choice) else { return false }
+        default:
+            // Suggestions and merges fill in the middle, which only code models do.
+            guard let model = AIModelCatalog.model(for: choice), model.completes else { return false }
             return model.isSupported && model.isDownloaded
         }
     }
@@ -56,8 +57,8 @@ final class AICompletionService {
             engine = nil
         }
         if mergeEngine?.model.choice != AppSettings.shared.effectiveMergeModel { mergeEngine = nil }
-        // While a merge runs on a different model, the suggestions model stays unloaded.
-        if engine == nil, mergeEngine == nil, let engine = localEngine() {
+        // While a merge runs on a different model, or a chat model is loaded, the suggestions model stays unloaded.
+        if engine == nil, mergeEngine == nil, !AIChatService.shared.hasEngine, let engine = localEngine() {
             engine.preload()
         }
     }
@@ -82,6 +83,11 @@ final class AICompletionService {
         cancel()
         // No suggestions while a merge has a different model loaded.
         guard isReady, mergeEngine == nil else { return completion(nil) }
+        // One local model in memory at a time: a chat model that isn't answering makes way.
+        if AppSettings.shared.aiModel.isLocal {
+            guard !AIChatService.shared.isBusy else { return completion(nil) }
+            AIChatService.shared.releaseIdleEngine()
+        }
 
         let cancel = CompletionCancel()
         currentCancel = cancel
@@ -105,7 +111,7 @@ final class AICompletionService {
                                                                      maxTokens: singleLine ? 48 : 160)
                 finish(text)
             }
-        case .fast, .regular:
+        default:
             guard let engine = localEngine() else { return completion(nil) }
             engine.complete(prefix: prefix, suffix: suffix, maxTokens: singleLine ? 48 : 128, maxLines: maxLines,
                             cancel: cancel) { result in
@@ -171,7 +177,7 @@ final class AICompletionService {
             resolveTask = Task {
                 finish(try? await AppleIntelligenceEngine.resolve(request, maxTokens: maxTokens))
             }
-        case .fast, .regular:
+        default:
             guard let engine = engineForMerge(choice) else { return completion(nil) }
             let prompt = ConflictResolver.fillInPrompt(request)
             engine.complete(prefix: prompt.prefix, suffix: prompt.suffix, maxTokens: maxTokens, maxLines: 400,

@@ -32,10 +32,10 @@ final class SettingsViewController: UITableViewController {
         fileprivate var sections: [Section] {
             switch self {
             case .general: return [.editor, .suggestions]
-            case .ai: return [.ai, .aiMerge]
+            case .ai: return [.ai, .aiMerge, .chat]
             case .running: return [.run, .programs]
             case .sourceControl: return [.account]
-            case .advanced: return [.files, .developer]
+            case .advanced: return [.models, .files, .developer]
             case .about: return [.about]
             }
         }
@@ -44,17 +44,17 @@ final class SettingsViewController: UITableViewController {
         var searchTerms: [String] {
             switch self {
             case .general: return ["Color Theme", "Font Size", "Indent Width", "Tab Size", "Word Wrap", "Auto Save", "Format on Save", "Code Suggestions", "Completion"]
-            case .ai: return ["AI Suggestions", "Apple Intelligence", "Fast AI", "Regular AI", "Download over Mobile Data", "AI Merge Conflicts", "Models"]
+            case .ai: return ["AI Suggestions", "Apple Intelligence", "Fast AI", "Regular AI", "Download over Mobile Data", "AI Merge Conflicts", "Chat", "Models"]
             case .running: return ["LuaJIT JIT Compiler", "Running Games", "Programs from Extensions", "Signing Certificate"]
             case .sourceControl: return ["GitHub", "Sign in", "Smart Commit"]
-            case .advanced: return ["settings.json", "keybindings.json", "Keyboard Shortcuts", "Test Automation", "Pairing Code", "Developer"]
+            case .advanced: return ["AI Models", "Download Models", "Ollama", "Llama", "Gemma", "Qwen", "Phi", "DeepSeek", "settings.json", "keybindings.json", "Keyboard Shortcuts", "Test Automation", "Pairing Code", "Developer"]
             case .about: return ["Version", "Runtimes", "Device Memory", "Licences"]
             }
         }
     }
 
     fileprivate enum Section: Int, CaseIterable {
-        case editor, suggestions, ai, aiMerge, run, programs, account, files, developer, about
+        case editor, suggestions, ai, aiMerge, chat, run, programs, account, models, files, developer, about
     }
 
     /// Posted to open a settings file (userInfo "path") in the editor.
@@ -64,9 +64,12 @@ final class SettingsViewController: UITableViewController {
         case theme, fontSize, tabSize, wordWrap, autoSave, formatOnSave
     }
 
-    private let aiChoices: [AIModelChoice] = [.off, .appleIntelligence, .fast, .regular]
+    /// Off, Apple Intelligence, Fast and Regular AI, and code models downloaded in Advanced → AI Models.
+    private var aiChoices: [AIModelChoice] { [.off, .appleIntelligence] + AIModelCatalog.completionModels.map(\.choice) }
     /// The merge conflict model's rows; nil is "Same as AI Suggestions".
-    private let mergeChoices: [AIModelChoice?] = [nil, .off, .appleIntelligence, .fast, .regular]
+    private var mergeChoices: [AIModelChoice?] { [nil] + aiChoices.map { Optional($0) } }
+    /// Apple Intelligence and the downloaded chat models.
+    private var chatChoices: [AIModelChoice] { [.appleIntelligence] + AIModelCatalog.chatModels.map(\.choice) }
     private let settings = AppSettings.shared
     private let page: Page
     private let sections: [Section]
@@ -97,25 +100,41 @@ final class SettingsViewController: UITableViewController {
         dismiss(animated: true)
     }
 
-    /// Progress updates name their model, so only that row is redrawn.
+    /// Progress updates name their model, so only its rows are redrawn. A finished download can add
+    /// rows (the model joins the lists it fits), and then the lists are rebuilt.
     @objc private func modelsChanged(_ note: Notification) {
-        guard let model = note.userInfo?["model"] as? AIModelChoice else { return reloadAIRows() }
+        guard let model = note.userInfo?["model"] as? AIModelChoice, aiRowCountsMatch() else { return reloadAIRows() }
         var rows: [IndexPath] = []
-        if let row = aiChoices.firstIndex(of: model), let section = index(.ai) { rows.append(IndexPath(row: row, section: section)) }
-        if let row = mergeChoices.firstIndex(of: model), let section = index(.aiMerge) { rows.append(IndexPath(row: row, section: section)) }
+        for (section, choices) in aiLists() {
+            if let row = choices.firstIndex(of: model) { rows.append(IndexPath(row: row, section: section)) }
+        }
         tableView.reconfigureRows(at: rows)
+    }
+
+    /// The model lists on this page: each one's section and its choices, by row.
+    private func aiLists() -> [(Int, [AIModelChoice?])] {
+        var lists: [(Int, [AIModelChoice?])] = []
+        if let section = index(.ai) { lists.append((section, aiChoices.map { Optional($0) })) }
+        if let section = index(.aiMerge) { lists.append((section, mergeChoices)) }
+        if let section = index(.chat) { lists.append((section, chatChoices.map { Optional($0) })) }
+        if let section = index(.models) { lists.append((section, AIModelCatalog.extras.map { Optional($0.choice) })) }
+        return lists
+    }
+
+    private func aiRowCountsMatch() -> Bool {
+        aiLists().allSatisfy { section, choices in
+            tableView.numberOfRows(inSection: section) == choices.count + (sections[section] == .ai ? 1 : 0)
+        }
     }
 
     @objc private func automationChanged() {
         if let section = index(.developer) { tableView.reloadSections(IndexSet(integer: section), with: .none) }
     }
 
-    /// Both model lists, whose checkmarks and download states depend on each other.
+    /// The model lists, whose checkmarks, download states and rows depend on each other.
     private func reloadAIRows() {
-        var rows: [IndexPath] = []
-        if let section = index(.ai) { rows += aiChoices.indices.map { IndexPath(row: $0, section: section) } }
-        if let section = index(.aiMerge) { rows += mergeChoices.indices.map { IndexPath(row: $0, section: section) } }
-        tableView.reconfigureRows(at: rows)
+        let lists = IndexSet(aiLists().map { $0.0 })
+        if !lists.isEmpty { tableView.reloadSections(lists, with: .none) }
     }
 
     private var cellularRow: Int { aiChoices.count }
@@ -132,6 +151,8 @@ final class SettingsViewController: UITableViewController {
         case .suggestions: return 1
         case .ai: return aiChoices.count + 1
         case .aiMerge: return mergeChoices.count
+        case .chat: return chatChoices.count
+        case .models: return AIModelCatalog.extras.count
         case .run: return 1
         case .programs: return 1
         case .account: return 2
@@ -147,6 +168,8 @@ final class SettingsViewController: UITableViewController {
         case .suggestions: return "Code Completion"
         case .ai: return "AI Suggestions"
         case .aiMerge: return "AI Merge Conflicts"
+        case .chat: return "Chat"
+        case .models: return "AI Models"
         case .run: return "Running Games"
         case .programs: return "Programs from Extensions"
         case .account: return "Source Control"
@@ -175,6 +198,17 @@ final class SettingsViewController: UITableViewController {
                 The model "Resolve for me" uses in the merge conflict editor. A bigger model merges better. \
                 If it's a different downloaded model from AI Suggestions, the suggestions model is unloaded \
                 while it works, so they don't both fill the phone's memory.
+                """
+        case .chat:
+            return """
+                The model the Chat panel (⌃⌘I) answers with. Apple Intelligence is built into iOS; more chat models \
+                download in Settings → Advanced → AI Models. Chats stay on this device.
+                """
+        case .models:
+            return """
+                More models that run on this device, from Hugging Face in GGUF format (the files Ollama and LM Studio run). \
+                Each one downloaded joins the lists it fits: code models in AI Suggestions and AI Merge Conflicts, chat \
+                models in Chat. Swipe to delete one. Bigger models answer better but need more memory and time.
                 """
         case .run:
             if #available(iOS 26.0, *) {
@@ -232,6 +266,17 @@ final class SettingsViewController: UITableViewController {
             let choice = aiChoices[indexPath.row]
             configureAIRow(choice, selected: settings.aiModel == choice, forMerge: false, cell: cell, content: &content,
                            previousAccessory: previousAccessory)
+        case .chat:
+            content = UIListContentConfiguration.subtitleCell()
+            let choice = chatChoices[indexPath.row]
+            configureAIRow(choice, selected: settings.chatModel == choice, forMerge: false, cell: cell, content: &content,
+                           previousAccessory: previousAccessory)
+        case .models:
+            content = UIListContentConfiguration.subtitleCell()
+            let model = AIModelCatalog.extras[indexPath.row]
+            configureAIRow(model.choice, selected: false, forMerge: false, cell: cell, content: &content,
+                           previousAccessory: previousAccessory)
+            content.text = "\(model.name) · \(model.uses)"
         case .aiMerge:
             content = UIListContentConfiguration.subtitleCell()
             if let choice = mergeChoices[indexPath.row] {
@@ -356,7 +401,7 @@ final class SettingsViewController: UITableViewController {
         switch choice {
         case .off: return "Off"
         case .appleIntelligence: return "Apple Intelligence"
-        case .fast, .regular: return AIModelCatalog.model(for: choice)?.name ?? ""
+        default: return AIModelCatalog.model(for: choice)?.name ?? choice.rawValue
         }
     }
 
@@ -378,8 +423,12 @@ final class SettingsViewController: UITableViewController {
             } else {
                 content.secondaryText = "Built into iOS · no download"
             }
-        case .fast, .regular:
-            let model = AIModelCatalog.model(for: choice)!
+        default:
+            guard let model = AIModelCatalog.model(for: choice) else {
+                content.text = choice.rawValue
+                content.secondaryText = "No longer available"
+                break
+            }
             content.text = model.name
             if !model.isSupported {
                 content.secondaryText = "\(model.detail) · \(model.requirementText)"
@@ -420,6 +469,10 @@ final class SettingsViewController: UITableViewController {
         switch sections[indexPath.section] {
         case .ai where indexPath.row < aiChoices.count:
             selectAI(aiChoices[indexPath.row]) { [weak self] choice in self?.settings.aiModel = choice }
+        case .chat:
+            selectAI(chatChoices[indexPath.row]) { [weak self] choice in self?.settings.chatModel = choice }
+        case .models:
+            selectAI(AIModelCatalog.extras[indexPath.row].choice) { _ in }
         case .aiMerge:
             if let choice = mergeChoices[indexPath.row] {
                 selectAI(choice) { [weak self] picked in self?.settings.aiMergeModel = picked }
@@ -522,7 +575,7 @@ final class SettingsViewController: UITableViewController {
         case .verifying:
             break
         case .notDownloaded, .failed:
-            var message = "\(model.detail) is \(model.sizeText). It downloads in the background from Hugging Face. Suggestions start once it's done."
+            var message = "\(model.detail) is \(model.sizeText) (\(model.license)). It downloads in the background from Hugging Face."
             if let waiting = ModelDownloadManager.shared.waitingReason {
                 message += waiting == "Waiting for Wi-Fi"
                     ? "\n\nYou're on mobile data, so it'll start when you join Wi-Fi. To use mobile data, turn on Download over Mobile Data."
@@ -543,6 +596,8 @@ final class SettingsViewController: UITableViewController {
         switch sections[indexPath.section] {
         case .ai where indexPath.row < aiChoices.count: choice = aiChoices[indexPath.row]
         case .aiMerge: choice = mergeChoices[indexPath.row]
+        case .chat: choice = chatChoices[indexPath.row]
+        case .models: choice = AIModelCatalog.extras[indexPath.row].choice
         default: choice = nil
         }
         guard let choice, let model = AIModelCatalog.model(for: choice), model.isDownloaded else { return nil }
@@ -550,7 +605,9 @@ final class SettingsViewController: UITableViewController {
             guard let self else { return done(false) }
             if self.settings.aiModel == model.choice { self.settings.aiModel = .off }
             if self.settings.aiMergeModel == model.choice { self.settings.aiMergeModel = nil }
+            if self.settings.chatModel == model.choice { self.settings.chatModel = .appleIntelligence }
             AICompletionService.shared.unload()
+            AIChatService.shared.unload()
             ModelDownloadManager.shared.delete(model)
             self.reloadAIRows()
             done(true)

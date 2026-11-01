@@ -763,6 +763,7 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
             appendLog("▶ Running \(project.lastPathComponent) with \(rt.manifest.displayName)")
             // The game shares the app's memory budget; a local AI model reloads when it's next needed.
             AICompletionService.shared.unload()
+            AIChatService.shared.unload()
             try runtimeHost.start(runtime: rt, project: project, debugConfig: debug ? BreakpointStore.shared.debugConfig : nil,
                                   arguments: nodeArguments(for: rt))
             if debug { beginDebugSession() }

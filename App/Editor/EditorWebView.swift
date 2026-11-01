@@ -359,6 +359,33 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                     }
                     DispatchQueue.main.async { replyHandler(["commits": commits, "lines": lines], nil) }
                 }
+            case "aiChatModels":
+                // The Chat panel's model menu (chat.js).
+                let chat = AIChatService.shared
+                replyHandler(["selected": AppSettings.shared.chatModel.rawValue,
+                              "models": chat.options.map { ["id": $0.choice.rawValue, "name": $0.name, "detail": $0.detail, "ready": $0.ready] }], nil)
+            case "aiChatSelect":
+                if let raw = body["id"] as? String, let choice = AIModelChoice(rawValue: raw) { AppSettings.shared.chatModel = choice }
+                replyHandler(true, nil)
+            case "aiChatCancel":
+                AIChatService.shared.cancel()
+                replyHandler(true, nil)
+            case "aiChat":
+                // The answer streams back as aiChatText events, then aiChatDone.
+                let id = body["id"] as? String ?? ""
+                let messages = (body["messages"] as? [[String: Any]] ?? []).compactMap { m -> ChatMessage? in
+                    guard let role = m["role"] as? String, let content = m["content"] as? String else { return nil }
+                    return ChatMessage(role: role, content: content)
+                }
+                AIChatService.shared.respond(messages, onText: { [weak self] text in
+                    self?.emit("aiChatText", ["id": id, "text": text])
+                }, completion: { [weak self] result in
+                    switch result {
+                    case .success(let text): self?.emit("aiChatDone", ["id": id, "text": text])
+                    case .failure(let error): self?.emit("aiChatDone", ["id": id, "error": error.localizedDescription])
+                    }
+                })
+                replyHandler(true, nil)
             case "gitFileHistory":
                 // Git: View File History: the commits that changed a file, and a commit's change to it.
                 let root = store.currentProject

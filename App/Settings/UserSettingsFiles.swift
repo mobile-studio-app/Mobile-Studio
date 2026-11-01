@@ -74,7 +74,7 @@ enum UserSettingsFiles {
     /// The app's settings under VS Code's names.
     private static let appKeys: Set<String> = [
         "workbench.colorTheme", "editor.fontSize", "editor.tabSize", "editor.wordWrap", "files.autoSave",
-        "editor.formatOnSave", "mobileStudio.codeSuggestions", "mobileStudio.ai.model", "mobileStudio.ai.mergeModel",
+        "editor.formatOnSave", "mobileStudio.codeSuggestions", "mobileStudio.ai.model", "mobileStudio.ai.mergeModel", "mobileStudio.ai.chatModel",
         "mobileStudio.ai.downloadOverMobileData", "mobileStudio.luajit.jit", "git.enableSmartCommit",
     ]
 
@@ -89,6 +89,7 @@ enum UserSettingsFiles {
             "editor.formatOnSave": s.formatOnSave,
             "mobileStudio.codeSuggestions": s.codeSuggestions,
             "mobileStudio.ai.model": s.aiModel.rawValue,
+            "mobileStudio.ai.chatModel": s.chatModel.rawValue,
             "mobileStudio.ai.downloadOverMobileData": s.downloadOverCellular,
             "mobileStudio.luajit.jit": s.useJIT,
             "git.enableSmartCommit": s.smartCommit,
@@ -127,6 +128,7 @@ enum UserSettingsFiles {
         if let on = bool("mobileStudio.codeSuggestions"), on != s.codeSuggestions { s.codeSuggestions = on }
         if let raw = values["mobileStudio.ai.model"] as? String, let choice = AIModelChoice(rawValue: raw), choice != s.aiModel { s.aiModel = choice }
         if let raw = values["mobileStudio.ai.mergeModel"] as? String, let choice = AIModelChoice(rawValue: raw) { s.aiMergeModel = choice }
+        if let raw = values["mobileStudio.ai.chatModel"] as? String, let choice = AIModelChoice(rawValue: raw), choice != s.chatModel { s.chatModel = choice }
         if let on = bool("mobileStudio.ai.downloadOverMobileData"), on != s.downloadOverCellular { s.downloadOverCellular = on }
         if let on = bool("mobileStudio.luajit.jit"), on != s.useJIT { s.useJIT = on }
         if let on = bool("git.enableSmartCommit"), on != s.smartCommit { s.smartCommit = on }

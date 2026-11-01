@@ -22,6 +22,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     func applicationDidReceiveMemoryWarning(_ application: UIApplication) {
         // A local model is the biggest thing we can give back; it reloads on the next suggestion.
         AICompletionService.shared.unload()
+        AIChatService.shared.unload()
     }
 
     // MARK: - Menu bar
@@ -57,6 +58,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             item("Debug Console", "workbench.debug.action.toggleRepl", "y", [.command, .shift]),
             item("Terminal", "workbench.action.terminal.toggleTerminal", "`", .control),
             item("Toggle Panel", "workbench.action.togglePanel", "j"),
+            item("Chat", "workbench.action.chat.open", "i", [.control, .command]),
         ]), atEndOfMenu: .view)
         builder.insertChild(group([
             item("Split Editor", "workbench.action.splitEditor", "\\"),
