@@ -659,10 +659,12 @@ setTimeout(() => console.log('done'), 500);
       sys.style.fontSize = safeTop < 30 ? '12px' : '16px';
       sys.style.paddingRight = (c && c.kind === 'hole' && !landscape) ? '48px' : '32px';
 
-      // contentArea and the status bar sit inside the safe area; the status colour runs under the home indicator.
-      Object.assign($('contentArea').style, { left: safeSide + 'px', right: safeSide + 'px', top: safeTop + 'px', bottom: (safeBottom + STATUS_BAR_HEIGHT) + 'px' });
-      Object.assign($('statusBar').style, { left: safeSide + 'px', right: safeSide + 'px', bottom: safeBottom + 'px' });
-      $('statusBackdrop').style.height = (safeBottom + STATUS_BAR_HEIGHT) + 'px';
+      // contentArea sits inside the safe area. The status bar reaches down into the home indicator's
+      // area, 14 points short of the inset (IDEViewController.statusBarGap), and its colour runs to the edge.
+      const statusGap = safeBottom > 0 ? Math.max(0, safeBottom - 14) : 0;
+      Object.assign($('contentArea').style, { left: safeSide + 'px', right: safeSide + 'px', top: safeTop + 'px', bottom: (statusGap + STATUS_BAR_HEIGHT) + 'px' });
+      Object.assign($('statusBar').style, { left: safeSide + 'px', right: safeSide + 'px', bottom: statusGap + 'px' });
+      $('statusBackdrop').style.height = (statusGap + STATUS_BAR_HEIGHT) + 'px';
       $('homeIndicator').style.display = safeBottom > 0 ? 'block' : 'none';
 
       const on = 'px-2.5 py-1 font-medium rounded-md bg-blue-600 text-white';

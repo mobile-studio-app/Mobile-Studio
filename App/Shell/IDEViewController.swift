@@ -342,6 +342,20 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
         bar.setMaximized(false)
     }
 
+    /// The status bar's bottom edge: down into the home indicator's area, so the bar isn't 22 points
+    /// of text on top of an empty blue strip, but clear of the indicator itself.
+    private lazy var statusBottom = statusBar.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+
+    /// How far the status bar sits above the screen's bottom edge for a bottom safe-area inset.
+    static func statusBarGap(bottomInset: CGFloat) -> CGFloat {
+        bottomInset > 0 ? max(0, bottomInset - 14) : 0
+    }
+
+    override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        statusBottom.constant = -Self.statusBarGap(bottomInset: view.safeAreaInsets.bottom)
+    }
+
     private func setupStatusBar() {
         statusBackdrop.backgroundColor = Self.vsCodeBlue
         statusBackdrop.translatesAutoresizingMaskIntoConstraints = false
@@ -379,7 +393,7 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
             contentArea.topAnchor.constraint(equalTo: safe.topAnchor),
             contentArea.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
 
-            statusBar.bottomAnchor.constraint(equalTo: safe.bottomAnchor),
+            statusBottom,
             statusBar.heightAnchor.constraint(equalToConstant: Self.statusBarHeight),
 
             // The status bar colour runs under the home indicator.
