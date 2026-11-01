@@ -176,6 +176,15 @@
     .cursor-pos { display: none; }
     #tabbar { padding: 0 4px 0 0; }
   }
+  /* Touch screens: the tab bar's buttons are finger-sized (44 points, as iOS asks), not VS Code's
+     mouse-sized ones. A trackpad or mouse as the main pointer keeps the compact bar. */
+  @media (pointer: coarse) {
+    #tabbar { height: 44px; padding-right: 2px; }
+    #tabbar .palette-button { width: 44px; height: 44px; margin-left: 0; font-size: 19px; border-radius: 8px; }
+    .tab { padding: 0 2px 0 12px; }
+    .tab-close { width: 34px; height: 34px; line-height: 34px; border-radius: 6px; }
+    .tab-close::before, .tab-close.dirty::before { font-size: 18px; }
+  }
   .ai-busy { flex: none; margin-left: 8px; font-size: 11px; color: var(--muted); animation: ai-pulse 1s ease-in-out infinite alternate; }
   .ai-busy[hidden] { display: none; }
   @keyframes ai-pulse { from { opacity: .35; } to { opacity: 1; } }
