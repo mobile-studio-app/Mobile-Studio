@@ -775,6 +775,14 @@ final class GitManager {
         return out
     }
 
+    /// git blame for `path` with the text `current` (the editor's, saved or not): for each line, the
+    /// commit that last changed it, or nil when it isn't committed yet.
+    func blame(_ path: String, current: String, in url: URL, limit: Int = 300) -> [GitCommit?] {
+        let commits = history(in: url, limit: limit).filter { $0.hasSnapshot }
+        let versions = commits.map { text(of: path, at: .commit($0.id), in: url) }
+        return LineDiff.blame(current: current, versions: versions).map { index in index.map { commits[$0] } }
+    }
+
     // MARK: - Discard Changes
 
     /// Puts a file back the way it's staged (or committed, if not staged). Untracked files are deleted.

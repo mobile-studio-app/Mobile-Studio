@@ -7,6 +7,7 @@ import { themeExtension, applyChrome } from './theme.js';
 import { languageFor } from './languages.js';
 import { minimap, stickyScroll } from './overview.js';
 import { inlayHints } from './langfeatures.js';
+import { blame } from './blame.js';
 
 export const settings = {
   theme: 'dark-plus',
@@ -22,6 +23,7 @@ export const settings = {
   minimap: true,
   stickyScroll: true,
   inlayHints: true,
+  blame: true,         // git.blame.editorDecoration.enabled
 };
 
 const themeSlot = new Compartment();
@@ -35,7 +37,7 @@ const fontExt = () => EditorView.theme({ '&': { fontSize: `${settings.fontSize}p
 const indentExt = () => [EditorState.tabSize.of(settings.tabSize), indentUnit.of(' '.repeat(settings.tabSize))];
 const wrapExt = () => (settings.wordWrap ? EditorView.lineWrapping : []);
 const languageExt = (path) => languageFor(path, { suggestions: settings.suggestions }).extensions;
-const overviewExt = () => [settings.minimap ? minimap : [], settings.stickyScroll ? stickyScroll : [], settings.inlayHints ? inlayHints : []];
+const overviewExt = () => [settings.minimap ? minimap : [], settings.stickyScroll ? stickyScroll : [], settings.inlayHints ? inlayHints : [], settings.blame ? blame : []];
 
 /** The settings-driven extensions for a new editor state. */
 export function settingsExtensions(path) {

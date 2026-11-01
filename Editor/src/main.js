@@ -33,6 +33,8 @@ import { findWidget } from './findwidget.js';
 import { setupWebviews, reveal as revealWebview, closeWebview } from './ext/webviews.js';
 import { postToHost, extensionFileAt } from './ext/host.js';
 import { setupNavigation, goToDefinition, findReferences, renameSymbol, fallbackDefinitions } from './navigate.js';
+import { openSideBySide, closeSideBySide, isSideBySide, wantsSideBySide, setSideBySidePreference } from './diffview.js';
+import { setupBlame } from './blame.js';
 import { setupLanguageFeatures, languageFeatures, quickFix, peekDefinition, closePeekView } from './langfeatures.js';
 import { setupMarkdownPreview, setPreview, refreshPreview, fileOpened, previewMode, previewSaved } from './mdpreview.js';
 import { extensionKeys, buildExtensionKeymap, currentExtensionKeymap } from './ext/keybindings.js';
@@ -296,6 +298,8 @@ async function reopenWith() {
   await openCustomEditor(editors[chosen - 1].viewType, path, path.split('/').pop());
 }
 addCommands([{ command: 'workbench.action.reopenWithEditor', title: 'View: Reopen Editor With…', run: () => reopenWith() }]);
+addCommands([{ command: 'toggle.diff.renderSideBySide', title: 'Diff Editor: Toggle Inline View', run: () => toggleDiffLayout() }]);
+$('diff-mode').addEventListener('click', () => toggleDiffLayout());
 // VS Code's settings files (App/Settings/UserSettingsFiles.swift).
 addCommands([
   { command: 'workbench.action.openSettingsJson', title: 'Preferences: Open User Settings (JSON)', run: () => openFile('@user/settings.json') },
@@ -363,6 +367,7 @@ function showText(path, text) {
 
 async function openFile(path) {
   revealWebview(null);
+  leaveDiff();
   merge.closeReview();
   if (dirty) await save();
   hideDocsSheet();
@@ -434,6 +439,7 @@ function pathMoved(from, to) {
 
 /** No file open (the last tab closed). */
 function showEmpty() {
+  leaveDiff();
   current = null;
   readOnly = true;
   setDirty(false);
@@ -480,6 +486,7 @@ setupWebviews({
   extensionOf: extensionFileAt,
 });
 setupNavigation({ native, view, current: () => (readOnly ? null : current), openFile: (path) => openFile(path) });
+setupBlame({ native, current: () => (readOnly ? null : current) });
 setupLanguageFeatures({
   fallbackDefinitions: () => fallbackDefinitions(),
   // Peek's Open: the file, with the location selected.
@@ -576,7 +583,30 @@ async function reveal(path, lineNumber, column, length) {
 
 // A diff from Source Control. Without `modified` the working file opens editable, diffed against
 // `original`; otherwise it's a read-only snapshot (the staged copy, a deleted file, a commit).
+let lastDiff = null;   // the open diff, for Toggle Inline View
+
+function leaveDiff() {
+  closeSideBySide();
+  lastDiff = null;
+  $('diff-mode').hidden = true;
+}
+
+/** Diff Editor: Toggle Inline View, between the inline diff and side by side. */
+function toggleDiffLayout() {
+  if (!lastDiff) return;
+  const side = !isSideBySide();
+  setSideBySidePreference(side);
+  if (side) showSideBySide(); else { closeSideBySide(); view.focus(); }
+  $('diff-mode').classList.toggle('on', side);
+}
+
+function showSideBySide() {
+  const { path, original, modified } = lastDiff;
+  openSideBySide({ view, path, original, readOnly: modified != null, save: () => save() });
+}
+
 async function openDiff({ path, original, modified, title }) {
+  leaveDiff();
   if (modified == null) {
     await openFile(path);
     if (readOnly || current !== path) return;
@@ -599,6 +629,10 @@ async function openDiff({ path, original, modified, title }) {
   }
   view.dispatch({ effects: diffSlot.reconfigure(diffExtension(original)) });
   showTab({ key: 'diff:' + path, path, title: title || path, icon: '⇄' });
+  lastDiff = { path, original, modified };
+  $('diff-mode').hidden = false;
+  $('diff-mode').classList.toggle('on', wantsSideBySide());
+  if (wantsSideBySide()) { showSideBySide(); return; }
   // Start at the first change, as VS Code does.
   requestAnimationFrame(() => {
     view.dispatch({ selection: { anchor: 0 } });

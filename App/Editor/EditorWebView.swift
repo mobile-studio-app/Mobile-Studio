@@ -339,6 +339,26 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                     replyHandler(["out": result.text, "code": Int(result.code)], nil)
                     NotificationCenter.default.post(name: ProjectStore.filesDidChange, object: store)
                 }
+            case "gitBlame":
+                // The editor's blame annotation (blame.js): the commits, and each line's index into them.
+                let root = store.currentProject
+                let path = body["path"] as? String ?? ""
+                let text = body["text"] as? String ?? ""
+                guard GitManager.shared.isGitRepo(at: root) else { replyHandler(NSNull(), nil); return }
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let owners = GitManager.shared.blame(path, current: text, in: root)
+                    var commits: [[String: Any]] = []
+                    var index: [String: Int] = [:]
+                    let lines: [Int] = owners.map { commit in
+                        guard let commit else { return -1 }
+                        if let at = index[commit.id] { return at }
+                        index[commit.id] = commits.count
+                        commits.append(["id": commit.id, "author": commit.author, "date": commit.date.timeIntervalSince1970 * 1000,
+                                        "message": commit.message])
+                        return commits.count - 1
+                    }
+                    DispatchQueue.main.async { replyHandler(["commits": commits, "lines": lines], nil) }
+                }
             case "write":
                 let path = body["path"] as? String ?? ""
                 let contents = body["contents"] as? String ?? ""

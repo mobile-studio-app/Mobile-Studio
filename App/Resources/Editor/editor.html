@@ -89,6 +89,14 @@
   .cm-peek-where { color: var(--fg); }
   .cm-peek-preview { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, Menlo, monospace; }
   @media (max-width: 560px) { .cm-peek-body { flex-direction: column; height: 300px; } .cm-peek-list { width: auto; max-width: none; height: 90px; border-right: 0; border-bottom: 1px solid var(--border-strong); } }
+  /* blame.js: who last changed the cursor's line. */
+  .cm-blame { margin-left: 2.5em; color: var(--muted); opacity: 0.65; font-style: italic; white-space: nowrap; cursor: pointer; -webkit-user-select: none; user-select: none; }
+  /* diffview.js: the side-by-side diff. */
+  .diff-side { position: absolute; inset: 0; z-index: 5; background: var(--bg); }
+  .diff-side[hidden] { display: none; }
+  .diff-side .cm-mergeView { height: 100%; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .diff-side .cm-mergeViewEditor:first-child { border-right: 1px solid var(--border-strong); }
+  .diff-side .cm-merge-revert button { background: none; border: 0; color: var(--muted); font-size: 14px; padding: 0 2px; }
   /* overview.js: the minimap and sticky scroll. */
   .cm-minimap { position: absolute; top: 0; right: 0; bottom: 0; width: 72px; height: 100%; z-index: 4; touch-action: none; cursor: default; background: var(--bg); box-shadow: -1px 0 0 var(--border-strong); }
   .cm-minimap[hidden] { display: none; }
@@ -427,6 +435,7 @@
     <div id="tabs" class="tabs"></div>
     <span id="pos" class="cursor-pos"></span>
     <span id="ai-busy" class="ai-busy" hidden title="AI is thinking">✦</span>
+    <button id="diff-mode" class="palette-button" title="Toggle Inline View" aria-label="Toggle Inline View" hidden>&#xEB56;</button>
     <button id="md-toggle" class="palette-button" title="Open Preview (⇧⌘V)" aria-label="Open Preview" hidden>&#xEB2F;</button>
     <button id="palette" class="palette-button" title="Command Palette (⇧⌘P)" aria-label="Command Palette">&#xEA6D;</button>
   </div>
@@ -434,6 +443,7 @@
   <div id="editor-row">
   <div id="editor-container">
     <div id="md-preview" class="md-preview" hidden></div>
+    <div id="diff-side" class="diff-side" hidden></div>
     <div id="webviews" class="webviews" hidden></div>
     <div id="empty-editor" hidden><div>No editor is open.<br>Open a file from the Explorer, or press <kbd>⌘P</kbd> to go to one.</div></div>
     <div id="viewer" hidden>

@@ -552,6 +552,21 @@ do {
     check(runGit(["add", "missing.txt"], repo).code == 128, "adding a path with no changes fails")
 }
 
+section("git blame")
+do {
+    // Newest first: c3 changed line 2 and added "d"; c2 added "c"; c1 made the file.
+    let v1 = "a\nb\n"
+    let v2 = "a\nb\nc\n"
+    let v3 = "a\nB\nc\nd\n"
+    let current = "a\nB\nc\nd\nnew\n"
+    let owners = LineDiff.blame(current: current, versions: [v3, v2, v1])
+    check(owners == [2, 0, 1, 0, nil], "each line's commit, and uncommitted lines: \(owners)")
+    check(LineDiff.blame(current: "x\n", versions: []) == [nil], "no history: nothing committed")
+    check(LineDiff.blame(current: "a\n", versions: ["a\n", nil]) == [0], "the commit that created the file")
+    check(LineDiff.blame(current: "a\nb\n", versions: ["a\nb\n", "a\nb\n", "a\n"]) == [2, 1], "commits that didn't touch the file are skipped")
+    check(LineDiff.mapping(from: ["a", "x", "c"], to: ["a", "b", "c"]) == [0, nil, 2], "line mapping")
+}
+
 section("settings.json: JSON with comments")
 do {
     let text = """

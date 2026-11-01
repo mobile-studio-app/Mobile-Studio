@@ -439,6 +439,50 @@ enum LineDiff {
         return out.reversed()
     }
 
+    /// For each line of `new`, the line of `old` it's unchanged from (nil: added).
+    static func mapping(from new: [String], to old: [String]) -> [Int?] {
+        var out: [Int?] = []
+        out.reserveCapacity(new.count)
+        var i = 0
+        for line in diff(old, new) {
+            switch line {
+            case .same: out.append(i); i += 1
+            case .removed: i += 1
+            case .added: out.append(nil)
+            }
+        }
+        return out
+    }
+
+    /// git blame: for each line of `current`, the version it was last changed in. `versions` are
+    /// the file as of each commit, newest first (nil where it didn't exist); a line's answer is the
+    /// index of the commit that added it, or nil when it's newer than versions[0] (not committed).
+    static func blame(current: String, versions: [String?]) -> [Int?] {
+        let currentLines = lines(current)
+        var owner = [Int?](repeating: nil, count: currentLines.count)
+        guard let first = versions.first, let firstText = first else { return owner }
+        var newer = lines(firstText)
+        // Where each line of `current` is in the version being looked at (nil: attributed, or uncommitted).
+        var position = mapping(from: currentLines, to: newer)
+        for k in versions.indices {
+            guard position.contains(where: { $0 != nil }) else { break }
+            // Lines of version k that aren't in version k+1 were added by commit k.
+            guard k + 1 < versions.count, let olderText = versions[k + 1] else {
+                for i in position.indices where position[i] != nil { owner[i] = k; position[i] = nil }
+                break
+            }
+            let older = lines(olderText)
+            if older == newer { continue }
+            let map = mapping(from: newer, to: older)
+            for i in position.indices {
+                guard let p = position[i] else { continue }
+                if let q = map[p] { position[i] = q } else { owner[i] = k; position[i] = nil }
+            }
+            newer = older
+        }
+        return owner
+    }
+
     /// git's unified diff for one file, with `context` lines around each change.
     static func unified(old: String, new: String, path: String, isNew: Bool = false, isDeleted: Bool = false,
                         context: Int = 3, color: Bool = false) -> String {

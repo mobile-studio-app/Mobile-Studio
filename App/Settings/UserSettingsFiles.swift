@@ -164,6 +164,7 @@ enum UserSettingsFiles {
         let both = userValues().merging(values) { _, project in project }
         if let on = (both["editor.minimap.enabled"] as? NSNumber)?.boolValue { out["minimap"] = on }
         if let on = (both["editor.stickyScroll.enabled"] as? NSNumber)?.boolValue { out["stickyScroll"] = on }
+        if let on = (both["git.blame.editorDecoration.enabled"] as? NSNumber)?.boolValue { out["blame"] = on }
         if let hints = both["editor.inlayHints.enabled"] {
             out["inlayHints"] = (hints as? String).map { $0 == "on" || $0 == "onUnlessPressed" } ?? (hints as? NSNumber)?.boolValue ?? true
         }
