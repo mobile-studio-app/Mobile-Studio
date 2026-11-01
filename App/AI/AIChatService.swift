@@ -1,4 +1,5 @@
 import Foundation
+import os
 import llama
 
 /// One turn of a chat: "system", "user" or "assistant".
@@ -28,23 +29,59 @@ final class AIChatService {
         let name: String
         let detail: String
         let ready: Bool
-        /// Tokens the model reads at once: the conversation and its answer.
-        let contextSize: Int
+        /// The context sizes it can have, each with its estimated memory and whether that fits.
+        let contexts: [ContextSize]
+    }
+
+    struct ContextSize {
+        let tokens: Int
+        let bytes: Int64
+        let fits: Bool
     }
 
     /// Apple Intelligence's context window.
     static let appleContextSize = 4096
+    static let contextSizes = [2048, 4096, 8192, 16384, 32768, 65536, 131072]
+
+    /// A context's memory: the model, its KV cache at 8 bits (about 53% of the 16-bit size, with
+    /// the scales) and room for the computation.
+    static func memory(of model: LocalModel, context: Int) -> Int64 {
+        model.bytes + Int64(Double(model.kvBytesPerToken) * Double(context) * 0.53) + 300_000_000
+    }
+
+    /// Memory the app can still use, plus what loaded chat models already take (they'd be replaced).
+    private var memoryForChat: Int64 {
+        let free = Int64(os_proc_available_memory())
+        let loaded = engines.values.reduce(Int64(0)) { $0 + Self.memory(of: $1.model, context: $1.contextSize) }
+        return free + loaded
+    }
+
+    /// The sizes a model offers: up to its trained length, each marked whether it fits now.
+    func contexts(for model: LocalModel) -> [ContextSize] {
+        let budget = memoryForChat
+        return Self.contextSizes.filter { $0 <= model.trainedContext }.map { size in
+            let bytes = Self.memory(of: model, context: size)
+            return ContextSize(tokens: size, bytes: bytes, fits: Double(bytes) < Double(budget) * 0.9)
+        }
+    }
+
+    /// The context a request gets: the setting, but no more than the model was trained for or
+    /// than fits in memory (at least 2K).
+    func effectiveContext(for model: LocalModel, wanted: Int) -> Int {
+        let usable = contexts(for: model).filter { $0.fits }.map(\.tokens)
+        return min(wanted, usable.max() ?? 2048, model.trainedContext)
+    }
 
     /// The models the Chat panel offers: Apple Intelligence, the downloaded chat models, and the
     /// downloaded code models (which answer less well, but can).
     var options: [Option] {
         let reason = AppleIntelligenceEngine.unavailableReason
         var list = [Option(choice: .appleIntelligence, name: "Apple Intelligence", detail: reason ?? "Built into iOS",
-                           ready: reason == nil, contextSize: Self.appleContextSize)]
+                           ready: reason == nil, contexts: [ContextSize(tokens: Self.appleContextSize, bytes: 0, fits: true)])]
         for model in AIModelCatalog.all where model.isDownloaded && (model.chats || model.completes) {
             let detail = model.isSupported ? (model.chats ? model.detail : "\(model.detail) · a code model, chats less well") : model.requirementText
             list.append(Option(choice: model.choice, name: model.chats ? model.name : "\(model.name) (\(model.detail))", detail: detail,
-                               ready: model.isSupported, contextSize: AppSettings.shared.chatContextSize))
+                               ready: model.isSupported, contexts: contexts(for: model)))
         }
         return list
     }
@@ -71,7 +108,8 @@ final class AIChatService {
 
     /// Answers `messages` (the last is the user's) with `choice` (the Chat model when nil). `onText`
     /// gets the answer so far; both callbacks run on the main queue. Stopping keeps what was written.
-    func respond(id: String, choice: AIModelChoice? = nil, _ messages: [ChatMessage], maxTokens: Int = 1536,
+    /// `contextSize`: the tokens wanted (Chat's or the subagents' setting); the model gets as many as fit.
+    func respond(id: String, choice: AIModelChoice? = nil, contextSize: Int? = nil, _ messages: [ChatMessage], maxTokens: Int = 1536,
                  onText: @escaping (String) -> Void, completion: @escaping (Result<String, Error>) -> Void) {
         cancel(id)
         let choice = choice ?? AppSettings.shared.chatModel
@@ -95,8 +133,11 @@ final class AIChatService {
         guard model.isSupported else { return completion(.failure(Self.error("\(model.name): \(model.requirementText)"))) }
         // The suggestions model makes way while chatting.
         AICompletionService.shared.unload()
-        let size = AppSettings.shared.chatContextSize
-        if engines[model.id]?.contextSize != size { engines[model.id] = LlamaChatEngine(model: model, contextSize: size) }
+        // One engine per model: a smaller request uses a bigger loaded context; a bigger one reloads it.
+        let size = effectiveContext(for: model, wanted: contextSize ?? AppSettings.shared.chatContextSize)
+        if (engines[model.id]?.contextSize ?? 0) < size {
+            engines[model.id] = LlamaChatEngine(model: model, contextSize: size)
+        }
         guard let engine = engines[model.id] else { return }
         let cancel = CompletionCancel()
         cancels[id] = cancel
@@ -165,7 +206,13 @@ final class LlamaChatEngine {
 
         let threads = Int32(max(2, min(4, ProcessInfo.processInfo.activeProcessorCount - 2)))
         var contextParams = llama_context_default_params()
-        contextParams.n_ctx = UInt32(max(1024, contextSize))
+        // No more than the model was trained for. The KV cache is kept at 8 bits, half the memory of
+        // 16, which needs flash attention for the V half.
+        let trained = Int(llama_model_n_ctx_train(loaded))
+        contextParams.n_ctx = UInt32(max(1024, trained > 0 ? min(contextSize, trained) : contextSize))
+        contextParams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED
+        contextParams.type_k = GGML_TYPE_Q8_0
+        contextParams.type_v = GGML_TYPE_Q8_0
         contextParams.n_batch = 512
         contextParams.n_ubatch = 512
         contextParams.n_threads = threads

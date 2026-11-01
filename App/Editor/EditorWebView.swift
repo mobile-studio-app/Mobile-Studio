@@ -388,8 +388,10 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 let s = AppSettings.shared
                 replyHandler(["selected": s.chatModel.rawValue,
                               "models": AIChatService.shared.options.map {
-                                  ["id": $0.choice.rawValue, "name": $0.name, "detail": $0.detail, "ready": $0.ready, "contextSize": $0.contextSize]
+                                  ["id": $0.choice.rawValue, "name": $0.name, "detail": $0.detail, "ready": $0.ready,
+                                   "contexts": $0.contexts.map { ["tokens": $0.tokens, "bytes": $0.bytes, "fits": $0.fits] }]
                               },
+                              "subagentContextSize": s.subagentContextSize,
                               "contextSize": s.chatContextSize, "subagentModel": s.subagentModel?.rawValue ?? "",
                               "subagentParallel": s.subagentParallel, "mode": s.chatMode], nil)
             case "aiChatSelect":
@@ -400,6 +402,9 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 if let size = body["contextSize"] as? Int { s.chatContextSize = size }
                 if let raw = body["subagentModel"] as? String { s.subagentModel = AIModelChoice(rawValue: raw) }
                 if let count = body["subagentParallel"] as? Int { s.subagentParallel = count }
+                if let size = body["subagentContextSize"] as? Int { s.subagentContextSize = size }
+                // A new size takes effect when the model next loads.
+                if body["contextSize"] != nil || body["subagentContextSize"] != nil { AIChatService.shared.releaseIdleEngine() }
                 if let mode = body["mode"] as? String { s.chatMode = mode }
                 replyHandler(true, nil)
             case "aiChatCancel":
@@ -415,7 +420,8 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 // A subagent names its own model; the conversation uses the Chat model.
                 let choice = (body["model"] as? String).flatMap(AIModelChoice.init(rawValue:))
                 let maxTokens = body["maxTokens"] as? Int ?? 1536
-                AIChatService.shared.respond(id: id, choice: choice, messages, maxTokens: maxTokens, onText: { [weak self] text in
+                let contextSize = body["contextSize"] as? Int
+                AIChatService.shared.respond(id: id, choice: choice, contextSize: contextSize, messages, maxTokens: maxTokens, onText: { [weak self] text in
                     self?.emit("aiChatText", ["id": id, "text": text])
                 }, completion: { [weak self] result in
                     switch result {

@@ -51,6 +51,7 @@ final class AppSettings {
             Key.chatContextSize: 4096,
             Key.subagentModel: "",
             Key.subagentParallel: 2,
+            Key.subagentContextSize: 4096,
             Key.chatMode: "edit",
             Key.useJIT: true,
             Key.downloadOverCellular: false,
@@ -74,6 +75,7 @@ final class AppSettings {
         static let chatContextSize = "settings.ai.chatContextSize"
         static let subagentModel = "settings.ai.subagentModel"
         static let subagentParallel = "settings.ai.subagentParallel"
+        static let subagentContextSize = "settings.ai.subagentContextSize"
         static let chatMode = "settings.ai.chatMode"
         static let useJIT = "settings.run.jit"
         static let downloadOverCellular = "settings.ai.cellular"
@@ -155,6 +157,12 @@ final class AppSettings {
     var subagentParallel: Int {
         get { min(8, max(0, defaults.integer(forKey: Key.subagentParallel))) }
         set { set(newValue, Key.subagentParallel) }
+    }
+
+    /// Tokens a subagent's model reads at once (it can differ from Chat's: a small model, a big context).
+    var subagentContextSize: Int {
+        get { max(1024, defaults.integer(forKey: Key.subagentContextSize)) }
+        set { set(newValue, Key.subagentContextSize) }
     }
 
     /// What the Chat agent may do without asking: manual, edit, auto or turbo.

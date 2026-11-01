@@ -19,7 +19,7 @@ let pane = null;
 let messages = [];        // { role: 'user' | 'assistant', content (the model's), shown?, kind?: 'tool' | 'summary' }
 let busy = false;
 let stopped = false;
-let settings = { models: [], selected: 'apple', contextSize: 4096, subagentModel: '', subagentParallel: 2, mode: 'edit' };
+let settings = { models: [], selected: 'apple', contextSize: 4096, subagentModel: '', subagentParallel: 2, subagentContextSize: 4096, mode: 'edit' };
 const allowedThisChat = new Set();   // tools "Always" was picked for
 const requests = new Map();          // request id → { resolve, onText }
 let nextId = 1;
@@ -49,8 +49,18 @@ export function setupChat(options) { api = options; }
 /** About how many tokens a text is (code runs about 3.5 characters a token). */
 const tokens = (text) => Math.ceil(String(text || '').length / 3.5);
 
-const currentModel = () => settings.models.find((m) => m.id === settings.selected) || settings.models[0];
-const contextLimit = (modelId) => (settings.models.find((m) => m.id === (modelId || settings.selected)) || {}).contextSize || 4096;
+const modelInfo = (id) => settings.models.find((m) => m.id === id) || {};
+
+/** The context a model gets for a wanted size: no more than it was trained for, or than fits. */
+function effectiveContext(modelId, wanted) {
+  const contexts = modelInfo(modelId).contexts || [];
+  if (!contexts.length) return wanted;
+  const usable = contexts.filter((c) => c.fits).map((c) => c.tokens);
+  return Math.min(wanted, usable.length ? Math.max(...usable) : 2048, Math.max(...contexts.map((c) => c.tokens)));
+}
+
+const contextLimit = () => effectiveContext(settings.selected, settings.contextSize);
+const subagentModel = () => settings.subagentModel || settings.selected;
 
 function toolHelp(subagents) {
   return [
@@ -80,11 +90,11 @@ function systemPrompt() {
 }
 
 /** Asks the model; `onText` gets the answer as it's written. Resolves with { text, error, stopped }. */
-function ask(chat, { model, maxTokens, onText } = {}) {
+function ask(chat, { model, maxTokens, onText, contextSize } = {}) {
   const id = 'c' + nextId++;
   return new Promise((resolve) => {
     requests.set(id, { resolve, onText });
-    api.native({ cmd: 'aiChat', id, messages: chat, model: model || undefined, maxTokens: maxTokens || 1536 })
+    api.native({ cmd: 'aiChat', id, messages: chat, model: model || undefined, maxTokens: maxTokens || 1536, contextSize: contextSize || settings.contextSize })
       .catch((e) => { requests.delete(id); resolve({ error: String(e && e.message ? e.message : e) }); });
   });
 }
@@ -263,7 +273,7 @@ async function runTool(call, { subagent = false } = {}) {
 
 /** Runs research tasks on the subagent model, up to the parallel setting at a time. */
 async function runSubagents(tasks) {
-  const model = settings.subagentModel || settings.selected;
+  const model = subagentModel();
   const answers = new Array(tasks.length);
   const card = progressCard(tasks);
   let next = 0;
@@ -285,7 +295,7 @@ async function subagent(task, model) {
     { role: 'user', content: task },
   ];
   for (let step = 0; step < 6 && !stopped; step++) {
-    const reply = await ask(chat, { model, maxTokens: 768 });
+    const reply = await ask(chat, { model, maxTokens: 768, contextSize: settings.subagentContextSize });
     if (reply.error) return `(failed: ${reply.error})`;
     const calls = toolCalls(reply.text);
     chat.push({ role: 'assistant', content: reply.text });
@@ -423,6 +433,7 @@ function build() {
     if (model.value === '__more__') { api.appCommand('settings'); loadSettings(); return; }
     settings.selected = model.value;
     api.native({ cmd: 'aiChatSelect', id: model.value }).catch(() => {});
+    renderSettings();
     updateMeter();
   });
   const options = element('button', 'chat-icon codicon', '');
@@ -525,6 +536,30 @@ async function loadSettings() {
   updateMeter();
 }
 
+/** The sizes a model can have, with their memory; the ones that won't fit are greyed out. */
+function contextSelect(modelId, current, onChange) {
+  const s = element('select');
+  const contexts = modelInfo(modelId).contexts || [];
+  const k = (n) => (n >= 1024 ? n / 1024 + 'K' : String(n));
+  const gb = (b) => (b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : Math.round(b / 1e6) + ' MB');
+  if (modelId === 'apple' || !contexts.some((c) => c.bytes > 0)) {
+    const o = element('option', null, `${k((contexts[0] || {}).tokens || 4096)} (fixed)`);
+    s.append(o);
+    s.disabled = true;
+    return s;
+  }
+  const effective = effectiveContext(modelId, current);
+  for (const c of contexts) {
+    const o = element('option', null, `${k(c.tokens)} · ≈${gb(c.bytes)}${c.fits ? '' : ' (won\'t fit)'}`);
+    o.value = String(c.tokens);
+    o.disabled = !c.fits;
+    o.selected = c.tokens === effective;
+    s.append(o);
+  }
+  s.addEventListener('change', () => onChange(Number(s.value)));
+  return s;
+}
+
 /** Chat settings: context size, subagents, compacting. */
 function renderSettings() {
   const panel = $('chat-settings');
@@ -547,10 +582,12 @@ function renderSettings() {
     s.addEventListener('change', () => onChange(s.value));
     return s;
   };
-  row('Context size', select([[2048, '2K'], [4096, '4K'], [8192, '8K'], [16384, '16K'], [32768, '32K']], settings.contextSize,
-    (v) => saveSetting({ contextSize: Number(v) })), 'Tokens a downloaded model reads at once. Bigger remembers more but needs more memory. Apple Intelligence\'s is 4K.');
+  row('Context size', contextSelect(settings.selected, settings.contextSize, (v) => saveSetting({ contextSize: v })),
+    'Tokens the model reads at once: the conversation, files and answer. Bigger remembers more but needs more memory and takes longer to read. Each size shows its estimated memory; ones that won\'t fit this device are greyed out.');
   row('Subagent model', select([['', 'Same as Chat'], ...settings.models.filter((m) => m.ready).map((m) => [m.id, m.name])], settings.subagentModel,
     (v) => saveSetting({ subagentModel: v })), 'The model subagents use: a small one is quicker, a big one better.');
+  row('Subagent context', contextSelect(subagentModel(), settings.subagentContextSize, (v) => saveSetting({ subagentContextSize: v })),
+    'Tokens a subagent reads at once. A small subagent model can have a big context.');
   row('Subagents at once', select([[0, 'Off'], [1, '1'], [2, '2'], [3, '3'], [4, '4'], [6, '6'], [8, '8']], settings.subagentParallel,
     (v) => saveSetting({ subagentParallel: Number(v) })), 'How many subagents run side by side. Each local model is loaded once; Apple Intelligence runs several freely.');
   const actions = element('div', 'chat-setting-actions');
