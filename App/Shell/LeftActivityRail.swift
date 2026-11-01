@@ -3,7 +3,7 @@ import UIKit
 /// VS Code's activity bar on the leading edge of the IDE pane. Run/Stop sits on top, then the
 /// side bar views (Explorer, Search, Source Control) and extensions' own view containers;
 /// Accounts, Settings and Home (the Welcome page) are pinned to the bottom.
-final class LeftActivityRail: UIView {
+final class LeftActivityRail: UIView, UIScrollViewDelegate {
     var onRunStopTap: (() -> Void)?
     var onFilesTap: (() -> Void)?
     var onSearchTap: (() -> Void)?
@@ -31,6 +31,9 @@ final class LeftActivityRail: UIView {
     private let settingsBtn = UIButton(type: .custom)
     private let gitBadge = PaddedLabel()
     private let topStack = UIStackView()
+    /// The top buttons scroll when the rail is too short for them and the bottom ones (a phone in
+    /// landscape, Split View), rather than running into Accounts, Settings and Welcome.
+    private let topScroll = UIScrollView()
     /// Extensions' view containers, in order: (id, button).
     private var containerButtons: [(id: String, button: UIButton)] = []
     /// The container whose views the side bar shows (with the .views tab).
@@ -98,7 +101,14 @@ final class LeftActivityRail: UIView {
         topStack.alignment = .center
         topStack.setCustomSpacing(16, after: runButton)
         topStack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(topStack)
+        topScroll.showsVerticalScrollIndicator = false
+        topScroll.alwaysBounceVertical = false
+        topScroll.delegate = self
+        topScroll.translatesAutoresizingMaskIntoConstraints = false
+        topScroll.addSubview(topStack)
+        addSubview(topScroll)
+        // The active strip is beside a button in the scroll view, so it's drawn over it.
+        bringSubviewToFront(activeStrip)
 
         let bottomStack = UIStackView(arrangedSubviews: [accountBtn, settingsBtn, homeBtn])
         bottomStack.axis = .vertical
@@ -107,15 +117,26 @@ final class LeftActivityRail: UIView {
         bottomStack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(bottomStack)
 
+        // As tall as the buttons, up to the bottom group; any taller and it scrolls.
+        let fitContent = topScroll.heightAnchor.constraint(equalTo: topScroll.contentLayoutGuide.heightAnchor)
+        fitContent.priority = .defaultHigh
         NSLayoutConstraint.activate([
-            topStack.centerXAnchor.constraint(equalTo: centerXAnchor),
+            topScroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            topScroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            topScroll.bottomAnchor.constraint(lessThanOrEqualTo: bottomStack.topAnchor, constant: -12),
+            fitContent,
+            topStack.topAnchor.constraint(equalTo: topScroll.contentLayoutGuide.topAnchor),
+            topStack.bottomAnchor.constraint(equalTo: topScroll.contentLayoutGuide.bottomAnchor),
+            topStack.leadingAnchor.constraint(equalTo: topScroll.contentLayoutGuide.leadingAnchor),
+            topStack.trailingAnchor.constraint(equalTo: topScroll.contentLayoutGuide.trailingAnchor),
+            topStack.widthAnchor.constraint(equalTo: topScroll.frameLayoutGuide.widthAnchor),
             bottomStack.centerXAnchor.constraint(equalTo: centerXAnchor),
             gitBadge.heightAnchor.constraint(equalToConstant: 16),
             gitBadge.widthAnchor.constraint(greaterThanOrEqualToConstant: 16),
             gitBadge.trailingAnchor.constraint(equalTo: gitBtn.trailingAnchor, constant: 2),
             gitBadge.bottomAnchor.constraint(equalTo: gitBtn.bottomAnchor, constant: 0),
         ])
-        topStackTop = topStack.topAnchor.constraint(equalTo: topAnchor, constant: Self.edgePadding)
+        topStackTop = topScroll.topAnchor.constraint(equalTo: topAnchor, constant: Self.edgePadding)
         homeBottom = bottomStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.edgePadding)
         topStackTop?.isActive = true
         homeBottom?.isActive = true
@@ -163,9 +184,25 @@ final class LeftActivityRail: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        placeActiveStrip()
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        placeActiveStrip()
+    }
+
+    /// Beside the active button, cut to the part of it that's scrolled into view.
+    private func placeActiveStrip() {
         guard let btn = button(for: activeTab) else { return }
-        let f = btn.convert(btn.bounds, to: self)
-        activeStrip.frame = CGRect(x: 0, y: f.minY, width: 2, height: f.height)
+        let f = btn.convert(btn.bounds, to: self).intersection(topScroll.frame)
+        activeStrip.alpha = f.isNull || f.height < 1 ? 0 : 1
+        if !f.isNull { activeStrip.frame = CGRect(x: 0, y: f.minY, width: 2, height: f.height) }
+    }
+
+    /// Scrolls the active button into view (it may have been opened from a menu or shortcut).
+    private func revealActiveButton() {
+        guard let btn = button(for: activeTab), topScroll.contentSize.height > topScroll.bounds.height else { return }
+        topScroll.scrollRectToVisible(btn.convert(btn.bounds, to: topScroll).insetBy(dx: 0, dy: -4), animated: true)
     }
 
     private func button(for tab: SidebarTab?) -> UIButton? {
@@ -193,6 +230,7 @@ final class LeftActivityRail: UIView {
         activeStrip.isHidden = (tab == nil)
         setNeedsLayout()
         UIView.animate(withDuration: 0.2) { self.layoutIfNeeded() }
+        revealActiveButton()
     }
 
     func setRunning(_ running: Bool) {

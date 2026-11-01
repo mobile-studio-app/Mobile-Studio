@@ -63,10 +63,12 @@
     .ci { font-family: codicon !important; font-weight: normal; font-style: normal; line-height: 1; }
 
     /* LeftActivityRail: 36×40 buttons 8 apart, 16 after Run; Accounts, Settings, Welcome at the bottom */
-    #rail { position: absolute; left: 0; top: 0; width: 44px; background: #1f1f21; box-shadow: inset -0.5px 0 0 rgba(255,255,255,0.08); z-index: 3; overflow: hidden; }
-    .rail-top, .rail-bottom { position: absolute; left: 0; right: 0; display: flex; flex-direction: column; align-items: center; gap: 8px; }
-    .rail-top { top: 8px; }
-    .rail-bottom { bottom: 8px; }
+    /* On a short screen the top buttons scroll above the bottom ones rather than running into them. */
+    #rail { position: absolute; left: 0; top: 0; width: 44px; background: #1f1f21; box-shadow: inset -0.5px 0 0 rgba(255,255,255,0.08); z-index: 3; overflow: hidden; display: flex; flex-direction: column; }
+    .rail-top, .rail-bottom { display: flex; flex-direction: column; align-items: center; gap: 8px; flex: none; }
+    .rail-top { flex: 0 1 auto; min-height: 0; margin-top: 8px; overflow-y: auto; scrollbar-width: none; }
+    .rail-top::-webkit-scrollbar { display: none; }
+    .rail-bottom { margin-top: auto; padding: 12px 0 8px; }
     .rail-btn {
       position: relative; width: 36px; height: 40px; border: 0; background: none; flex: none;
       display: flex; align-items: center; justify-content: center;
