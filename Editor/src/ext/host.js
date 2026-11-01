@@ -975,5 +975,12 @@ export async function runTask(id, label) {
 /** The installed extension a webview resource path belongs to ("/.duocode/extensions/<id>/<file>"). */
 export function extensionFileAt(path) {
   const m = /^\/\.duocode\/extensions\/([^/]+)\/(.+)$/.exec(path);
-  return m ? { id: m[1], path: m[2] } : null;
+  if (m) return { id: m[1], path: m[2] };
+  // Node.js extensions see their real folder (a URI's path for C:\… is /C:/…).
+  const file = path.replace(/^\/([A-Za-z]:)/, '$1');
+  for (const e of contributions.extensions) {
+    const dir = (e.path || '').replace(/\/$/, '');
+    if (dir && file.startsWith(dir + '/')) return { id: e.id, path: file.slice(dir.length + 1) };
+  }
+  return null;
 }

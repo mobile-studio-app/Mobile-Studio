@@ -1124,7 +1124,9 @@ function createWebviewPanel(viewType, title, options = {}) {
   const show = () => notify('webview', { id, title: panel.title, html, viewType, enableScripts: !!(webview.options && webview.options.enableScripts) });
   const webview = {
     options: options || {},
-    cspSource: 'duocode-webview:',
+    // The page inlines the extension's resources as data: URLs (webviews.js), so a policy built on
+    // cspSource (style-src ${cspSource}) has to let those in.
+    cspSource: 'duocode-webview: data:',
     get html() { return html; },
     set html(value) { html = String(value); if (!disposed) show(); },
     onDidReceiveMessage: onMessage.event,

@@ -62,7 +62,8 @@ async function inlineResources(html, extensionOf) {
   html.replace(/duocode-res:\/\/([^"'\s)>]+)/g, (_, path) => refs.add(path));
   const urls = new Map();
   for (const ref of refs) {
-    const path = decodeURIComponent(ref.split(/[?#]/)[0]);
+    // duocode-res://<encoded path> comes back from Uri.toString() with a "/" on the end.
+    const path = decodeURIComponent(ref.split(/[?#]/)[0]).replace(/\/+$/, '');
     const located = extensionOf(path);
     if (!located) continue;
     const ext = path.split('.').pop().toLowerCase();
