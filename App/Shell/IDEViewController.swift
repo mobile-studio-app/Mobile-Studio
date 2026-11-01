@@ -273,6 +273,9 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
             guard let command = note.userInfo?["command"] as? String else { return }
             self?.editor.call("return await window.duocode.runCommand(command)", ["command": command]) { _ in }
         }
+        NotificationCenter.default.addObserver(forName: PullRequestsViewController.showRequest, object: nil, queue: .main) { [weak self] note in
+            self?.showPullRequests(create: note.userInfo?["create"] as? Bool ?? false)
+        }
         updateViewButtons()
         for name in [ExtensionManager.didChange, ExtensionViewsPanelView.contextChanged] {
             NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
@@ -651,6 +654,16 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
 
     // MARK: - Game Execution
 
+    /// GitHub pull requests for the project (PullRequestsViewController), in a sheet.
+    private func showPullRequests(create: Bool) {
+        guard presentedViewController == nil else { return }
+        let list = PullRequestsViewController(project: ProjectStore.shared.currentProject, create: create)
+        list.onOpenDiff = { [weak self] request in self?.editor.openDiff(request) }
+        let nav = UINavigationController(rootViewController: list)
+        nav.modalPresentationStyle = .formSheet
+        present(nav, animated: true)
+    }
+
     private func handle(command: String) {
         switch command {
         case "run": run()
@@ -664,6 +677,8 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
         case "showSourceControl": showSidebar(.git)
         case "showSearch": showSidebar(.search)
         case "showExplorer": showSidebar(.files)
+        case "pullRequests": showPullRequests(create: false)
+        case "createPullRequest": showPullRequests(create: true)
         case "stop": stopGame()
         case "focusGame": gameFocused = true
         case "focusEditor": gameFocused = false

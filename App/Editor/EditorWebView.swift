@@ -359,6 +359,23 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                     }
                     DispatchQueue.main.async { replyHandler(["commits": commits, "lines": lines], nil) }
                 }
+            case "gitFileHistory":
+                // Git: View File History: the commits that changed a file, and a commit's change to it.
+                let root = store.currentProject
+                let path = body["path"] as? String ?? ""
+                let git = GitManager.shared
+                guard git.isGitRepo(at: root) else { replyHandler([Any](), nil); return }
+                if let id = body["commit"] as? String {
+                    replyHandler(["original": git.text(of: path, at: .parent(of: id), in: root) ?? "",
+                                  "modified": git.text(of: path, at: .commit(id), in: root) ?? ""], nil)
+                    return
+                }
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let list = git.fileHistory(path, in: root).map { commit -> [String: Any] in
+                        ["id": commit.id, "author": commit.author, "date": commit.date.timeIntervalSince1970 * 1000, "message": commit.message]
+                    }
+                    DispatchQueue.main.async { replyHandler(list, nil) }
+                }
             case "write":
                 let path = body["path"] as? String ?? ""
                 let contents = body["contents"] as? String ?? ""

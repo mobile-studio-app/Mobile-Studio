@@ -783,6 +783,13 @@ final class GitManager {
         return LineDiff.blame(current: current, versions: versions).map { index in index.map { commits[$0] } }
     }
 
+    /// The commits that changed `path`, newest first (VS Code's Timeline for a file).
+    func fileHistory(_ path: String, in url: URL, limit: Int = 300) -> [GitCommit] {
+        history(in: url, limit: limit).filter { commit in
+            commit.hasSnapshot && text(of: path, at: .commit(commit.id), in: url) != text(of: path, at: .parent(of: commit.id), in: url)
+        }
+    }
+
     // MARK: - Discard Changes
 
     /// Puts a file back the way it's staged (or committed, if not staged). Untracked files are deleted.
@@ -1261,6 +1268,12 @@ final class GitManager {
         return GitHubAPI(owner: components[0],
                          repo: components[1].replacingOccurrences(of: ".git", with: ""),
                          token: token)
+    }
+
+    /// The project's GitHub repository and the signed-in token, for pull requests (PullRequests.swift).
+    func gitHubRepository(in url: URL) throws -> (owner: String, repo: String, token: String) {
+        let api = try githubAPI(for: url)
+        return (api.owner, api.repo, api.token)
     }
 
     /// Hidden files (.gitignore, .github/...) aren't shown or tracked locally, so syncing leaves them alone.

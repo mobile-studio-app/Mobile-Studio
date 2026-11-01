@@ -34,7 +34,7 @@ import { setupWebviews, reveal as revealWebview, closeWebview } from './ext/webv
 import { postToHost, extensionFileAt } from './ext/host.js';
 import { setupNavigation, goToDefinition, findReferences, renameSymbol, fallbackDefinitions } from './navigate.js';
 import { openSideBySide, closeSideBySide, isSideBySide, wantsSideBySide, setSideBySidePreference } from './diffview.js';
-import { setupBlame } from './blame.js';
+import { setupBlame, fileHistory } from './blame.js';
 import { setupLanguageFeatures, languageFeatures, quickFix, peekDefinition, closePeekView } from './langfeatures.js';
 import { setupMarkdownPreview, setPreview, refreshPreview, fileOpened, previewMode, previewSaved } from './mdpreview.js';
 import { extensionKeys, buildExtensionKeymap, currentExtensionKeymap } from './ext/keybindings.js';
@@ -298,6 +298,7 @@ async function reopenWith() {
   await openCustomEditor(editors[chosen - 1].viewType, path, path.split('/').pop());
 }
 addCommands([{ command: 'workbench.action.reopenWithEditor', title: 'View: Reopen Editor With…', run: () => reopenWith() }]);
+addCommands([{ command: 'git.viewFileHistory', title: 'Git: View File History', run: () => fileHistory((request) => openDiff(request)) }]);
 addCommands([{ command: 'toggle.diff.renderSideBySide', title: 'Diff Editor: Toggle Inline View', run: () => toggleDiffLayout() }]);
 $('diff-mode').addEventListener('click', () => toggleDiffLayout());
 // VS Code's settings files (App/Settings/UserSettingsFiles.swift).

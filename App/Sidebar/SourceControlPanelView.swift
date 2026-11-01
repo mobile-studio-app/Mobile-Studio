@@ -72,6 +72,11 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
     override init(frame: CGRect) {
         super.init(frame: frame)
         setupViews()
+        // Check Out on a pull request (PullRequestsViewController).
+        NotificationCenter.default.addObserver(forName: PullRequestsViewController.checkoutRequest, object: nil, queue: .main) { [weak self] note in
+            guard let branch = note.userInfo?["branch"] as? String else { return }
+            self?.checkoutRemote(branch)
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -211,6 +216,13 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
         let remoteMenu = UIMenu(title: "Remote", children: [
             UIAction(title: status.remoteURL == nil ? "Add Remote..." : "Change Remote URL...") { [weak self] _ in self?.promptRemote(then: nil) },
         ])
+        let showPullRequests = { (create: Bool) in
+            NotificationCenter.default.post(name: PullRequestsViewController.showRequest, object: nil, userInfo: ["create": create])
+        }
+        let pullRequestMenu = UIMenu(options: .displayInline, children: [
+            UIAction(title: "Pull Requests…", image: Codicon.gitPullRequest.image(), attributes: status.remoteURL == nil ? [.disabled] : []) { _ in showPullRequests(false) },
+            UIAction(title: "Create Pull Request…", attributes: status.remoteURL == nil ? [.disabled] : []) { _ in showPullRequests(true) },
+        ])
         let viewMenu = UIMenu(title: "View & Sort", children: [
             UIAction(title: "View as List", state: viewAsTree ? .off : .on) { [weak self] _ in self?.setTreeView(false) },
             UIAction(title: "View as Tree", state: viewAsTree ? .on : .off) { [weak self] _ in self?.setTreeView(true) },
@@ -222,6 +234,7 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
                 checkout,
             ]),
             UIMenu(options: .displayInline, children: mergeItems + [commitMenu, changesMenu, syncMenu, branchMenu, remoteMenu, stashMenu]),
+            pullRequestMenu,
             UIMenu(options: .displayInline, children: [viewMenu]),
         ]
     }

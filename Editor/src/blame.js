@@ -3,7 +3,7 @@
 // shows the whole commit message.
 import { ViewPlugin, Decoration, WidgetType, EditorView } from '@codemirror/view';
 import { StateEffect, StateField } from '@codemirror/state';
-import { notify } from './ext/ui.js';
+import { notify, quickPick } from './ext/ui.js';
 
 let api = null;   // { native, current }
 
@@ -99,3 +99,22 @@ const blamePlugin = ViewPlugin.fromClass(class {
 });
 
 export const blame = [blameField, blamePlugin];
+
+/** Git: View File History: the commits that changed the open file; the one picked opens as a diff. */
+export async function fileHistory(openDiff) {
+  const path = api && api.current();
+  if (!path) { notify('info', 'Open a file to see its history.', []); return; }
+  const list = await api.native({ cmd: 'gitFileHistory', path }).catch(() => []);
+  if (!Array.isArray(list) || !list.length) { notify('info', `No commits have changed ${path.split('/').pop()}.`, []); return; }
+  const picked = await quickPick({
+    placeholder: `History of ${path.split('/').pop()}`,
+    items: list.map((c) => ({ label: c.message.split('\n')[0], description: `${c.author}, ${ago(c.date)}`, detail: c.id.slice(0, 7) })),
+  });
+  if (picked == null) return;
+  const commit = list[picked];
+  const texts = await api.native({ cmd: 'gitFileHistory', path, commit: commit.id }).catch(() => null);
+  if (!texts) return;
+  const name = path.split('/').pop();
+  const short = commit.id.slice(0, 7);
+  openDiff({ path, original: texts.original, modified: texts.modified, title: `${name} (${short}^ ↔ ${short})` });
+}

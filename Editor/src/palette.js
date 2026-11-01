@@ -186,6 +186,8 @@ export function builtinCommands(getView) {
     { command: 'workbench.action.openSettings', title: 'Preferences: Open Settings', keybinding: '⌘,', run: () => appCommand('settings') },
     { command: 'workbench.view.extensions', title: 'View: Show Extensions', keybinding: '⇧⌘X', run: () => appCommand('showExtensions') },
     { command: 'workbench.view.debug', title: 'View: Show Run and Debug', run: () => appCommand('showDebug') },
+    { command: 'github.pullRequests.view', title: 'GitHub Pull Requests: View Pull Requests', run: () => appCommand('pullRequests') },
+    { command: 'pr.create', title: 'GitHub Pull Requests: Create Pull Request', run: () => appCommand('createPullRequest') },
     { command: 'workbench.view.scm', title: 'View: Show Source Control', keybinding: '⌃⇧G', run: () => appCommand('showSourceControl') },
     { command: 'workbench.view.search', title: 'View: Show Search', keybinding: '⇧⌘F', run: () => appCommand('showSearch') },
     { command: 'workbench.view.explorer', title: 'View: Show Explorer', keybinding: '⇧⌘E', run: () => appCommand('showExplorer') },
