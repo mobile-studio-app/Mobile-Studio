@@ -290,10 +290,34 @@ class TestMessage { constructor(message) { this.message = message; } }
 class TabInputText { constructor(uri) { this.uri = uri; } }
 class QuickInputButtons {}
 QuickInputButtons.Back = { iconPath: new ThemeIcon('arrow-left') };
-class NotebookCellOutputItem { constructor(data, mime) { this.data = data; this.mime = mime; } static text(v, mime = 'text/plain') { return new NotebookCellOutputItem(new TextEncoder().encode(v), mime); } static json(v) { return NotebookCellOutputItem.text(JSON.stringify(v), 'application/json'); } }
-class NotebookCellOutput { constructor(items, metadata) { this.items = items; this.metadata = metadata; } }
+// Notebooks aren't shown yet; these let extensions that build notebook data load and run.
+class NotebookCellOutputItem {
+  constructor(data, mime) { this.data = data; this.mime = mime; }
+  static text(v, mime = 'text/plain') { return new NotebookCellOutputItem(new TextEncoder().encode(v), mime); }
+  static json(v, mime = 'application/json') { return NotebookCellOutputItem.text(JSON.stringify(v, undefined, '\t'), mime); }
+  static stdout(v) { return NotebookCellOutputItem.text(v, 'application/vnd.code.notebook.stdout'); }
+  static stderr(v) { return NotebookCellOutputItem.text(v, 'application/vnd.code.notebook.stderr'); }
+  static error(e) {
+    const error = { name: (e && e.name) || 'Error', message: (e && e.message) || String(e), stack: e && e.stack };
+    return NotebookCellOutputItem.json(error, 'application/vnd.code.notebook.error');
+  }
+}
+class NotebookCellOutput { constructor(items, idOrMetadata, metadata) { this.items = items; if (typeof idOrMetadata === 'string') { this.id = idOrMetadata; this.metadata = metadata; } else { this.metadata = idOrMetadata; } } }
 class NotebookCellData { constructor(kind, value, languageId) { Object.assign(this, { kind, value, languageId }); } }
 class NotebookData { constructor(cells) { this.cells = cells; } }
+class NotebookRange {
+  constructor(start, end) { this.start = Math.min(start, end); this.end = Math.max(start, end); }
+  get isEmpty() { return this.start === this.end; }
+  with(change = {}) { return new NotebookRange(change.start ?? this.start, change.end ?? this.end); }
+}
+class NotebookEdit {
+  constructor(range, newCells) { this.range = range; this.newCells = newCells; }
+  static replaceCells(range, newCells) { return new NotebookEdit(range, newCells); }
+  static insertCells(index, newCells) { return new NotebookEdit(new NotebookRange(index, index), newCells); }
+  static deleteCells(range) { return new NotebookEdit(range, []); }
+  static updateCellMetadata(index, newCellMetadata) { return Object.assign(new NotebookEdit(new NotebookRange(index, index), []), { newCellMetadata }); }
+  static updateNotebookMetadata(newNotebookMetadata) { return Object.assign(new NotebookEdit(new NotebookRange(0, 0), []), { newNotebookMetadata }); }
+}
 
 const enums = {
   StatusBarAlignment: { Left: 1, Right: 2 },
@@ -742,9 +766,13 @@ const api = {
   EvaluatableExpression, InlayHintLabelPart, SnippetTextEdit, TextDocumentEdit, DataTransfer, DataTransferItem, TaskGroup, Task,
   ShellExecution, ProcessExecution, CustomExecution, Breakpoint, SourceBreakpoint, FunctionBreakpoint, DebugAdapterExecutable,
   DebugAdapterInlineImplementation, FileSystemError, TestMessage, TabInputText, QuickInputButtons,
-  NotebookCellOutputItem, NotebookCellOutput, NotebookCellData, NotebookData,
+  NotebookCellOutputItem, NotebookCellOutput, NotebookCellData, NotebookData, NotebookRange, NotebookEdit,
   TreeItemCheckboxState: { Unchecked: 0, Checked: 1 },
   NotebookCellKind: { Markup: 1, Code: 2 },
+  NotebookEditorRevealType: { Default: 0, InCenter: 1, InCenterIfOutsideViewport: 2, AtTop: 3 },
+  NotebookCellExecutionState: { Idle: 1, Pending: 2, Executing: 3 },
+  NotebookControllerAffinity: { Default: 1, Preferred: 2 },
+  NotebookCellStatusBarAlignment: { Left: 1, Right: 2 },
   TaskScope: { Global: 1, Workspace: 2 },
   ShellQuoting: { Escape: 1, Strong: 2, Weak: 3 },
   CommentMode: { Editing: 0, Preview: 1 },
@@ -1054,8 +1082,10 @@ function lenient(namespace, name) {
       if (name === 'vscode' && /^[A-Z]/.test(key)) {
         if (!stubClasses.has(key)) {
           const Stub = class { constructor(...args) { this.args = args; } };
+          // Its static members (Kind.Value, or factories like Edit.insertCells) are inert too,
+          // so code that calls them keeps going instead of failing with "is not a function".
           stubClasses.set(key, new Proxy(Stub, {
-            get: (t, member) => (member in t || typeof member !== 'string' || !/^[A-Z]/.test(member) ? t[member] : inert(key + '.' + member)),
+            get: (t, member) => (member in t || typeof member !== 'string' || member === 'then' ? t[member] : inert(key + '.' + member)),
           }));
           notify('log', { level: 'info', text: `vscode.${key} isn't supported in Mobile Studio yet` });
         }

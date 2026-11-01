@@ -10,6 +10,7 @@ import { childProcess } from './node-child.js';
 import { npmInstall } from './node-npm.js';
 import { runCommand } from './node-tasks.js';
 import { setNativePort } from './node-native.js';
+import { fetchPreloadArgv, installFetch, isUndiciWasmError } from './node-fetch.js';
 
 // Extensions get child_process that runs Node.js scripts as worker threads (see node-child.js).
 globalThis.__childProcessShim = childProcess;
@@ -29,7 +30,13 @@ globalThis.postMessage = (message) => {
 
 const log = (level, text) => globalThis.postMessage({ type: 'notify', method: 'log', params: { level, text } });
 process.on('uncaughtException', (e) => log('error', 'Node.js extension host: ' + (e && e.stack ? e.stack.split('\n').slice(0, 3).join(' ') : e)));
-process.on('unhandledRejection', (e) => log('error', 'Node.js extension host: ' + (e && e.message ? e.message : e)));
+process.on('unhandledRejection', (e) => {
+  if (isUndiciWasmError(e)) return;   // see node-fetch.js
+  log('error', 'Node.js extension host: ' + (e && e.message ? e.message : e));
+});
+// fetch() without WebAssembly, here and in worker threads (node-fetch.js).
+installFetch();
+fetchPreloadArgv();
 
 const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*' };
 

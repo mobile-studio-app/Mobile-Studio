@@ -5,6 +5,7 @@
 //   { debug: <debugger command> }, { stop: true }
 // and receives { out }, { err }, { error, file, line }, { debugEvent } and { exit: <code> }.
 import net from 'net';
+import { fetchPreloadArgv } from './node-fetch.js';
 import fs from 'fs';
 import path from 'path';
 import { Worker } from 'worker_threads';
@@ -54,7 +55,7 @@ export function servePrograms(port) {
       // around it would catch its errors, so the debugger wouldn't stop at them as uncaught.
       const source = repl ? REPL : debug ? `setImmediate(() => { process.argv[1] = ${JSON.stringify(entry)}; require('module').runMain(); });` : entry;
       try {
-        worker = new Worker(source, { eval: !!repl || !!debug, stdin: true, stdout: true, stderr: true, argv: [] });
+        worker = new Worker(source, { eval: !!repl || !!debug, stdin: true, stdout: true, stderr: true, argv: [], execArgv: fetchPreloadArgv() });
       } catch (e) {
         send({ err: (e.stack || String(e)) + '\n' });
         send({ exit: 1 });

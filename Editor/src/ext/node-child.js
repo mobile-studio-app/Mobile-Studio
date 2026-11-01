@@ -10,6 +10,7 @@ import path from 'path';
 import { PassThrough } from 'stream';
 import { Worker } from 'worker_threads';
 import { execNative, nativeProgram, spawnNative } from './node-native.js';
+import { fetchPreloadArgv } from './node-fetch.js';
 
 // Runs inside the worker: a Node.js process's view of the world, then the script.
 const BOOT = `
@@ -44,7 +45,7 @@ function runNode(script, args, options = {}, ipc = false) {
     workerData: { module, args: (args || []).map(String), ipc },
     stdin: true, stdout: true, stderr: true,
     env: { ...process.env, ...(options.env || {}) },
-    execArgv: [],
+    execArgv: fetchPreloadArgv(),
   });
   child.pid = nextPid++;
   child.stdin = worker.stdin;

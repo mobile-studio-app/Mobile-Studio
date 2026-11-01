@@ -11,6 +11,7 @@ import path from 'path';
 import { Worker } from 'worker_threads';
 import { npmInstall } from './node-npm.js';
 import { nativeProgram, spawnNative } from './node-native.js';
+import { fetchPreloadArgv } from './node-fetch.js';
 
 /** Splits a command line into commands (by &&, || and ;) of words, honouring quotes. */
 export function parseCommandLine(line) {
@@ -76,7 +77,7 @@ function runScript(file, args, cwd, env, write) {
     // scripts often have none, which a Worker given the file refuses).
     const boot = `process.argv[1] = ${JSON.stringify(file)}; require('module').runMain();`;
     try {
-      worker = new Worker(boot, { eval: true, argv: args, env: { ...process.env, ...env }, stdout: true, stderr: true, stdin: false });
+      worker = new Worker(boot, { eval: true, argv: args, env: { ...process.env, ...env }, stdout: true, stderr: true, stdin: false, execArgv: fetchPreloadArgv() });
     } catch (e) {
       write(`${e.message}\n`);
       resolve(1);
