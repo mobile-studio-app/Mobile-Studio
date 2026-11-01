@@ -15,6 +15,8 @@ import { loadExtensionTheme } from './ext/themes.js';
 import { extensionCommands, runCommand, formatDocument, documentSymbols } from './ext/host.js';
 import { goToDefinition, findReferences, renameSymbol } from './navigate.js';
 import { toggleOutput } from './ext/output.js';
+import { togglePanel } from './panel.js';
+import { showTerminal } from './terminal.js';
 import { splitEditor, closeSplit, pickSideFile } from './split.js';
 import { pickTask, installPackage, installDependencies } from './tasks.js';
 
@@ -162,6 +164,11 @@ export function builtinCommands(getView) {
     { command: 'undo', title: 'Undo', keybinding: '⌘Z', run: v(undo) },
     { command: 'redo', title: 'Redo', keybinding: '⇧⌘Z', run: v(redo) },
     { command: 'workbench.action.output.toggleOutput', title: 'View: Toggle Output', keybinding: '⇧⌘U', run: () => toggleOutput() },
+    { command: 'workbench.action.togglePanel', title: 'View: Toggle Panel', keybinding: '⌘J', run: () => togglePanel() },
+    { command: 'workbench.action.terminal.toggleTerminal', title: 'View: Toggle Terminal', keybinding: '⌃`', run: () => togglePanel('terminal') },
+    { command: 'workbench.action.terminal.new', title: 'Terminal: Create New Terminal', keybinding: '⌃⇧`', run: () => showTerminal(true) },
+    { command: 'workbench.actions.view.problems', title: 'View: Toggle Problems', keybinding: '⇧⌘M', run: () => togglePanel('problems') },
+    { command: 'workbench.debug.action.toggleRepl', title: 'View: Toggle Debug Console', keybinding: '⇧⌘Y', run: () => togglePanel('debug') },
     { command: 'workbench.action.splitEditor', title: 'View: Split Editor', keybinding: '⌘\\', run: () => splitEditor() },
     { command: 'workbench.action.quickOpenToSide', title: 'View: Open File to the Side…', run: () => pickSideFile() },
     { command: 'workbench.action.closeEditorsInOtherGroups', title: 'View: Close Split Editor', run: () => closeSplit() },
@@ -185,8 +192,8 @@ export function builtinCommands(getView) {
     { command: 'workbench.action.debug.run', title: 'Run: Run Without Debugging', run: () => appCommand('run') },
     { command: 'workbench.action.debug.start', title: 'Run: Start Debugging', keybinding: '⇧⌘D', run: () => appCommand('debug') },
     { command: 'workbench.action.debug.stop', title: 'Run: Stop', keybinding: '⌘.', run: () => appCommand('stop') },
-    { command: 'workbench.action.terminal.new', title: 'Terminal: Start REPL', run: () => appCommand('repl') },
-    { command: 'workbench.action.togglePanel', title: 'View: Toggle Console', run: () => appCommand('toggleConsole') },
+    { command: 'mobilestudio.startRepl', title: 'Run: Start REPL', run: () => appCommand('repl') },
+    { command: 'mobilestudio.toggleRunConsole', title: 'View: Toggle Run Console', run: () => appCommand('toggleConsole') },
   ];
 }
 

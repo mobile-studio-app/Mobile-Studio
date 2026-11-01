@@ -40,6 +40,11 @@ import { setupBreadcrumbs, updateBreadcrumbs } from './breadcrumbs.js';
 import { setupTabs, showTab, setTabIcon, setActiveDirty, removeTab, clearTabs, activeTab, renameTabs } from './tabs.js';
 import { setupSplit, mainChanged, sideText, openToSide, refreshSplit, flushSplit } from './split.js';
 import { setupTasks } from './tasks.js';
+import { setupDebugConsole, showPanel, togglePanel } from './panel.js';
+import { setupProblems, problemsChanged } from './problems.js';
+import { setupTerminal, showTerminal } from './terminal.js';
+import { setupOutput } from './ext/output.js';
+import { nodeAddress } from './ext/host.js';
 import { addCommands } from './palette.js';
 import { customEditorsFor } from './ext/registry.js';
 import { quickPick } from './ext/ui.js';
@@ -137,6 +142,11 @@ function baseExtensions(path) {
     keymap.of([
       { key: 'Mod-s', run: () => { save(); return true; } },
       { key: 'Mod-Shift-p', run: () => { commandPalette(); return true; } },
+      { key: 'Ctrl-`', run: () => { togglePanel('terminal'); return true; } },
+      { key: 'Ctrl-Shift-`', run: () => { showTerminal(true); return true; } },
+      { key: 'Mod-j', run: () => { togglePanel(); return true; } },
+      { key: 'Mod-Shift-m', run: () => { togglePanel('problems'); return true; } },
+      { key: 'Mod-Shift-y', run: () => { togglePanel('debug'); return true; } },
       { key: 'Mod-p', run: () => { quickOpen(); return true; } },
       { key: 'F12', run: () => { goToDefinition(); return true; } },
       { key: 'F9', run: () => toggleBreakpointAtCursor(view) },
@@ -164,6 +174,8 @@ function baseExtensions(path) {
         clearTimeout(crumbTimer);
         crumbTimer = setTimeout(() => updateBreadcrumbs(view.state, readOnly ? null : current), 120);
       }
+      // Linting reports through effects: the Problems panel counts again.
+      if (u.docChanged || u.transactions.some((t) => t.effects.length)) problemsChanged();
       if (current && !readOnly) {
         if (u.docChanged) mainChanged(current, u.transactions);
         if (u.docChanged) didChange(current, () => u.view.state.doc.toString());
@@ -379,6 +391,19 @@ async function closeTab(tab) {
 setupBreadcrumbs($('breadcrumbs'), (value) => quickOpen(value));
 setupSplit({ native, mainView: view, mainPath: () => (readOnly ? null : current) });
 setupTasks({ native, flush: () => save() });
+setupOutput();
+setupDebugConsole(native);
+setupProblems({ view, current: () => (readOnly ? null : current), reveal: (path, line, column) => reveal(path, line, column, 0) });
+setupTerminal({
+  native,
+  nodeAddress: () => nodeAddress(hostAPI),
+  projectPath: async () => ((await native({ cmd: 'extHostInit' }).catch(() => null)) || {}).projectPath,
+  // `open file` in the terminal: files in the project open in the editor.
+  openPath: async (absolute) => {
+    const root = ((await native({ cmd: 'extHostInit' }).catch(() => null)) || {}).projectPath || '';
+    if (root && absolute.startsWith(root + '/')) await openFile(absolute.slice(root.length + 1));
+  },
+});
 setupWebviews({
   post: postToHost,
   showTab: (id, title) => showTab({ key: 'webview:' + id, path: '', title, icon: '◫', preview: false }),
@@ -528,6 +553,9 @@ window.duocode = {
   viewExpand: (viewId, handle, expanded) => viewExpand(viewId, handle, expanded),
   viewCheck: (viewId, handle, checked) => viewCheck(viewId, handle, checked),
   openWebviewView: (viewId, title) => openWebviewView(viewId, title),
+  // The panel under the editor (panel.js): 'problems', 'output', 'debug' or 'terminal'.
+  showPanel: (tab) => showPanel(tab),
+  togglePanel: (tab) => togglePanel(tab),
   onEvent({ name, payload }) {
     if (name === 'openFile' && payload?.path) openFromUser(payload.path);
     if (name === 'openFileToSide' && payload?.path) openToSide(payload.path);

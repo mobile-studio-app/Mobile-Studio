@@ -126,10 +126,30 @@ export function installFetch(ownRejections = false) {
   globalThis.fetch = fetch;
 }
 
+/** A home folder Node.js code can write to. HOME is the app's container, whose top level iOS
+ * doesn't let apps write to (only Documents, Library and tmp), and tools keep their settings
+ * there (Claude Code: ~/.claude). In a worker thread, process.env is its own copy, so HOME is
+ * set too; on the main thread that would change it for the whole app, so only os.homedir is. */
+export function installHome(home, setEnv) {
+  const fs = require('fs');
+  const os = require('os');
+  try { fs.mkdirSync(home, { recursive: true }); } catch (e) { /* there already */ }
+  os.homedir = () => home;
+  if (setEnv) process.env.HOME = home;
+}
+
+/** Where installHome points: Library/Application Support/Home in the app's container. */
+export function writableHome() {
+  const path = require('path');
+  const real = process.env.HOME || require('os').userInfo().homedir;
+  return globalThis.__mobileStudioHome || (globalThis.__mobileStudioHome = path.join(real, 'Library', 'Application Support', 'Home'));
+}
+
 let preloadArgv = null;
 
-/** execArgv for worker threads that gives them this fetch: --require of a file holding it. Empty
- * if this Node.js won't take --require in a worker (so workers still start). */
+/** execArgv for worker threads that gives them this fetch and a writable home: --require of a
+ * file holding them. Empty if this Node.js won't take --require in a worker (so workers still
+ * start). */
 export function fetchPreloadArgv() {
   if (preloadArgv) return preloadArgv;
   preloadArgv = [];
@@ -139,7 +159,7 @@ export function fetchPreloadArgv() {
     const os = require('os');
     const { Worker } = require('worker_threads');
     const file = path.join(os.tmpdir(), 'mobile-studio-fetch.js');
-    fs.writeFileSync(file, `(${installFetch})(true);\n`);
+    fs.writeFileSync(file, `(${installFetch})(true);\n(${installHome})(${JSON.stringify(writableHome())}, true);\n`);
     new Worker('', { eval: true, execArgv: ['--require', file] }).terminate();
     preloadArgv = ['--require', file];
   } catch (e) { /* workers keep Node's own fetch */ }

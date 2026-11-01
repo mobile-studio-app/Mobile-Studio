@@ -508,5 +508,49 @@ do {
     check(debugger.level == .partial, "desktop-only contributions make it partial: \(debugger.notes)")
 }
 
+section("git in the Terminal (GitCommandLine) and line diffs")
+do {
+    /// Runs a git command line as the Terminal does, waiting for it.
+    func runGit(_ args: [String], _ root: URL, cwd: URL? = nil) -> GitCommandLine.Output {
+        var result: GitCommandLine.Output?
+        Task { @MainActor in result = await GitCommandLine.run(args, root: root, cwd: cwd ?? root) }
+        while result == nil { RunLoop.main.run(until: Date().addingTimeInterval(0.005)) }
+        return result!
+    }
+    func plain(_ text: String) -> String { text.replacingOccurrences(of: "\u{1B}\\[[0-9;]*m", with: "", options: .regularExpression) }
+
+    let edits = LineDiff.diff(["a", "b", "c", "d"], ["a", "x", "c", "d", "e"])
+    check(edits == [.same("a"), .removed("b"), .added("x"), .same("c"), .same("d"), .added("e")], "line diff: \(edits)")
+    let ten = (1...10).map(String.init).joined(separator: "\n") + "\n"
+    let hunk = LineDiff.unified(old: ten, new: ten.replacingOccurrences(of: "\n5\n", with: "\nfive\n"), path: "f.txt")
+    check(hunk.contains("@@ -2,7 +2,7 @@") && hunk.contains("-5\n+five\n"), "unified hunk with 3 lines of context: \(hunk)")
+    check(LineDiff.unified(old: "same\n", new: "same\n", path: "f") == "", "no diff for the same text")
+    let created = LineDiff.unified(old: "", new: "a\nb\n", path: "n", isNew: true)
+    check(created.contains("--- /dev/null") && created.contains("@@ -0,0 +1,2 @@"), "new file diff: \(created)")
+
+    let repo = newRepo(remote: false)
+    write(repo, "src/app.js", "one\ntwo\n")
+    var out = plain(runGit(["status"], repo).text)
+    check(out.contains("Untracked files") && out.contains("src/app.js"), "status lists untracked files: \(out)")
+    let added = runGit(["add", "app.js"], repo, cwd: repo.appendingPathComponent("src"))
+    check(added.code == 0, "add from a subfolder: \(added.text)")
+    out = plain(runGit(["status", "-s"], repo).text)
+    check(out.contains("src/app.js") && !out.hasPrefix(" ") && !out.hasPrefix("??"), "the file is staged: \(out)")
+    let commit = runGit(["commit", "-m", "First"], repo)
+    check(commit.code == 0 && plain(commit.text).contains("First"), "commit -m: \(commit.text)")
+    out = plain(runGit(["log", "--oneline"], repo).text)
+    check(out.contains("First"), "log --oneline: \(out)")
+    check(runGit(["checkout", "-b", "feature"], repo).code == 0 && git.currentBranch(in: repo) == "feature", "checkout -b")
+    out = plain(runGit(["branch"], repo).text)
+    check(out.contains("* feature") && out.contains("  main"), "branch lists both, current starred: \(out)")
+    write(repo, "src/app.js", "one\nTWO\n")
+    out = plain(runGit(["diff"], repo).text)
+    check(out.contains("-two") && out.contains("+TWO") && out.contains("a/src/app.js"), "diff shows the change: \(out)")
+    check(runGit(["stash"], repo).code == 0 && read(repo, "src/app.js") == "one\ntwo\n", "stash puts the change away")
+    check(runGit(["stash", "pop"], repo).code == 0 && read(repo, "src/app.js") == "one\nTWO\n", "stash pop brings it back")
+    check(runGit(["frobnicate"], repo).code == 1, "an unknown command fails")
+    check(runGit(["add", "missing.txt"], repo).code == 128, "adding a path with no changes fails")
+}
+
 print("\(checks - failures)/\(checks) checks passed")
 exit(failures == 0 ? 0 : 1)

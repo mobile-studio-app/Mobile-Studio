@@ -117,13 +117,40 @@
   .side-button:active { background: rgba(90, 93, 94, .5); }
   #side-container { flex: 1; min-height: 0; position: relative; }
   #side-container .cm-editor { height: 100%; }
-  /* The Output panel (ext/output.js). */
-  .output-panel { flex: none; height: 34%; min-height: 120px; display: flex; flex-direction: column; background: var(--bg); border-top: 1px solid var(--border); }
-  .output-panel[hidden] { display: none; }
-  .output-bar { height: 30px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 6px 0 16px; }
-  .output-title { flex: 1; font-size: 11px; color: var(--fg); letter-spacing: .04em; border-bottom: 1px solid var(--fg); align-self: center; max-width: max-content; margin-right: auto; padding: 4px 0; }
-  .output-bar select { max-width: 45%; height: 22px; background: var(--chrome); color: var(--text); border: 1px solid var(--border); border-radius: 2px; font: 12px -apple-system, sans-serif; }
-  #output-text { flex: 1; min-height: 0; margin: 0; padding: 4px 16px 12px; overflow: auto; -webkit-overflow-scrolling: touch; font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
+  /* The panel under the editor (panel.js): Problems, Output, Debug Console, Terminal. */
+  .panel { flex: none; height: 34%; min-height: 120px; display: flex; flex-direction: column; background: var(--bg); border-top: 1px solid var(--border); }
+  .panel[hidden] { display: none; }
+  .panel.maximized { flex: 1; height: auto; }
+  #app.panel-maximized #editor-row { display: none; }
+  .panel-bar { height: 32px; flex: none; display: flex; align-items: center; gap: 4px; padding: 0 4px 0 8px; }
+  .panel-tabs { display: flex; gap: 2px; min-width: 0; overflow-x: auto; scrollbar-width: none; flex: 1; }
+  .panel-tabs::-webkit-scrollbar { display: none; }
+  .panel-tab { flex: none; border: 0; background: none; color: var(--muted); font: 11px -apple-system, "Segoe UI", sans-serif; letter-spacing: .04em; padding: 7px 8px 5px; border-bottom: 1px solid transparent; white-space: nowrap; }
+  .panel-tab.active { color: var(--fg); border-bottom-color: var(--fg); }
+  .panel-badge { display: inline-block; min-width: 16px; padding: 0 4px; margin-left: 4px; border-radius: 8px; background: #4d4d4d; color: #fff; font-size: 10px; line-height: 16px; text-align: center; }
+  .panel-badge[hidden] { display: none; }
+  .panel-actions { flex: none; display: flex; align-items: center; gap: 2px; }
+  .panel-actions > [data-for] { display: none; align-items: center; gap: 2px; }
+  .panel-actions > [data-for].shown { display: flex; }
+  .panel-actions select { max-width: 140px; height: 22px; background: var(--chrome); color: var(--text); border: 1px solid var(--border); border-radius: 2px; font: 12px -apple-system, sans-serif; }
+  .panel-key { height: 22px; padding: 0 6px; border: 1px solid var(--border); border-radius: 3px; background: var(--chrome); color: var(--text); font: 11px ui-monospace, Menlo, Consolas, monospace; }
+  .panel-body { flex: 1; min-height: 0; display: none; }
+  .panel-body.shown { display: flex; flex-direction: column; }
+  #output-text, #debug-log { flex: 1; min-height: 0; margin: 0; padding: 4px 16px 12px; overflow: auto; -webkit-overflow-scrolling: touch; font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
+  #debug-input { flex: none; margin: 4px 8px 8px; height: 26px; padding: 0 8px; background: var(--chrome); color: var(--text); border: 1px solid var(--border); border-radius: 2px; font: 12px ui-monospace, Menlo, Consolas, monospace; outline: none; }
+  .debug-in { color: var(--muted); }
+  .debug-error { color: #f48771; }
+  #problems-list { flex: 1; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch; font: 13px -apple-system, "Segoe UI", sans-serif; padding-bottom: 8px; }
+  .problem-file { display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 12px; color: var(--fg); white-space: nowrap; }
+  .problem-file .count { margin-left: auto; }
+  .problem { display: flex; align-items: baseline; gap: 6px; padding: 3px 12px 3px 28px; color: var(--text); cursor: pointer; }
+  .problem:active { background: rgba(90, 93, 94, .3); }
+  .problem .codicon { flex: none; font-size: 14px; position: relative; top: 2px; }
+  .problem .message { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .problem .where { flex: none; color: var(--muted); font-size: 12px; }
+  .problems-empty { padding: 10px 16px; color: var(--muted); }
+  #terminal-host { flex: 1; min-height: 0; padding: 4px 0 0 8px; }
+  #terminal-host .xterm { height: 100%; }
   #editor-container .cm-editor { height: 100%; }
   /* CodeMirror's base theme forces display:flex !important, so hiding needs the same weight. */
   #editor-container .cm-editor[hidden] { display: none !important; }
@@ -393,14 +420,37 @@
     <div id="side-container"></div>
   </div>
   </div>
-  <div id="output-panel" class="output-panel" hidden>
-    <div class="output-bar">
-      <span class="output-title">OUTPUT</span>
-      <select id="output-channel" aria-label="Output channel"></select>
-      <button id="output-clear" class="codicon side-button" title="Clear Output" aria-label="Clear Output">&#xEABF;</button>
-      <button id="output-close" class="codicon side-button" title="Close Panel" aria-label="Close Panel">&#xEA76;</button>
+  <div id="panel" class="panel" hidden>
+    <div class="panel-bar">
+      <div class="panel-tabs" role="tablist">
+        <button class="panel-tab" data-tab="problems" role="tab">PROBLEMS<span id="problems-count" class="panel-badge" hidden></span></button>
+        <button class="panel-tab" data-tab="output" role="tab">OUTPUT</button>
+        <button class="panel-tab" data-tab="debug" role="tab">DEBUG CONSOLE</button>
+        <button class="panel-tab" data-tab="terminal" role="tab">TERMINAL</button>
+      </div>
+      <div class="panel-actions">
+        <div data-for="output">
+          <select id="output-channel" aria-label="Output channel"></select>
+          <button id="output-clear" class="codicon side-button" title="Clear Output" aria-label="Clear Output">&#xEABF;</button>
+        </div>
+        <div data-for="debug">
+          <button id="debug-clear" class="codicon side-button" title="Clear Console" aria-label="Clear Console">&#xEABF;</button>
+        </div>
+        <div data-for="terminal">
+          <button id="terminal-ctrl-c" class="panel-key" title="Stop the running program (Ctrl+C)" aria-label="Control C">^C</button>
+          <button id="terminal-tab-key" class="panel-key" title="Complete (Tab)" aria-label="Tab">⇥</button>
+          <select id="terminal-select" aria-label="Terminal"></select>
+          <button id="terminal-new" class="codicon side-button" title="New Terminal" aria-label="New Terminal">&#xEA60;</button>
+          <button id="terminal-kill" class="codicon side-button" title="Kill Terminal" aria-label="Kill Terminal">&#xEA81;</button>
+        </div>
+      </div>
+      <button id="panel-maximize" class="codicon side-button" title="Maximize Panel" aria-label="Maximize Panel">&#xEAB7;</button>
+      <button id="panel-close" class="codicon side-button" title="Close Panel" aria-label="Close Panel">&#xEA76;</button>
     </div>
-    <pre id="output-text"></pre>
+    <div class="panel-body" data-body="problems"><div id="problems-list"></div></div>
+    <div class="panel-body" data-body="output"><pre id="output-text"></pre></div>
+    <div class="panel-body" data-body="debug"><pre id="debug-log"></pre><input id="debug-input" placeholder="Evaluate an expression while paused" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+    <div class="panel-body" data-body="terminal"><div id="terminal-host"></div></div>
   </div>
 </div>
 <script src="editor.bundle.js"></script>

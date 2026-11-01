@@ -10,7 +10,8 @@ import { childProcess } from './node-child.js';
 import { npmInstall } from './node-npm.js';
 import { runCommand } from './node-tasks.js';
 import { setNativePort } from './node-native.js';
-import { fetchPreloadArgv, installFetch, isUndiciWasmError } from './node-fetch.js';
+import { fetchPreloadArgv, installFetch, installHome, isUndiciWasmError, writableHome } from './node-fetch.js';
+import { closeSession, getSession, openSession } from './node-shell.js';
 
 // Extensions get child_process that runs Node.js scripts as worker threads (see node-child.js).
 globalThis.__childProcessShim = childProcess;
@@ -34,8 +35,10 @@ process.on('unhandledRejection', (e) => {
   if (isUndiciWasmError(e)) return;   // see node-fetch.js
   log('error', 'Node.js extension host: ' + (e && e.message ? e.message : e));
 });
-// fetch() without WebAssembly, here and in worker threads (node-fetch.js).
+// fetch() without WebAssembly, and a home folder that can be written to, here and in worker
+// threads (node-fetch.js).
 installFetch();
+installHome(writableHome(), false);
 fetchPreloadArgv();
 
 const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*' };
@@ -71,6 +74,42 @@ http.createServer((req, res) => {
         write((e && e.message ? e.message : String(e)) + '\n');
         res.end(JSON.stringify({ exit: 1 }) + '\n');
       });
+    });
+    return;
+  }
+  // The Terminal (node-shell.js): a session per terminal, its events as server-sent events.
+  if (req.url.startsWith('/term/events?')) {
+    const session = getSession(new URL(req.url, 'http://x').searchParams.get('id'));
+    if (!session) { res.writeHead(404, cors); res.end(); return; }
+    res.writeHead(200, { ...cors, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+    res.write(': connected\n\n');
+    const stop = session.listen((message) => res.write('data: ' + JSON.stringify(message) + '\n\n'));
+    req.on('close', stop);
+    return;
+  }
+  if (req.url.startsWith('/term/') && req.method === 'POST') {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      let params = {};
+      try { params = JSON.parse(body || '{}'); } catch (e) { /* empty */ }
+      const action = req.url.slice('/term/'.length);
+      const session = getSession(params.id);
+      let result = { ok: true };
+      if (action === 'open') {
+        const opened = openSession(params.dir || process.cwd());
+        opened.ready();
+        result = { id: opened.id, cwd: opened.cwd };
+      } else if (!session) {
+        res.writeHead(404, cors); res.end(); return;
+      } else if (action === 'input') session.input(String(params.line ?? ''));
+      else if (action === 'signal') session.signal(params.name);
+      else if (action === 'reply') session.reply(params.call, params.result);
+      else if (action === 'complete') result = session.complete(String(params.line ?? ''));
+      else if (action === 'close') closeSession(params.id);
+      res.writeHead(200, { ...cors, 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
     });
     return;
   }

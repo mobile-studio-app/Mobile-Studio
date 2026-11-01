@@ -6,6 +6,9 @@
 //   npx <tool>, or a package's tool  the JavaScript file its package.json "bin" names
 //   NAME=value … and cross-env       environment variables for what follows
 // Other programs can't run on iOS.
+//
+// `io` is either a function that takes output, or { write, stdin, signal } (the Terminal: input
+// for the program, and an AbortSignal for Ctrl+C).
 import fs from 'fs';
 import path from 'path';
 import { Worker } from 'worker_threads';
@@ -68,46 +71,70 @@ function toolScript(name, dir) {
   }
 }
 
+const ioFor = (io) => (typeof io === 'function' ? { write: io } : io);
+
+/** Feeds `io.stdin` (a stream, or text from a pipe) to a program's stdin, or ends it. */
+function connectStdin(io, stdin) {
+  if (typeof io.stdin === 'string') stdin.end(io.stdin);
+  else if (io.stdin) io.stdin.pipe(stdin);
+  else stdin.end();
+}
+
 /** Runs a script as `node` would, in a worker thread. Resolves with its exit code. */
-function runScript(file, args, cwd, env, write) {
+function runScript(file, args, cwd, env, io) {
+  const { write, signal } = ioFor(io);
   return new Promise((resolve) => {
     let worker;
     try { process.chdir(cwd); } catch (e) { /* keep the old folder */ }
     // Run as the main module (require.main === module), whatever the file's extension (tools'
     // scripts often have none, which a Worker given the file refuses).
     const boot = `process.argv[1] = ${JSON.stringify(file)}; require('module').runMain();`;
+    const withStdin = ioFor(io).stdin != null;
     try {
-      worker = new Worker(boot, { eval: true, argv: args, env: { ...process.env, ...env }, stdout: true, stderr: true, stdin: false, execArgv: fetchPreloadArgv() });
+      worker = new Worker(boot, { eval: true, argv: args, env: { ...process.env, ...env }, stdout: true, stderr: true, stdin: withStdin, execArgv: fetchPreloadArgv() });
     } catch (e) {
       write(`${e.message}\n`);
       resolve(1);
       return;
     }
+    if (withStdin) connectStdin(ioFor(io), worker.stdin);
     worker.stdout.setEncoding('utf8');
     worker.stderr.setEncoding('utf8');
     worker.stdout.on('data', write);
     worker.stderr.on('data', write);
     worker.on('error', (e) => write(String(e && e.stack ? e.stack : e).split('\n').filter((l) => !/node:internal/.test(l)).join('\n') + '\n'));
-    worker.on('exit', (code) => resolve(code));
+    let interrupted = false;
+    const onAbort = () => { interrupted = true; worker.terminate(); };
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+    worker.on('exit', (code) => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      resolve(interrupted ? 130 : code);
+    });
   });
 }
 
 /** Runs a macOS program (see node-native.js). Resolves with its exit code. */
-function runNative(file, args, cwd, env, write) {
+function runNative(file, args, cwd, env, io) {
+  const { write, signal } = ioFor(io);
   return new Promise((resolve) => {
     const child = spawnNative(file, args, { cwd, env: { ...process.env, ...env } });
-    child.stdin.end();
+    connectStdin(ioFor(io), child.stdin);
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', write);
     child.stderr.on('data', write);
     child.on('error', () => {});
-    child.on('close', (code) => resolve(code < 0 ? 127 : code));
+    const onAbort = () => child.kill();
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+    child.on('close', (code) => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      resolve(signal && signal.aborted ? 130 : code < 0 ? 127 : code);
+    });
   });
 }
 
 /** Runs a task's command line in the project `dir`. Resolves with the exit code. */
-export async function runCommand(line, dir, cwd, write, depth = 0) {
+export async function runCommand(line, dir, cwd, io, depth = 0) {
   const folder = cwd ? path.resolve(dir, cwd.replace(/\$\{workspaceFolder\}/g, dir)) : dir;
   let code = 0;
   for (const { words: raw, joiner } of parseCommandLine(line.replace(/\$\{workspaceFolder\}/g, dir))) {
@@ -122,19 +149,22 @@ export async function runCommand(line, dir, cwd, write, depth = 0) {
       words.shift();
     }
     if (!words.length) continue;
-    code = await runOne(words, folder, dir, env, write, depth);
+    code = await runProgram(words, folder, dir, env, io, depth);
     if (joiner === '&&' && code !== 0) break;
     if (joiner === '||' && code === 0) break;
   }
   return code;
 }
 
-async function runOne(words, folder, dir, env, write, depth) {
+/** Runs one program: `node`, npm, npx, a package's tool or a macOS program. Resolves with its
+ * exit code (127: there's no such program). */
+export async function runProgram(words, folder, dir, env, io, depth = 0) {
+  const { write } = ioFor(io);
   const [program, ...args] = words;
   if (program === 'node' || program === 'node.exe') {
     const scriptIndex = args.findIndex((a) => !a.startsWith('-'));
     if (scriptIndex < 0) { write('Mobile Studio runs `node` with a script, e.g. `node main.js`.\n'); return 1; }
-    return runScript(path.resolve(folder, args[scriptIndex]), args.slice(scriptIndex + 1), folder, env, write);
+    return runScript(path.resolve(folder, args[scriptIndex]), args.slice(scriptIndex + 1), folder, env, io);
   }
   if (program === 'npm' || program === 'pnpm' || program === 'yarn') {
     const [sub, ...rest] = args;
@@ -146,7 +176,7 @@ async function runOne(words, folder, dir, env, write, depth) {
     const pkg = readJSON(path.join(dir, 'package.json')) || {};
     const scripts = pkg.scripts || {};
     if (!script || scripts[script] == null) {
-      if (script === 'start' && fs.existsSync(path.join(dir, 'server.js'))) return runScript(path.join(dir, 'server.js'), extra, folder, env, write);
+      if (script === 'start' && fs.existsSync(path.join(dir, 'server.js'))) return runScript(path.join(dir, 'server.js'), extra, folder, env, io);
       write(`package.json has no "${script}" script.\n`);
       return 1;
     }
@@ -154,20 +184,20 @@ async function runOne(words, folder, dir, env, write, depth) {
     for (const step of [`pre${script}`, script, `post${script}`]) {
       if (scripts[step] == null) continue;
       write(`> ${step}: ${scripts[step]}\n`);
-      const code = await runCommand(scripts[step] + (step === script && extra.length ? ' ' + extra.join(' ') : ''), dir, null, write, depth + 1);
+      const code = await runCommand(scripts[step] + (step === script && extra.length ? ' ' + extra.join(' ') : ''), dir, null, io, depth + 1);
       if (code) return code;
     }
     return 0;
   }
   if (program === 'npx') {
     const [tool, ...rest] = args.filter((a, i) => !(i === 0 && a.startsWith('-')));
-    return runOne([tool, ...rest], folder, dir, env, write, depth);
+    return runProgram([tool, ...rest], folder, dir, env, io, depth);
   }
   if (program === 'echo') { write(args.join(' ') + '\n'); return 0; }
   const tool = toolScript(program, dir);
-  if (tool) return runScript(tool, args, folder, env, write);
+  if (tool) return runScript(tool, args, folder, env, io);
   const native = nativeProgram(program, { cwd: folder, env: { ...process.env, ...env } });
-  if (native) return runNative(native, args, folder, env, write);
+  if (native) return runNative(native, args, folder, env, io);
   write(`"${program}" is a program, and iOS doesn't let apps run other programs. Mobile Studio can run node scripts, npm scripts, the tools that npm packages provide and macOS programs (with a signing certificate in Settings).\n`);
   return 127;
 }

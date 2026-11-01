@@ -1,4 +1,6 @@
-// VS Code's Output panel: under the editor, one channel at a time, picked from a list. Extensions
+import { hidePanel, onPanelTab, panelTab, showPanel, togglePanel } from '../panel.js';
+
+// VS Code's Output panel (a tab of the panel, panel.js): one channel at a time, picked from a list. Extensions
 // write to their output channels; tasks and npm write to "Tasks" and "npm", and the extension
 // host's own messages go to "Extensions".
 
@@ -12,10 +14,10 @@ const $ = (id) => document.getElementById(id);
 
 function build() {
   if (panel) return panel;
-  panel = $('output-panel');
-  $('output-close').addEventListener('click', () => hideOutput());
+  panel = $('panel');
   $('output-clear').addEventListener('click', () => { if (selected) { channels.set(selected, ''); render(); } });
   $('output-channel').addEventListener('change', (e) => { selected = e.target.value; render(); });
+  onPanelTab('output', () => { renderChannels(); render(); });
   return panel;
 }
 
@@ -33,7 +35,7 @@ function renderChannels() {
 }
 
 function render() {
-  if (!panel || panel.hidden) return;
+  if (!panel || panelTab() !== 'output') return;
   const text = $('output-text');
   const atEnd = text.scrollTop + text.clientHeight >= text.scrollHeight - 8;
   text.textContent = channels.get(selected) || '';
@@ -70,14 +72,15 @@ export function showOutput(name) {
     if (!channels.has(name)) channels.set(name, '');
     selected = name;
   }
-  panel.hidden = false;
-  renderChannels();
-  render();
+  showPanel('output');
 }
 
 export function hideOutput() {
-  if (panel) panel.hidden = true;
+  if (panelTab() === 'output') hidePanel();
 }
 
-export const toggleOutput = () => (panel && !panel.hidden ? hideOutput() : showOutput());
+export const toggleOutput = () => { build(); togglePanel('output'); };
 export const outputChannels = () => [...channels.keys()];
+
+/** Makes the Output tab ready before anything is written to it. */
+export function setupOutput() { build(); }

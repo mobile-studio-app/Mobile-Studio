@@ -297,7 +297,9 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                     }
                 }
             case "debugEvaluate":
-                DebugSession.shared.evaluate(body["expression"] as? String ?? "", context: "hover") { value, error in
+                // "hover" can't change the program (side effects are refused); the Debug Console's "repl" can.
+                let context = body["context"] as? String == "repl" ? "repl" : "hover"
+                DebugSession.shared.evaluate(body["expression"] as? String ?? "", context: context) { value, error in
                     if let value {
                         replyHandler(["value": value.value, "type": value.type], nil)
                     } else {
@@ -319,6 +321,16 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 // npm or a task changed the project's files.
                 NotificationCenter.default.post(name: ProjectStore.filesDidChange, object: store)
                 replyHandler(true, nil)
+            case "gitCommand":
+                // `git` in the Terminal (GitCommandLine).
+                let root = store.currentProject
+                let cwd = (body["cwd"] as? String).map { URL(fileURLWithPath: $0) } ?? root
+                let args = body["args"] as? [String] ?? []
+                Task { @MainActor in
+                    let result = await GitCommandLine.run(args, root: root, cwd: cwd)
+                    replyHandler(["out": result.text, "code": Int(result.code)], nil)
+                    NotificationCenter.default.post(name: ProjectStore.filesDidChange, object: store)
+                }
             case "write":
                 try store.write(body["path"] as? String ?? "", contents: body["contents"] as? String ?? "")
                 replyHandler(true, nil)

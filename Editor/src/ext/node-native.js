@@ -7,6 +7,7 @@ import fs from 'fs';
 import net from 'net';
 import path from 'path';
 import { PassThrough } from 'stream';
+import { writableHome } from './node-fetch.js';
 
 let nativePort = 0;
 let nextPid = 90000;
@@ -60,6 +61,8 @@ export function spawnNative(file, args = [], options = {}) {
 
   const env = {};
   for (const [key, value] of Object.entries(options.env || process.env)) if (value != null) env[key] = String(value);
+  // The app's HOME can't be written to; programs keep their settings in the writable one.
+  if (!options.env || options.env.HOME === process.env.HOME) env.HOME = writableHome();
   const control = net.connect(nativePort, '127.0.0.1');
   let buffer = '';
   let streams = [];

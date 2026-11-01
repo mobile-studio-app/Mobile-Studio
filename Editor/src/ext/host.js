@@ -40,6 +40,27 @@ function pathFor(uri) {
 export const isRunning = () => hosts.length > 0;
 export const outputLog = () => output.slice();
 
+/** Extensions' diagnostics for every file: [{ path, items }], items as the host reports them
+ * (range in 0-based lines and characters, severity 0 error ... 3 hint). */
+export function hostDiagnostics() {
+  const out = [];
+  for (const [uri, byOwner] of diagnostics) {
+    const items = [...byOwner.values()].flat();
+    if (items.length) out.push({ path: pathFor(uri), items });
+  }
+  return out;
+}
+
+let diagnosticsListener = null;
+/** `fn` runs when an extension's diagnostics change (for the Problems panel). */
+export function onDiagnosticsChanged(fn) { diagnosticsListener = fn; }
+
+/** The Node.js host's address (starting it if needed), for the Terminal; null without Node.js. */
+export async function nodeAddress(appAPI) {
+  if (!app) app = appAPI;
+  return (await connectNode()) ? nodeBase : null;
+}
+
 /** Asks one host to do something (run a provider or command). */
 function callHost(host, method, params) {
   const id = nextId++;
@@ -301,6 +322,7 @@ function onNotify(method, params) {
     if (!diagnostics.has(params.uri)) diagnostics.set(params.uri, new Map());
     diagnostics.get(params.uri).set(params.owner, params.items);
     if (app && pathFor(params.uri) === app.current()) forceLinting(app.view);
+    if (diagnosticsListener) diagnosticsListener();
   }
 }
 
