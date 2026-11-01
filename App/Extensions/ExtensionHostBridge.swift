@@ -54,7 +54,8 @@ enum ExtensionHostBridge {
         let project = store.currentProject.lastPathComponent
         switch cmd {
         case "extHostInit":
-            let payload: [String: Any] = ["configuration": configuration, "state": state(project: project), "project": project,
+            let payload: [String: Any] = ["configuration": UserSettingsFiles.effectiveConfiguration(in: store.currentProject),
+                                          "state": state(project: project), "project": project,
                                           "projectPath": store.currentProject.path]
             reply(payload, nil)
         case "nodeHostStart":

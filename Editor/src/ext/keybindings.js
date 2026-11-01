@@ -45,14 +45,23 @@ let bindings = [];
 
 /** The keymap for the installed extensions' shortcuts. `run(command, args)` runs one;
  * `context()` gives { languageId, extname } for "when". */
-export function buildExtensionKeymap(run, context) {
+export function buildExtensionKeymap(run, context, user = []) {
   const byKey = new Map();
+  // keybindings.json first, so its shortcuts win; "-command" there removes a shortcut.
+  const removed = new Set(user.filter((k) => k.command.startsWith('-')).map((k) => `${convertKey(k.key)}\0${k.command.slice(1)}`));
+  for (const kb of user) {
+    if (kb.command.startsWith('-')) continue;
+    const cmKey = convertKey(kb.key);
+    if (!byKey.has(cmKey)) byKey.set(cmKey, []);
+    byKey.get(cmKey).push(kb);
+  }
   for (const ext of contributions.extensions) {
     const list = ext.manifest.contributes?.keybindings;
     for (const kb of Array.isArray(list) ? list : list ? [list] : []) {
       const key = kb.mac || kb.key;
       if (!key || !kb.command || kb.command.startsWith('-')) continue;
       const cmKey = convertKey(key);
+      if (removed.has(`${cmKey}\0${kb.command}`)) continue;
       if (!byKey.has(cmKey)) byKey.set(cmKey, []);
       byKey.get(cmKey).push(kb);
     }

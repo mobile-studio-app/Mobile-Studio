@@ -112,7 +112,7 @@ jobs:
       # checkout leaves files looking changed or a push re-sends unchanged files.
       - name: Test git engine
         run: |
-          swiftc -swift-version 5 App/Git/GitManager.swift App/Git/GitCommandLine.swift App/AI/ConflictResolver.swift App/Extensions/ExtensionCompatibility.swift Tests/GitEngine/*.swift -o "$RUNNER_TEMP/git-tests"
+          swiftc -swift-version 5 App/Git/GitManager.swift App/Git/GitCommandLine.swift App/Settings/JSONC.swift App/AI/ConflictResolver.swift App/Extensions/ExtensionCompatibility.swift Tests/GitEngine/*.swift -o "$RUNNER_TEMP/git-tests"
           "$RUNNER_TEMP/git-tests"
 
       - name: Install tools

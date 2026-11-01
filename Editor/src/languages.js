@@ -78,6 +78,8 @@ function baseLanguageFor(path, suggestions) {
     case 'lua':
       return { name: 'Lua', extensions: luaSupport(luaLanguage, suggestions) };
     case 'json':
+      // VS Code's own settings files allow comments and trailing commas (JSON with Comments).
+      if (/(^|\/)(@user|\.vscode)\/|(^|\/)(tsconfig|jsconfig)\.json$/.test(path)) return { name: 'JSON with Comments', extensions: [json()] };
       return { name: 'JSON', extensions: [json(), linter(jsonParseLinter())] };
     case 'c': case 'h': case 'cpp': case 'hpp': case 'cc': case 'm': case 'mm':
       return { name: ext === 'c' || ext === 'h' ? 'C' : 'C++', extensions: [cpp()] };

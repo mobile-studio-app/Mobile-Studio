@@ -27,7 +27,7 @@ import { prepareLanguage, forgetExtensionLanguages, languageIdFor } from './lang
 import { applyChrome, chromeColors } from './theme.js';
 import { startHost, setConfiguration, hoverAt, outputLog, formatDocument, hostExtensions, didOpen, didChange, didSave, didSelect } from './ext/host.js';
 import { showCommandPalette, showQuickOpen, noteOpenedFile, builtinCommands, pickColorTheme } from './palette.js';
-import { closeQuickInput } from './ext/ui.js';
+import { closeQuickInput, notify as showNotification } from './ext/ui.js';
 import { gitGutter, loadOriginal } from './gitgutter.js';
 import { findWidget } from './findwidget.js';
 import { setupWebviews, reveal as revealWebview, closeWebview } from './ext/webviews.js';
@@ -201,11 +201,58 @@ async function refreshExtensions() {
   await ensureTheme();
   // Extensions' browser code runs in the extension host.
   await startHost(hostAPI).catch(() => {});
-  const keys = buildExtensionKeymap((command, args) => runCommand(command, ...args), () => ({
+  rebuildKeymap();
+}
+
+// Keyboard shortcuts: keybindings.json's, then extensions'. A command is the Command Palette's,
+// or else an extension's.
+let userKeybindings = [];
+
+function runAnyCommand(command, args = []) {
+  const builtin = builtinCommands(() => view).find((c) => c.command === command);
+  if (builtin) return builtin.run(...args);
+  return runCommand(command, ...args);
+}
+
+function rebuildKeymap() {
+  const keys = buildExtensionKeymap(runAnyCommand, () => ({
     languageId: current ? languageIdFor(current) : '',
     extname: current && current.includes('.') ? '.' + current.split('.').pop() : '',
-  }));
+  }), userKeybindings);
   view.dispatch({ effects: extensionKeys.reconfigure(keys) });
+}
+
+/** Reads @user/keybindings.json (JSON with comments) and applies it. */
+async function loadUserKeybindings() {
+  const text = await native({ cmd: 'read', path: '@user/keybindings.json' }).catch(() => '[]');
+  try {
+    const list = JSON.parse(stripJSONComments(String(text)) || '[]');
+    userKeybindings = Array.isArray(list) ? list.filter((k) => k && typeof k.key === 'string' && typeof k.command === 'string') : [];
+  } catch (e) {
+    showNotification('warning', `keybindings.json isn't valid JSON: ${e.message}`, []);
+    userKeybindings = [];
+  }
+  rebuildKeymap();
+}
+
+/** JSON with comments and trailing commas (VS Code's settings files) as plain JSON. */
+function stripJSONComments(text) {
+  let out = '';
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      out += c;
+      if (c === '\\') { out += text[++i] ?? ''; continue; }
+      if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') { inString = true; out += c; continue; }
+    if (c === '/' && text[i + 1] === '/') { while (i < text.length && text[i] !== '\n') i++; out += '\n'; continue; }
+    if (c === '/' && text[i + 1] === '*') { i += 2; while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i++; i++; continue; }
+    out += c;
+  }
+  return out.replace(/,(\s*[\]}])/g, '$1');
 }
 
 const hostAPI = {
@@ -244,6 +291,23 @@ async function reopenWith() {
   await openCustomEditor(editors[chosen - 1].viewType, path, path.split('/').pop());
 }
 addCommands([{ command: 'workbench.action.reopenWithEditor', title: 'View: Reopen Editor With…', run: () => reopenWith() }]);
+// VS Code's settings files (App/Settings/UserSettingsFiles.swift).
+addCommands([
+  { command: 'workbench.action.openSettingsJson', title: 'Preferences: Open User Settings (JSON)', run: () => openFile('@user/settings.json') },
+  { command: 'workbench.action.openGlobalKeybindingsFile', title: 'Preferences: Open Keyboard Shortcuts (JSON)', run: () => openFile('@user/keybindings.json') },
+  {
+    command: 'workbench.action.openWorkspaceSettingsFile', title: 'Preferences: Open Workspace Settings (JSON)',
+    run: async () => {
+      const exists = await native({ cmd: 'stat', path: '.vscode/settings.json' }).then(() => true, () => false);
+      if (!exists) {
+        await native({ cmd: 'write', path: '.vscode/settings.json', contents: '// Settings for this project, over your own (Preferences: Open User Settings).\n{\n}\n' });
+        await native({ cmd: 'filesChanged' }).catch(() => {});
+      }
+      openFile('.vscode/settings.json');
+    },
+  },
+]);
+loadUserKeybindings();
 
 function commandPalette() {
   showQuickOpen(quickOpenAPI, '>');
@@ -444,8 +508,15 @@ async function save() {
   }
   const path = current;
   const contents = view.state.doc.toString();
-  await native({ cmd: 'write', path, contents });
+  try {
+    await native({ cmd: 'write', path, contents });
+  } catch (e) {
+    // settings.json and keybindings.json are saved even when they can't be applied: say why.
+    if (!path.startsWith('@user/')) throw e;
+    showNotification('warning', String(e && e.message ? e.message : e), []);
+  }
   if (path === current && view.state.doc.toString() === contents) setDirty(false);
+  if (path === '@user/keybindings.json') loadUserKeybindings();
   didSave(path);
   states.set(path, view.state);
 }
@@ -555,6 +626,8 @@ window.duocode = {
   openWebviewView: (viewId, title) => openWebviewView(viewId, title),
   // The panel under the editor (panel.js): 'problems', 'output', 'debug' or 'terminal'.
   showPanel: (tab) => showPanel(tab),
+  // A Command Palette command, or an extension's, by id (for the app: Settings' buttons).
+  runCommand: (name, ...args) => runAnyCommand(name, args),
   togglePanel: (tab) => togglePanel(tab),
   onEvent({ name, payload }) {
     if (name === 'openFile' && payload?.path) openFromUser(payload.path);

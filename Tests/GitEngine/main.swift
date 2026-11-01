@@ -552,5 +552,30 @@ do {
     check(runGit(["add", "missing.txt"], repo).code == 128, "adding a path with no changes fails")
 }
 
+section("settings.json: JSON with comments")
+do {
+    let text = """
+        // User settings
+        {
+            /* the editor */
+            "editor.fontSize": 14,   // points
+            "files.exclude": { "**/.git": true, },
+            "url": "https://example.com/a//b",
+            "note": "not /* a comment */ here",
+            "list": [1, 2, 3,],
+        }
+        """
+    let value = JSONC.object(text)
+    check(value != nil, "parses with comments and trailing commas: \(JSONC.strip(text))")
+    check((value?["editor.fontSize"] as? NSNumber)?.intValue == 14, "number value")
+    check(value?["url"] as? String == "https://example.com/a//b", "// inside a string isn't a comment")
+    check(value?["note"] as? String == "not /* a comment */ here", "/* */ inside a string isn't a comment")
+    check((value?["list"] as? [Any])?.count == 3, "trailing comma in a list")
+    check(((value?["files.exclude"] as? [String: Any])?["**/.git"] as? NSNumber)?.boolValue == true, "nested object with a trailing comma")
+    check(JSONC.object("") != nil && JSONC.object("  // only a comment\n") != nil, "an empty file is an empty object")
+    check(JSONC.object("{ \"a\": }") == nil, "invalid JSON is refused")
+    check((try? JSONC.parse("[ { \"key\": \"ctrl+k\", \"command\": \"x\" }, ]")) is [Any], "keybindings.json's list")
+}
+
 print("\(checks - failures)/\(checks) checks passed")
 exit(failures == 0 ? 0 : 1)

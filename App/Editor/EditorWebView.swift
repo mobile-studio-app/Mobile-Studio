@@ -37,12 +37,14 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
     }
 
     @objc private func extensionConfigurationChanged() {
-        emit("extensionConfiguration", ExtensionHostBridge.configuration)
+        emit("extensionConfiguration", UserSettingsFiles.effectiveConfiguration(in: ProjectStore.shared.currentProject))
     }
 
+    /// The editor's settings, with the project's .vscode/settings.json on top.
     private var settingsPayload: [String: Any] {
         AppSettings.shared.editorPayload(aiReady: AICompletionService.shared.isReady,
                                          aiMergeReady: AICompletionService.shared.isMergeReady)
+            .merging(UserSettingsFiles.editorOverrides(in: ProjectStore.shared.currentProject)) { _, project in project }
     }
 
     private var lastPushedSettings: NSDictionary?
@@ -183,7 +185,9 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
             case "list":
                 replyHandler(store.list(), nil)
             case "read":
-                replyHandler(try store.read(body["path"] as? String ?? ""), nil)
+                let path = body["path"] as? String ?? ""
+                // @user/settings.json and @user/keybindings.json (UserSettingsFiles).
+                replyHandler(UserSettingsFiles.isUserPath(path) ? try UserSettingsFiles.read(path) : try store.read(path), nil)
             case "readBinary":
                 // For the image/audio/font viewer: base64 plus size, capped to keep the bridge responsive.
                 let url = try store.resolve(body["path"] as? String ?? "")
@@ -200,7 +204,9 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 }
                 replyHandler(true, nil)
             case "stat":
-                let url = try store.resolve(body["path"] as? String ?? "")
+                let path = body["path"] as? String ?? ""
+                if UserSettingsFiles.isUserPath(path) { replyHandler(["size": try UserSettingsFiles.read(path).utf8.count], nil); return }
+                let url = try store.resolve(path)
                 replyHandler(["size": (try url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0], nil)
             case "getSettings":
                 replyHandler(settingsPayload, nil)
@@ -332,7 +338,19 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                     NotificationCenter.default.post(name: ProjectStore.filesDidChange, object: store)
                 }
             case "write":
-                try store.write(body["path"] as? String ?? "", contents: body["contents"] as? String ?? "")
+                let path = body["path"] as? String ?? ""
+                let contents = body["contents"] as? String ?? ""
+                if UserSettingsFiles.isUserPath(path) {
+                    try UserSettingsFiles.write(path, contents)
+                    replyHandler(true, nil)
+                    return
+                }
+                try store.write(path, contents: contents)
+                // The project's settings: the editor's and extensions' settings change with them.
+                if path == ".vscode/settings.json" {
+                    NotificationCenter.default.post(name: AppSettings.didChange, object: AppSettings.shared)
+                    NotificationCenter.default.post(name: ExtensionHostBridge.didChangeConfiguration, object: nil)
+                }
                 replyHandler(true, nil)
             default:
                 if ExtensionHostBridge.handle(cmd, body, reply: replyHandler) { return }

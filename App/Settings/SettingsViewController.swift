@@ -1,11 +1,64 @@
 import UIKit
 import UniformTypeIdentifiers
 
-/// Settings: editor, code suggestions, AI model, running games, GitHub account, about.
+/// One page of Settings (SettingsRootViewController lists them): its sections of rows.
 final class SettingsViewController: UITableViewController {
-    private enum Section: Int, CaseIterable {
-        case editor, suggestions, ai, aiMerge, run, programs, account, developer, about
+    enum Page: CaseIterable {
+        case general, ai, running, sourceControl, advanced, about
+
+        var title: String {
+            switch self {
+            case .general: return "General"
+            case .ai: return "AI"
+            case .running: return "Running"
+            case .sourceControl: return "Source Control"
+            case .advanced: return "Advanced"
+            case .about: return "About"
+            }
+        }
+
+        /// An SF Symbol for the list of pages.
+        var symbol: String {
+            switch self {
+            case .general: return "gearshape"
+            case .ai: return "sparkles"
+            case .running: return "play.circle"
+            case .sourceControl: return "arrow.triangle.branch"
+            case .advanced: return "wrench.and.screwdriver"
+            case .about: return "info.circle"
+            }
+        }
+
+        fileprivate var sections: [Section] {
+            switch self {
+            case .general: return [.editor, .suggestions]
+            case .ai: return [.ai, .aiMerge]
+            case .running: return [.run, .programs]
+            case .sourceControl: return [.account]
+            case .advanced: return [.files, .developer]
+            case .about: return [.about]
+            }
+        }
+
+        /// The settings on this page, for Settings' search.
+        var searchTerms: [String] {
+            switch self {
+            case .general: return ["Color Theme", "Font Size", "Indent Width", "Tab Size", "Word Wrap", "Auto Save", "Format on Save", "Code Suggestions", "Completion"]
+            case .ai: return ["AI Suggestions", "Apple Intelligence", "Fast AI", "Regular AI", "Download over Mobile Data", "AI Merge Conflicts", "Models"]
+            case .running: return ["LuaJIT JIT Compiler", "Running Games", "Programs from Extensions", "Signing Certificate"]
+            case .sourceControl: return ["GitHub", "Sign in", "Smart Commit"]
+            case .advanced: return ["settings.json", "keybindings.json", "Keyboard Shortcuts", "Test Automation", "Pairing Code", "Developer"]
+            case .about: return ["Version", "Runtimes", "Device Memory", "Licences"]
+            }
+        }
     }
+
+    fileprivate enum Section: Int, CaseIterable {
+        case editor, suggestions, ai, aiMerge, run, programs, account, files, developer, about
+    }
+
+    /// Posted to open a settings file (userInfo "path") in the editor.
+    static let openFileRequest = Notification.Name("DuoCodeOpenSettingsFile")
 
     private enum EditorRow: Int, CaseIterable {
         case theme, fontSize, tabSize, wordWrap, autoSave, formatOnSave
@@ -15,16 +68,23 @@ final class SettingsViewController: UITableViewController {
     /// The merge conflict model's rows; nil is "Same as AI Suggestions".
     private let mergeChoices: [AIModelChoice?] = [nil, .off, .appleIntelligence, .fast, .regular]
     private let settings = AppSettings.shared
+    private let page: Page
+    private let sections: [Section]
 
-    init() {
+    init(page: Page) {
+        self.page = page
+        sections = page.sections
         super.init(style: .insetGrouped)
     }
+
+    /// Where a section is on this page (nil: it's on another page).
+    private func index(_ section: Section) -> Int? { sections.firstIndex(of: section) }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "Settings"
+        title = page.title
         navigationItem.rightBarButtonItem = UIBarButtonItem(barButtonSystemItem: .done, target: self, action: #selector(doneTapped))
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "Cell")
         NotificationCenter.default.addObserver(self, selector: #selector(modelsChanged),
@@ -41,19 +101,21 @@ final class SettingsViewController: UITableViewController {
     @objc private func modelsChanged(_ note: Notification) {
         guard let model = note.userInfo?["model"] as? AIModelChoice else { return reloadAIRows() }
         var rows: [IndexPath] = []
-        if let row = aiChoices.firstIndex(of: model) { rows.append(IndexPath(row: row, section: Section.ai.rawValue)) }
-        if let row = mergeChoices.firstIndex(of: model) { rows.append(IndexPath(row: row, section: Section.aiMerge.rawValue)) }
+        if let row = aiChoices.firstIndex(of: model), let section = index(.ai) { rows.append(IndexPath(row: row, section: section)) }
+        if let row = mergeChoices.firstIndex(of: model), let section = index(.aiMerge) { rows.append(IndexPath(row: row, section: section)) }
         tableView.reconfigureRows(at: rows)
     }
 
     @objc private func automationChanged() {
-        tableView.reloadSections(IndexSet(integer: Section.developer.rawValue), with: .none)
+        if let section = index(.developer) { tableView.reloadSections(IndexSet(integer: section), with: .none) }
     }
 
     /// Both model lists, whose checkmarks and download states depend on each other.
     private func reloadAIRows() {
-        tableView.reconfigureRows(at: aiChoices.indices.map { IndexPath(row: $0, section: Section.ai.rawValue) }
-            + mergeChoices.indices.map { IndexPath(row: $0, section: Section.aiMerge.rawValue) })
+        var rows: [IndexPath] = []
+        if let section = index(.ai) { rows += aiChoices.indices.map { IndexPath(row: $0, section: section) } }
+        if let section = index(.aiMerge) { rows += mergeChoices.indices.map { IndexPath(row: $0, section: section) } }
+        tableView.reconfigureRows(at: rows)
     }
 
     private var cellularRow: Int { aiChoices.count }
@@ -61,11 +123,11 @@ final class SettingsViewController: UITableViewController {
     // MARK: - Table
 
     override func numberOfSections(in tableView: UITableView) -> Int {
-        Section.allCases.count
+        sections.count
     }
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        switch Section(rawValue: section)! {
+        switch sections[section] {
         case .editor: return EditorRow.allCases.count
         case .suggestions: return 1
         case .ai: return aiChoices.count + 1
@@ -73,13 +135,14 @@ final class SettingsViewController: UITableViewController {
         case .run: return 1
         case .programs: return 1
         case .account: return 2
+        case .files: return 3
         case .developer: return settings.testAutomation ? 3 : 1
         case .about: return 3
         }
     }
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        switch Section(rawValue: section)! {
+        switch sections[section] {
         case .editor: return "Editor"
         case .suggestions: return "Code Completion"
         case .ai: return "AI Suggestions"
@@ -87,13 +150,14 @@ final class SettingsViewController: UITableViewController {
         case .run: return "Running Games"
         case .programs: return "Programs from Extensions"
         case .account: return "Source Control"
+        case .files: return "Settings Files"
         case .developer: return "Developer"
         case .about: return "About"
         }
     }
 
     override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
-        switch Section(rawValue: section)! {
+        switch sections[section] {
         case .editor:
             return nil
         case .suggestions:
@@ -126,6 +190,8 @@ final class SettingsViewController: UITableViewController {
                 Export P12, save the file to this iPhone, then import it here. Experimental: a program that crashes \
                 closes Mobile Studio.
                 """
+        case .files:
+            return "VS Code's settings files. settings.json has these settings and extensions' under VS Code's names; a project's .vscode/settings.json overrides them for that project."
         case .account:
             return "Smart Commit commits all your changes when nothing is staged, instead of asking first."
         case .developer:
@@ -150,7 +216,7 @@ final class SettingsViewController: UITableViewController {
         cell.isUserInteractionEnabled = true
         var content = UIListContentConfiguration.valueCell()
 
-        switch Section(rawValue: indexPath.section)! {
+        switch sections[indexPath.section] {
         case .editor:
             configureEditorRow(EditorRow(rawValue: indexPath.row)!, cell: cell, content: &content)
         case .suggestions:
@@ -189,6 +255,10 @@ final class SettingsViewController: UITableViewController {
                 content.secondaryText = "Import…"
                 content.secondaryTextProperties.color = .tintColor
             }
+        case .files:
+            content.text = ["Open User Settings (JSON)", "Open Keyboard Shortcuts (JSON)", "Open Workspace Settings (JSON)"][indexPath.row]
+            content.secondaryText = ["settings.json", "keybindings.json", ".vscode/settings.json"][indexPath.row]
+            content.textProperties.color = .tintColor
         case .account where indexPath.row == 1:
             content.text = "Smart Commit"
             cell.accessoryView = makeSwitch(settings.smartCommit) { [weak self] in self?.settings.smartCommit = $0 }
@@ -209,7 +279,7 @@ final class SettingsViewController: UITableViewController {
                 content.text = "Test Automation over Wi-Fi"
                 cell.accessoryView = makeSwitch(settings.testAutomation) { [weak self] on in
                     self?.settings.testAutomation = on
-                    self?.tableView.reloadSections(IndexSet(integer: Section.developer.rawValue), with: .automatic)
+                    if let section = self?.index(.developer) { self?.tableView.reloadSections(IndexSet(integer: section), with: .automatic) }
                 }
             case 1:
                 content.text = "Address"
@@ -257,7 +327,7 @@ final class SettingsViewController: UITableViewController {
             stepper.addAction(UIAction { [weak self] action in
                 guard let self, let stepper = action.sender as? UIStepper else { return }
                 self.settings.fontSize = Int(stepper.value)
-                self.tableView.reconfigureRows(at: [IndexPath(row: EditorRow.fontSize.rawValue, section: Section.editor.rawValue)])
+                if let section = self.index(.editor) { self.tableView.reconfigureRows(at: [IndexPath(row: EditorRow.fontSize.rawValue, section: section)]) }
             }, for: .valueChanged)
             cell.accessoryView = stepper
         case .tabSize:
@@ -347,7 +417,7 @@ final class SettingsViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        switch Section(rawValue: indexPath.section)! {
+        switch sections[indexPath.section] {
         case .ai where indexPath.row < aiChoices.count:
             selectAI(aiChoices[indexPath.row]) { [weak self] choice in self?.settings.aiModel = choice }
         case .aiMerge:
@@ -359,6 +429,10 @@ final class SettingsViewController: UITableViewController {
             }
         case .programs:
             certificateTapped()
+        case .files:
+            let commands = ["workbench.action.openSettingsJson", "workbench.action.openGlobalKeybindingsFile", "workbench.action.openWorkspaceSettingsFile"]
+            NotificationCenter.default.post(name: Self.openFileRequest, object: nil, userInfo: ["command": commands[indexPath.row]])
+            dismiss(animated: true)
         case .account where indexPath.row == 0:
             accountTapped()
         case .developer where indexPath.row == 2:
@@ -379,7 +453,7 @@ final class SettingsViewController: UITableViewController {
             self?.reloadCertificateRow()
         })
         sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        if let cell = tableView.cellForRow(at: IndexPath(row: 0, section: Section.programs.rawValue)) {
+        if let section = index(.programs), let cell = tableView.cellForRow(at: IndexPath(row: 0, section: section)) {
             sheet.popoverPresentationController?.sourceView = cell
             sheet.popoverPresentationController?.sourceRect = cell.bounds
         }
@@ -420,7 +494,7 @@ final class SettingsViewController: UITableViewController {
     }
 
     private func reloadCertificateRow() {
-        tableView.reloadSections(IndexSet(integer: Section.programs.rawValue), with: .none)
+        if let section = index(.programs) { tableView.reloadSections(IndexSet(integer: section), with: .none) }
     }
 
     /// Picks `choice` with `apply`, downloading it first if needed.
@@ -466,7 +540,7 @@ final class SettingsViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
         let choice: AIModelChoice?
-        switch Section(rawValue: indexPath.section)! {
+        switch sections[indexPath.section] {
         case .ai where indexPath.row < aiChoices.count: choice = aiChoices[indexPath.row]
         case .aiMerge: choice = mergeChoices[indexPath.row]
         default: choice = nil
@@ -485,7 +559,7 @@ final class SettingsViewController: UITableViewController {
     }
 
     private func accountTapped() {
-        let accountRow = IndexPath(row: 0, section: Section.account.rawValue)
+        let accountRow = IndexPath(row: 0, section: index(.account) ?? 0)
         if GitAccountManager.shared.isSignedIn {
             let alert = UIAlertController(title: "Sign Out of GitHub?", message: "You'll need to sign in again to clone private repositories or sync.", preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
@@ -524,7 +598,7 @@ final class SettingsViewController: UITableViewController {
             let action = { (theme: EditorThemeCatalog.Theme) in
                 UIAction(title: theme.name, state: theme.id == current ? .on : .off) { [weak self] _ in
                     self?.settings.editorTheme = theme.id
-                    self?.tableView.reconfigureRows(at: [IndexPath(row: EditorRow.theme.rawValue, section: Section.editor.rawValue)])
+                    if let section = self?.index(.editor) { self?.tableView.reconfigureRows(at: [IndexPath(row: EditorRow.theme.rawValue, section: section)]) }
                 }
             }
             var groups: [UIMenuElement] = [UIMenu(title: "Mobile Studio", options: .displayInline, children: EditorThemeCatalog.builtIn.map(action))]

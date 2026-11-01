@@ -268,6 +268,11 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
             guard let self else { return completion(nil) }
             self.editor.call(body, arguments, completion: completion)
         }
+        // Settings > Advanced's settings files open in the editor, by the Command Palette's commands.
+        NotificationCenter.default.addObserver(forName: SettingsViewController.openFileRequest, object: nil, queue: .main) { [weak self] note in
+            guard let command = note.userInfo?["command"] as? String else { return }
+            self?.editor.call("return await window.duocode.runCommand(command)", ["command": command]) { _ in }
+        }
         updateViewButtons()
         for name in [ExtensionManager.didChange, ExtensionViewsPanelView.contextChanged] {
             NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
@@ -821,7 +826,7 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
 
     private func showSettings() {
         guard presentedViewController == nil else { return }
-        let nav = UINavigationController(rootViewController: SettingsViewController())
+        let nav = UINavigationController(rootViewController: SettingsRootViewController())
         nav.modalPresentationStyle = .formSheet
         present(nav, animated: true)
     }
