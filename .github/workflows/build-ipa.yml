@@ -10,10 +10,10 @@ on:
   workflow_dispatch:
     inputs:
       runner:
-        description: Mac runner (the fallback job picks Intel when Apple silicon runners are all busy)
+        description: Mac runner (Intel by default; the fallback job picks Apple silicon when Intel runners are all busy)
         type: choice
-        options: [macos-15, macos-15-intel]
-        default: macos-15
+        options: [macos-15-intel, macos-15]
+        default: macos-15-intel
 
 # A newer push to the same ref makes the older build pointless.
 concurrency:
@@ -26,7 +26,7 @@ jobs:
   # Once the framework is cached this job only checks for it. Its own job: it needs an older
   # Xcode than the app.
   node:
-    runs-on: ${{ inputs.runner || 'macos-15' }}
+    runs-on: ${{ inputs.runner || 'macos-15-intel' }}
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
@@ -101,7 +101,7 @@ jobs:
 
   build:
     needs: node
-    runs-on: ${{ inputs.runner || 'macos-15' }}
+    runs-on: ${{ inputs.runner || 'macos-15-intel' }}
     timeout-minutes: 60
     permissions:
       contents: write   # releases for version tags
@@ -246,20 +246,21 @@ jobs:
           body: |
             Download `MobileStudio.ipa` below and install it with a sideloading tool. The [README](https://github.com/${{ github.repository }}#installing) explains how, step by step.
 
-  # GitHub's Apple silicon Macs are sometimes all busy, and a job that waits too long for one is
-  # cancelled ("not acquired by Runner"). Then the same commit is built again on an Intel Mac.
+  # Builds run on Intel Macs, which GitHub has more of free; the build only takes a few minutes, so
+  # starting soon matters more than a faster Mac. When they're all busy too, a job that waits too
+  # long is cancelled ("not acquired by Runner"), and the same commit is built again on Apple silicon.
   fallback:
     needs: [node, build]
     # A job that never got a runner shows to the jobs after it as failed, not cancelled; the step
     # below checks it was the runner shortage (a failed build has nothing to retry).
-    if: always() && github.event_name != 'pull_request' && (inputs.runner || 'macos-15') == 'macos-15' && needs.build.result != 'success'
+    if: always() && github.event_name != 'pull_request' && (inputs.runner || 'macos-15-intel') == 'macos-15-intel' && needs.build.result != 'success'
     runs-on: ubuntu-latest
     permissions:
       actions: write
       checks: read
       contents: read
     steps:
-      - name: Build on an Intel Mac if no Apple silicon Mac was free
+      - name: Build on Apple silicon if no Intel Mac was free
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -276,5 +277,5 @@ jobs:
           if [ "$GITHUB_REF_TYPE" = branch ] && [ "$(gh api "repos/$REPO/commits/$REF" --jq .sha)" != "$SHA" ]; then
             echo "$REF has moved on from $SHA: skipping."; exit 0
           fi
-          gh workflow run build-ipa.yml --repo "$REPO" --ref "$REF" -f runner=macos-15-intel
-          echo "Started the build again on macos-15-intel."
+          gh workflow run build-ipa.yml --repo "$REPO" --ref "$REF" -f runner=macos-15
+          echo "Started the build again on macos-15 (Apple silicon)."
