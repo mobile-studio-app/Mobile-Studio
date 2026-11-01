@@ -384,15 +384,26 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
                 replyHandler(String(text.suffix(6000)), nil)
             case "aiChatModels":
-                // The Chat panel's model menu (chat.js).
-                let chat = AIChatService.shared
-                replyHandler(["selected": AppSettings.shared.chatModel.rawValue,
-                              "models": chat.options.map { ["id": $0.choice.rawValue, "name": $0.name, "detail": $0.detail, "ready": $0.ready] }], nil)
+                // The Chat panel's models and settings (chat.js).
+                let s = AppSettings.shared
+                replyHandler(["selected": s.chatModel.rawValue,
+                              "models": AIChatService.shared.options.map {
+                                  ["id": $0.choice.rawValue, "name": $0.name, "detail": $0.detail, "ready": $0.ready, "contextSize": $0.contextSize]
+                              },
+                              "contextSize": s.chatContextSize, "subagentModel": s.subagentModel?.rawValue ?? "",
+                              "subagentParallel": s.subagentParallel, "mode": s.chatMode], nil)
             case "aiChatSelect":
                 if let raw = body["id"] as? String, let choice = AIModelChoice(rawValue: raw) { AppSettings.shared.chatModel = choice }
                 replyHandler(true, nil)
+            case "aiChatSettings":
+                let s = AppSettings.shared
+                if let size = body["contextSize"] as? Int { s.chatContextSize = size }
+                if let raw = body["subagentModel"] as? String { s.subagentModel = AIModelChoice(rawValue: raw) }
+                if let count = body["subagentParallel"] as? Int { s.subagentParallel = count }
+                if let mode = body["mode"] as? String { s.chatMode = mode }
+                replyHandler(true, nil)
             case "aiChatCancel":
-                AIChatService.shared.cancel()
+                AIChatService.shared.cancel(body["id"] as? String)
                 replyHandler(true, nil)
             case "aiChat":
                 // The answer streams back as aiChatText events, then aiChatDone.
@@ -401,7 +412,10 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                     guard let role = m["role"] as? String, let content = m["content"] as? String else { return nil }
                     return ChatMessage(role: role, content: content)
                 }
-                AIChatService.shared.respond(messages, onText: { [weak self] text in
+                // A subagent names its own model; the conversation uses the Chat model.
+                let choice = (body["model"] as? String).flatMap(AIModelChoice.init(rawValue:))
+                let maxTokens = body["maxTokens"] as? Int ?? 1536
+                AIChatService.shared.respond(id: id, choice: choice, messages, maxTokens: maxTokens, onText: { [weak self] text in
                     self?.emit("aiChatText", ["id": id, "text": text])
                 }, completion: { [weak self] result in
                     switch result {

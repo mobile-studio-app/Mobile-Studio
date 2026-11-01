@@ -7,91 +7,104 @@ struct ChatMessage {
     let content: String
 }
 
-/// The Chat panel's conversations, with the model picked for Chat: Apple Intelligence or a chat
-/// model downloaded in Settings → Advanced. Everything runs on the device; nothing is sent anywhere.
+/// The Chat panel's conversations and its agent's subagents, with Apple Intelligence or a model
+/// downloaded in Settings → Advanced. Everything runs on the device; nothing is sent anywhere.
+/// Requests have ids, so several can run at once (subagents): Apple Intelligence sessions run side
+/// by side, and each local model is loaded once with its requests taking turns.
 final class AIChatService {
     static let shared = AIChatService()
 
-    private var engine: LlamaChatEngine?
-    private var cancelToken: CompletionCancel?
-    private var appleTask: Task<Void, Never>?
+    /// Loaded local models, by catalog id.
+    private var engines: [String: LlamaChatEngine] = [:]
+    private var cancels: [String: CompletionCancel] = [:]
+    private var appleTasks: [String: Task<Void, Never>] = [:]
     /// A reply is being written.
-    private(set) var isBusy = false
+    var isBusy: Bool { !cancels.isEmpty || !appleTasks.isEmpty }
     /// A local chat model is loaded (or about to be).
-    var hasEngine: Bool { engine != nil }
+    var hasEngine: Bool { !engines.isEmpty }
 
     struct Option {
         let choice: AIModelChoice
         let name: String
         let detail: String
         let ready: Bool
+        /// Tokens the model reads at once: the conversation and its answer.
+        let contextSize: Int
     }
 
-    /// The models the Chat panel's menu offers: Apple Intelligence and the downloaded chat models.
+    /// Apple Intelligence's context window.
+    static let appleContextSize = 4096
+
+    /// The models the Chat panel offers: Apple Intelligence, the downloaded chat models, and the
+    /// downloaded code models (which answer less well, but can).
     var options: [Option] {
         let reason = AppleIntelligenceEngine.unavailableReason
-        var list = [Option(choice: .appleIntelligence, name: "Apple Intelligence", detail: reason ?? "Built into iOS", ready: reason == nil)]
-        for model in AIModelCatalog.chatModels {
-            list.append(Option(choice: model.choice, name: model.name,
-                               detail: model.isSupported ? model.detail : model.requirementText, ready: model.isSupported))
+        var list = [Option(choice: .appleIntelligence, name: "Apple Intelligence", detail: reason ?? "Built into iOS",
+                           ready: reason == nil, contextSize: Self.appleContextSize)]
+        for model in AIModelCatalog.all where model.isDownloaded && (model.chats || model.completes) {
+            let detail = model.isSupported ? (model.chats ? model.detail : "\(model.detail) · a code model, chats less well") : model.requirementText
+            list.append(Option(choice: model.choice, name: model.chats ? model.name : "\(model.name) (\(model.detail))", detail: detail,
+                               ready: model.isSupported, contextSize: AppSettings.shared.chatContextSize))
         }
         return list
     }
 
-    func cancel() {
-        cancelToken?.cancel()
-        cancelToken = nil
-        appleTask?.cancel()
-        appleTask = nil
+    /// Stops one request, or all of them.
+    func cancel(_ id: String? = nil) {
+        let ids = id.map { [$0] } ?? Array(Set(cancels.keys).union(appleTasks.keys))
+        for id in ids {
+            cancels.removeValue(forKey: id)?.cancel()
+            appleTasks.removeValue(forKey: id)?.cancel()
+        }
     }
 
-    /// Frees the chat model (memory warning, a game, or code suggestions needing the memory).
+    /// Frees the chat models (memory warning, a game, or code suggestions needing the memory).
     func unload() {
         cancel()
-        engine = nil
+        engines = [:]
     }
 
-    /// Frees the chat model unless it's answering: AI Suggestions are about to load theirs.
+    /// Frees the chat models unless they're answering: AI Suggestions are about to load theirs.
     func releaseIdleEngine() {
-        if !isBusy { engine = nil }
+        if !isBusy { engines = [:] }
     }
 
-    /// Answers the conversation, whose last message is the user's. `onText` gets the answer so far as
-    /// it's written; both callbacks run on the main queue. Stopping keeps what was written.
-    func respond(_ messages: [ChatMessage], onText: @escaping (String) -> Void, completion: @escaping (Result<String, Error>) -> Void) {
-        cancel()
-        let choice = AppSettings.shared.chatModel
+    /// Answers `messages` (the last is the user's) with `choice` (the Chat model when nil). `onText`
+    /// gets the answer so far; both callbacks run on the main queue. Stopping keeps what was written.
+    func respond(id: String, choice: AIModelChoice? = nil, _ messages: [ChatMessage], maxTokens: Int = 1536,
+                 onText: @escaping (String) -> Void, completion: @escaping (Result<String, Error>) -> Void) {
+        cancel(id)
+        let choice = choice ?? AppSettings.shared.chatModel
         if choice == .appleIntelligence {
             if let reason = AppleIntelligenceEngine.unavailableReason { return completion(.failure(Self.error(reason))) }
-            isBusy = true
-            appleTask = Task { @MainActor [weak self] in
+            appleTasks[id] = Task { @MainActor [weak self] in
                 do {
                     let text = try await AppleIntelligenceEngine.chat(messages)
-                    self?.isBusy = false
+                    self?.appleTasks[id] = nil
                     completion(.success(text))
                 } catch {
-                    self?.isBusy = false
+                    self?.appleTasks[id] = nil
                     completion(Task.isCancelled ? .success("") : .failure(error))
                 }
             }
             return
         }
-        guard let model = AIModelCatalog.model(for: choice), model.chats, model.isDownloaded else {
+        guard let model = AIModelCatalog.model(for: choice), model.chats || model.completes, model.isDownloaded else {
             return completion(.failure(Self.error("Pick a chat model in the menu above. Download one in Settings → Advanced → AI Models.")))
         }
         guard model.isSupported else { return completion(.failure(Self.error("\(model.name): \(model.requirementText)"))) }
-        // One local model in memory at a time: the suggestions model is unloaded while chatting.
+        // The suggestions model makes way while chatting.
         AICompletionService.shared.unload()
-        if engine?.model.id != model.id { engine = LlamaChatEngine(model: model) }
-        guard let engine else { return }
+        let size = AppSettings.shared.chatContextSize
+        if engines[model.id]?.contextSize != size { engines[model.id] = LlamaChatEngine(model: model, contextSize: size) }
+        guard let engine = engines[model.id] else { return }
         let cancel = CompletionCancel()
-        cancelToken = cancel
-        isBusy = true
-        engine.respond(messages, maxTokens: 1536, cancel: cancel, onText: { text in
+        cancels[id] = cancel
+        engine.respond(messages, maxTokens: maxTokens, cancel: cancel, onText: { text in
             DispatchQueue.main.async { if !cancel.isCancelled { onText(text) } }
         }, completion: { [weak self] result in
             DispatchQueue.main.async {
-                self?.isBusy = false
+                if self?.cancels[id] === cancel { self?.cancels[id] = nil }
                 completion(result)
             }
         })
@@ -108,6 +121,8 @@ final class AIChatService {
 /// turn is evaluated.
 final class LlamaChatEngine {
     let model: LocalModel
+    /// Tokens the model reads at once (Chat's context size setting).
+    let contextSize: Int
 
     private let queue = DispatchQueue(label: "app.mobilestudio.ai.chat", qos: .userInitiated)
     private var llamaModel: OpaquePointer?
@@ -116,8 +131,9 @@ final class LlamaChatEngine {
     private var template: String?
     private var cached: [llama_token] = []
 
-    init(model: LocalModel) {
+    init(model: LocalModel, contextSize: Int) {
         self.model = model
+        self.contextSize = contextSize
     }
 
     deinit {
@@ -149,7 +165,7 @@ final class LlamaChatEngine {
 
         let threads = Int32(max(2, min(4, ProcessInfo.processInfo.activeProcessorCount - 2)))
         var contextParams = llama_context_default_params()
-        contextParams.n_ctx = 4096
+        contextParams.n_ctx = UInt32(max(1024, contextSize))
         contextParams.n_batch = 512
         contextParams.n_ubatch = 512
         contextParams.n_threads = threads

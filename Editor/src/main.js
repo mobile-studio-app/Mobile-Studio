@@ -49,7 +49,7 @@ import { setupDebugConsole, showPanel, togglePanel } from './panel.js';
 import { setupProblems, problemsChanged } from './problems.js';
 import { setupTerminal, showTerminal } from './terminal.js';
 import { setupOutput } from './ext/output.js';
-import { nodeAddress } from './ext/host.js';
+import { nodeAddress, nodeJob, hostDiagnostics } from './ext/host.js';
 import { addCommands } from './palette.js';
 import { customEditorsFor } from './ext/registry.js';
 import { quickPick } from './ext/ui.js';
@@ -507,6 +507,10 @@ setFileIconSource((name) => native({ cmd: 'fileIcon', name }).catch(() => null))
 setupChat({
   native, view, openURL, current: () => (readOnly ? null : current),
   appCommand: (cmd) => native({ cmd }).catch(() => {}),
+  openFile: (path) => openFile(path),
+  // The agent's run_command: the Terminal's shell in Node.js, its output in Output > Chat too.
+  runCommand: (command, onOutput) => nodeJob('task', { command }, 'Chat', onOutput),
+  problems: () => hostDiagnostics(),
 });
 addCommands([
   { command: 'workbench.action.chat.open', title: 'Chat: Open Chat', keybinding: '⌃⌘I', run: () => openChat() },

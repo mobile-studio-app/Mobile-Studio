@@ -48,6 +48,10 @@ final class AppSettings {
             Key.aiModel: AIModelChoice.off.rawValue,
             Key.aiMergeModel: "",
             Key.chatModel: AIModelChoice.appleIntelligence.rawValue,
+            Key.chatContextSize: 4096,
+            Key.subagentModel: "",
+            Key.subagentParallel: 2,
+            Key.chatMode: "edit",
             Key.useJIT: true,
             Key.downloadOverCellular: false,
             Key.smartCommit: false,
@@ -67,6 +71,10 @@ final class AppSettings {
         static let aiModel = "settings.ai.model"
         static let aiMergeModel = "settings.ai.mergeModel"
         static let chatModel = "settings.ai.chatModel"
+        static let chatContextSize = "settings.ai.chatContextSize"
+        static let subagentModel = "settings.ai.subagentModel"
+        static let subagentParallel = "settings.ai.subagentParallel"
+        static let chatMode = "settings.ai.chatMode"
         static let useJIT = "settings.run.jit"
         static let downloadOverCellular = "settings.ai.cellular"
         static let smartCommit = "settings.git.smartCommit"
@@ -128,6 +136,31 @@ final class AppSettings {
     var chatModel: AIModelChoice {
         get { AIModelChoice(rawValue: defaults.string(forKey: Key.chatModel) ?? "") ?? .appleIntelligence }
         set { set(newValue.rawValue, Key.chatModel) }
+    }
+
+    /// Tokens a local chat model reads at once (the conversation and its answer). Bigger remembers
+    /// more but needs more memory. Apple Intelligence's is fixed.
+    var chatContextSize: Int {
+        get { max(1024, defaults.integer(forKey: Key.chatContextSize)) }
+        set { set(newValue, Key.chatContextSize) }
+    }
+
+    /// The model the Chat agent's subagents use; nil is the Chat model.
+    var subagentModel: AIModelChoice? {
+        get { defaults.string(forKey: Key.subagentModel).flatMap(AIModelChoice.init(rawValue:)) }
+        set { set(newValue?.rawValue ?? "", Key.subagentModel) }
+    }
+
+    /// How many subagents run at once (0: none).
+    var subagentParallel: Int {
+        get { min(8, max(0, defaults.integer(forKey: Key.subagentParallel))) }
+        set { set(newValue, Key.subagentParallel) }
+    }
+
+    /// What the Chat agent may do without asking: manual, edit, auto or turbo.
+    var chatMode: String {
+        get { defaults.string(forKey: Key.chatMode) ?? "edit" }
+        set { set(newValue, Key.chatMode) }
     }
 
     var useJIT: Bool {

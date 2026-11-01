@@ -124,6 +124,32 @@
   .chat-context { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .chat-send { background: #0e639c; color: #fff; border: 0; border-radius: 4px; padding: 5px 14px; font: 13px -apple-system, system-ui, sans-serif; }
   .chat-send:active { background: #1177bb; }
+  /* The agent: context meter, settings, mode, tool cards and approvals. */
+  .chat-meter { display: flex; align-items: center; gap: 8px; padding: 4px 10px; border-bottom: 1px solid var(--border-strong); font-size: 11px; color: var(--muted); }
+  .chat-meter-bar { flex: 1; height: 4px; border-radius: 2px; background: color-mix(in srgb, var(--muted) 25%, transparent); position: relative; overflow: hidden; }
+  .chat-meter-bar::after { content: ''; position: absolute; inset: 0 auto 0 0; width: calc(var(--share, 0) * 100%); background: #3794ff; border-radius: 2px; }
+  .chat-meter.warn .chat-meter-bar::after { background: #cca700; }
+  .chat-meter-text { flex: none; font-variant-numeric: tabular-nums; }
+  .chat-settings { padding: 6px 10px 8px; border-bottom: 1px solid var(--border-strong); display: grid; gap: 6px; }
+  .chat-settings[hidden] { display: none; }
+  .chat-setting { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; }
+  .chat-setting select, .chat-mode { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 3px 4px; font: 12px -apple-system, system-ui, sans-serif; max-width: 60%; }
+  .chat-setting-actions { display: flex; justify-content: flex-end; }
+  .chat-small { background: color-mix(in srgb, var(--fg) 10%, transparent); color: var(--text); border: 0; border-radius: 4px; padding: 5px 10px; font: 12px -apple-system, system-ui, sans-serif; }
+  .chat-small:active { background: color-mix(in srgb, var(--fg) 20%, transparent); }
+  .chat-mode { flex: none; max-width: none; }
+  .chat-chip { display: inline-block; margin: 2px 4px 2px 0; padding: 1px 6px; border-radius: 9px; font-size: 11px; color: var(--muted); background: color-mix(in srgb, var(--fg) 8%, transparent); }
+  .chat-tool, .chat-approval { margin: 0 0 10px; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--bg); font-size: 12px; }
+  .chat-tool.denied { opacity: .6; }
+  .chat-tool-title { color: var(--text); margin-bottom: 2px; }
+  .chat-tool details summary { color: var(--muted); cursor: pointer; }
+  .chat-tool .chat-small { margin-top: 4px; }
+  .chat-approval { border-color: #cca700; }
+  .chat-approval-buttons { display: flex; gap: 6px; margin-top: 6px; }
+  .chat-approval-buttons .chat-send { padding: 5px 14px; }
+  .chat-diff { margin: 4px 0 0; padding: 6px; max-height: 220px; overflow: auto; background: var(--chrome); border-radius: 4px; font: 11px ui-monospace, Menlo, monospace; white-space: pre; }
+  .chat-subagent { color: var(--muted); padding: 1px 0; }
+  .chat-note { margin: 0 0 10px; color: var(--muted); font-size: 12px; font-style: italic; text-align: center; }
   /* blame.js: who last changed the cursor's line. */
   .cm-blame { margin-left: 2.5em; color: var(--muted); opacity: 0.65; font-style: italic; white-space: nowrap; cursor: pointer; -webkit-user-select: none; user-select: none; }
   /* diffview.js: the side-by-side diff. */

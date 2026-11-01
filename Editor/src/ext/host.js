@@ -919,7 +919,7 @@ export async function openCustomEditor(viewType, path, title) {
 
 /** Runs a job in Node.js ("npm" or "task"), its output going to an Output channel as it comes.
  * Resolves with the exit code. */
-export async function nodeJob(kind, params, channel) {
+export async function nodeJob(kind, params, channel, onOutput) {
   if (!app) return 1;
   const init = (await app.native({ cmd: 'extHostInit' }).catch(() => null)) || {};
   if (!(await connectNode())) {
@@ -942,7 +942,7 @@ export async function nodeJob(kind, params, channel) {
         buffer = buffer.slice(newline + 1);
         let message;
         try { message = JSON.parse(line); } catch (e) { continue; }
-        if (message.out != null) channelOutput(channel, 'append', message.out);
+        if (message.out != null) { channelOutput(channel, 'append', message.out); if (onOutput) onOutput(message.out); }
         if (message.exit != null) code = message.exit;
       }
     }
