@@ -359,6 +359,11 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                     }
                     DispatchQueue.main.async { replyHandler(["commits": commits, "lines": lines], nil) }
                 }
+            case "nodeHostLog":
+                // The end of the Node.js extension host's log (node-host.js writes it to the temp folder).
+                let url = FileManager.default.temporaryDirectory.appendingPathComponent("mobile-studio-node-host.log")
+                let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+                replyHandler(String(text.suffix(6000)), nil)
             case "aiChatModels":
                 // The Chat panel's model menu (chat.js).
                 let chat = AIChatService.shared

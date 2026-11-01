@@ -288,6 +288,14 @@ class FileSystemError extends Error {
 }
 class TestMessage { constructor(message) { this.message = message; } }
 class TabInputText { constructor(uri) { this.uri = uri; } }
+// The other kinds of tab (extensions check tab.input with instanceof).
+class TabInputTextDiff { constructor(original, modified) { this.original = original; this.modified = modified; } }
+class TabInputCustom { constructor(uri, viewType) { this.uri = uri; this.viewType = viewType; } }
+class TabInputWebview { constructor(viewType) { this.viewType = viewType; } }
+class TabInputNotebook { constructor(uri, notebookType) { this.uri = uri; this.notebookType = notebookType; } }
+class TabInputNotebookDiff { constructor(original, modified, notebookType) { this.original = original; this.modified = modified; this.notebookType = notebookType; } }
+class TabInputTerminal { constructor() {} }
+class TabInputInteractiveWindow { constructor(uri, inputBoxUri) { this.uri = uri; this.inputBoxUri = inputBoxUri; } }
 class QuickInputButtons {}
 QuickInputButtons.Back = { iconPath: new ThemeIcon('arrow-left') };
 // Notebooks aren't shown yet; these let extensions that build notebook data load and run.
@@ -765,7 +773,8 @@ const api = {
   SelectionRange, CallHierarchyItem, TypeHierarchyItem, InlineCompletionItem, InlineCompletionList, LinkedEditingRanges, ColorPresentation,
   EvaluatableExpression, InlayHintLabelPart, SnippetTextEdit, TextDocumentEdit, DataTransfer, DataTransferItem, TaskGroup, Task,
   ShellExecution, ProcessExecution, CustomExecution, Breakpoint, SourceBreakpoint, FunctionBreakpoint, DebugAdapterExecutable,
-  DebugAdapterInlineImplementation, FileSystemError, TestMessage, TabInputText, QuickInputButtons,
+  DebugAdapterInlineImplementation, FileSystemError, TestMessage, TabInputText, TabInputTextDiff, TabInputCustom, TabInputWebview, TabInputNotebook,
+  TabInputNotebookDiff, TabInputTerminal, TabInputInteractiveWindow, QuickInputButtons,
   NotebookCellOutputItem, NotebookCellOutput, NotebookCellData, NotebookData, NotebookRange, NotebookEdit,
   TreeItemCheckboxState: { Unchecked: 0, Checked: 1 },
   NotebookCellKind: { Markup: 1, Code: 2 },

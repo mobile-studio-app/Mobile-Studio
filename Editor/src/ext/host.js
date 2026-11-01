@@ -65,7 +65,22 @@ export async function nodeAddress(appAPI) {
 function callHost(host, method, params) {
   const id = nextId++;
   host.port.postMessage({ type: 'call', id, method, params });
-  return new Promise((resolve, reject) => calls.set(id, { resolve, reject }));
+  return new Promise((resolve, reject) => calls.set(id, { resolve, reject, host }));
+}
+
+/** Node.js stopped (it can't start again until the app does): its host's calls fail instead of
+ * waiting forever, it leaves the list, and the user hears why, with the end of its log. */
+let nodeStopped = false;
+async function nodeHostStopped() {
+  if (nodeStopped) return;
+  nodeStopped = true;
+  for (const [id, entry] of calls) {
+    if (entry.host && entry.host.name === 'node') { calls.delete(id); entry.reject(new Error('The Node.js extension host stopped.')); }
+  }
+  hosts = hosts.filter((h) => h.name !== 'node');
+  const tail = await app.native({ cmd: 'nodeHostLog' }).catch(() => '');
+  if (tail) channelOutput('Extensions', 'append', `--- Node.js extension host log (last lines) ---\n${tail}\n`);
+  log('error', 'The Node.js extension host stopped, so Node.js extensions, the Terminal and Live Preview won\'t work until Mobile Studio is restarted. Its log is in Output → Extensions.');
 }
 
 /** Keeps the first of each item with the same key. */
@@ -179,6 +194,12 @@ function nodeConnection(port) {
   };
   const events = new EventSource(base + '/out');
   events.onmessage = (e) => { try { conn.onmessage && conn.onmessage({ data: JSON.parse(e.data) }); } catch (err) { /* ignore */ } };
+  // EventSource reconnects by itself after a blip; when /ping fails too, Node.js has stopped.
+  events.onerror = () => {
+    setTimeout(() => {
+      fetch(base + '/ping').then((r) => { if (!r.ok) throw new Error(); }).catch(() => { events.close(); nodeHostStopped(); });
+    }, 1000);
+  };
   conn.terminate = () => events.close();
   return conn;
 }

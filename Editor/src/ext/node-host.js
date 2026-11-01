@@ -3,7 +3,10 @@
 // host has, and speaks the same messages over HTTP on the loopback interface: the page posts
 // messages to /in and reads the host's from /out (server-sent events).
 import './node-globals.js';
+import fs from 'fs';
 import http from 'http';
+import os from 'os';
+import path from 'path';
 import './worker.js';
 import { servePrograms } from './node-programs.js';
 import { childProcess } from './node-child.js';
@@ -30,7 +33,48 @@ globalThis.postMessage = (message) => {
   if (client) client.write(line); else backlog.push(line);
 };
 
-const log = (level, text) => globalThis.postMessage({ type: 'notify', method: 'log', params: { level, text } });
+// The host's log, also kept in a file (written line by line, so it survives Node stopping) that
+// the app can show when Node.js has stopped (EditorWebView's nodeHostLog).
+const logFile = path.join(os.tmpdir(), 'mobile-studio-node-host.log');
+function record(text) {
+  try {
+    if (fs.existsSync(logFile) && fs.statSync(logFile).size > 512 * 1024) fs.writeFileSync(logFile, '(earlier lines dropped)\n');
+    fs.appendFileSync(logFile, `${new Date().toISOString().slice(11, 23)} ${String(text).slice(0, 2000)}\n`);
+  } catch (e) { /* no room: carry on */ }
+}
+try { fs.writeFileSync(logFile, `Node.js ${process.version} extension host started (${process.platform} ${process.arch})\n`); } catch (e) { /* as above */ }
+for (const level of ['log', 'info', 'warn', 'error']) {
+  const original = console[level].bind(console);
+  console[level] = (...args) => {
+    record(`[${level}] ` + args.map((a) => (a instanceof Error ? a.stack : typeof a === 'string' ? a : (() => { try { return JSON.stringify(a); } catch (e) { return String(a); } })())).join(' '));
+    original(...args);
+  };
+}
+
+const log = (level, text) => {
+  record(`[${level}] ${text}`);
+  globalThis.postMessage({ type: 'notify', method: 'log', params: { level, text } });
+};
+
+// Node.js starts once per launch, so nothing an extension does may end it: as in VS Code's extension
+// host, process.exit is refused, and so are signals and abort aimed at this process (on iOS they
+// would end the whole app).
+const caller = () => new Error().stack.split('\n').slice(3, 7).map((l) => l.trim()).join(' ← ');
+process.exit = (code) => {
+  log('warning', `An extension called process.exit(${code ?? ''}); the extension host keeps running. ${caller()}`);
+};
+process.abort = () => {
+  log('warning', `An extension called process.abort(); the extension host keeps running. ${caller()}`);
+};
+const kill = process.kill.bind(process);
+process.kill = (pid, signal) => {
+  if (Number(pid) === process.pid || Number(pid) === 0) {
+    log('warning', `An extension sent ${signal || 'SIGTERM'} to the extension host; ignored. ${caller()}`);
+    return true;
+  }
+  return kill(pid, signal);
+};
+process.on('exit', (code) => record(`Node.js is exiting (code ${code}).`));
 process.on('uncaughtException', (e) => log('error', 'Node.js extension host: ' + (e && e.stack ? e.stack.split('\n').slice(0, 3).join(' ') : e)));
 process.on('unhandledRejection', (e) => {
   if (isUndiciWasmError(e)) return;   // see node-fetch.js
