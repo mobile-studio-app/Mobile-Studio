@@ -89,6 +89,16 @@
   .cm-peek-where { color: var(--fg); }
   .cm-peek-preview { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, Menlo, monospace; }
   @media (max-width: 560px) { .cm-peek-body { flex-direction: column; height: 300px; } .cm-peek-list { width: auto; max-width: none; height: 90px; border-right: 0; border-bottom: 1px solid var(--border-strong); } }
+  /* overview.js: the minimap and sticky scroll. */
+  .cm-minimap { position: absolute; top: 0; right: 0; bottom: 0; width: 72px; height: 100%; z-index: 4; touch-action: none; cursor: default; background: var(--bg); box-shadow: -1px 0 0 var(--border-strong); }
+  .cm-minimap[hidden] { display: none; }
+  .cm-minimap-on .cm-scroller { margin-right: 72px; }
+  .cm-sticky { position: absolute; top: 0; z-index: 5; background: var(--bg); box-shadow: 0 3px 4px -2px rgba(0, 0, 0, 0.5); overflow: hidden; }
+  .cm-sticky[hidden] { display: none; }
+  .cm-sticky-line { display: flex; align-items: center; white-space: pre; overflow: hidden; cursor: pointer; font-family: inherit; }
+  .cm-sticky-line:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); }
+  .cm-sticky-number { flex: none; box-sizing: border-box; padding-right: 3px; text-align: right; color: var(--muted); opacity: 0.8; }
+  .cm-sticky-text { flex: 1; overflow: hidden; text-overflow: ellipsis; }
   .md-preview.web { overflow: hidden; background: #fff; }
   .md-preview .web-preview { display: block; width: 100%; height: 100%; border: 0; background: #fff; }
   #editor-container.md-side .cm-editor { width: 50%; }

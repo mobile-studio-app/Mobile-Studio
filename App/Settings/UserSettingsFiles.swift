@@ -160,6 +160,13 @@ enum UserSettingsFiles {
         if let wrap = values["editor.wordWrap"] { out["wordWrap"] = (wrap as? String).map { $0 != "off" } ?? (wrap as? NSNumber)?.boolValue ?? false }
         if let save = values["files.autoSave"] { out["autoSave"] = (save as? String).map { $0 != "off" } ?? (save as? NSNumber)?.boolValue ?? false }
         if let on = (values["editor.formatOnSave"] as? NSNumber)?.boolValue { out["formatOnSave"] = on }
+        // Editor features with no switch in Settings: from settings.json, the project's over the user's.
+        let both = userValues().merging(values) { _, project in project }
+        if let on = (both["editor.minimap.enabled"] as? NSNumber)?.boolValue { out["minimap"] = on }
+        if let on = (both["editor.stickyScroll.enabled"] as? NSNumber)?.boolValue { out["stickyScroll"] = on }
+        if let hints = both["editor.inlayHints.enabled"] {
+            out["inlayHints"] = (hints as? String).map { $0 == "on" || $0 == "onUnlessPressed" } ?? (hints as? NSNumber)?.boolValue ?? true
+        }
         return out
     }
 }

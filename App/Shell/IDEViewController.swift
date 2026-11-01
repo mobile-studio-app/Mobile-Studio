@@ -1029,17 +1029,17 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
 
     private var lastEscape: TimeInterval = 0
 
+    // Run, Start Debugging, the Command Palette and Go to File are in the menu bar (AppDelegate.buildMenu).
     override var keyCommands: [UIKeyCommand]? {
         var cmds = [
-            UIKeyCommand(title: "Run", action: #selector(kbRun), input: "r", modifierFlags: .command),
-            UIKeyCommand(title: "Stop", action: #selector(kbStop), input: ".", modifierFlags: .command),
             UIKeyCommand(title: "Toggle Game Focus", action: #selector(kbToggleFocus), input: "g", modifierFlags: [.control, .shift]),
             UIKeyCommand(title: "Swap Panes", action: #selector(swapScreens), input: "s", modifierFlags: [.control, .shift]),
             UIKeyCommand(title: "Maximize Game", action: #selector(toggleMaximizeGame), input: "m", modifierFlags: [.control, .shift]),
-            UIKeyCommand(title: "Command Palette", action: #selector(kbCommandPalette), input: "p", modifierFlags: [.command, .shift]),
-            UIKeyCommand(title: "Start Debugging", action: #selector(kbDebug), input: "d", modifierFlags: [.command, .shift]),
-            UIKeyCommand(title: "Go to File", action: #selector(kbQuickOpen), input: "p", modifierFlags: .command),
         ]
+        // ⌘. stops a running game; otherwise it's the editor's Quick Fix.
+        if runtimeHost.isRunning {
+            cmds.append(UIKeyCommand(title: "Stop", action: #selector(kbStop), input: ".", modifierFlags: .command))
+        }
         if gameFocused {
             cmds.append(UIKeyCommand(input: UIKeyCommand.inputEscape, modifierFlags: [], action: #selector(kbEscape)))
         }
@@ -1047,11 +1047,21 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
         return cmds
     }
 
-    @objc private func kbRun() { run() }
-    @objc private func kbCommandPalette() { editor.showCommandPalette() }
-    @objc private func kbDebug() { run(debug: true) }
-    @objc private func kbQuickOpen() { editor.showQuickOpen() }
     @objc private func kbStop() { stopGame() }
+
+    /// A menu bar command (AppDelegate.buildMenu): the app's run commands, or a Command Palette command.
+    @objc func performMenuCommand(_ sender: UICommand) {
+        guard let command = sender.propertyList as? String else { return }
+        switch command {
+        case "app.run": run()
+        case "app.debug": run(debug: true)
+        case "app.stop": stopGame()
+        case "workbench.action.showCommands": editor.showCommandPalette()
+        case "workbench.action.quickOpen": editor.showQuickOpen()
+        default:
+            editor.call("return await window.duocode.runCommand(command)", ["command": command]) { _ in }
+        }
+    }
     @objc private func kbToggleFocus() { gameFocused.toggle() }
     @objc private func kbEscape() {
         let now = ProcessInfo.processInfo.systemUptime

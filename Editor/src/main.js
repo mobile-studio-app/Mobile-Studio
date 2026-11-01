@@ -1,6 +1,6 @@
 // DuoCode editor: CodeMirror 6 inside the app's WKWebView.
 // The native side talks to it through `window.duocode` and the `duocode` message handler.
-import { EditorState, Compartment } from '@codemirror/state';
+import { EditorState, EditorSelection, Compartment } from '@codemirror/state';
 import {
   EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, highlightSpecialChars,
   drawSelection, dropCursor,
@@ -8,7 +8,7 @@ import {
 import { defaultKeymap, history, historyKeymap, indentWithTab, undo, redo } from '@codemirror/commands';
 import { indentOnInput, bracketMatching, foldGutter, foldKeymap } from '@codemirror/language';
 import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
-import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
+import { searchKeymap, highlightSelectionMatches, selectNextOccurrence } from '@codemirror/search';
 import { lintKeymap } from '@codemirror/lint';
 import { unifiedMergeView, goToNextChunk, goToPreviousChunk } from '@codemirror/merge';
 import { languageFor } from './languages.js';
@@ -610,12 +610,25 @@ async function openDiff({ path, original, modified, title }) {
 // Keys from the bar above the on-screen keyboard (EditorKeyBar). Real keys go through CodeMirror's
 // own key handling, so Tab still accepts an AI suggestion and indents a selection.
 const KEY_CODES = { Tab: 9, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40 };
+function addCursorBelow() {
+  const { state } = view;
+  const last = state.selection.ranges.reduce((a, b) => (b.head > a.head ? b : a));
+  const line = state.doc.lineAt(last.head);
+  if (line.number === state.doc.lines) return;
+  const next = state.doc.line(line.number + 1);
+  const cursor = EditorSelection.cursor(Math.min(next.from + (last.head - line.from), next.to));
+  view.dispatch({ selection: EditorSelection.create([...state.selection.ranges, cursor], state.selection.ranges.length), scrollIntoView: true });
+}
+
 function barKey(name) {
   if (name === 'palette') { commandPalette(); return; }
   if (readOnly) return;
   if (name === 'undo') { undo(view); return; }
   if (name === 'redo') { redo(view); return; }
   if (name === 'dismiss') { view.contentDOM.blur(); return; }
+  // Multiple cursors without a keyboard: the next match of the selection, or a cursor on the next line.
+  if (name === 'addNext') { selectNextOccurrence(view); return; }
+  if (name === 'cursorBelow') { addCursorBelow(); return; }
   if (name.startsWith('insert:')) {
     const text = name.slice(7);
     view.dispatch({ ...view.state.replaceSelection(text), userEvent: 'input.type', scrollIntoView: true });

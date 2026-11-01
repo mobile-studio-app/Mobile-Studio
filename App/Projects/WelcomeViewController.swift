@@ -61,6 +61,7 @@ final class WelcomeViewController: UIViewController, UIDocumentPickerDelegate {
         startColumn.alignment = .leading
         startColumn.addArrangedSubview(sectionTitle("Start"))
         startColumn.addArrangedSubview(linkRow(symbol: "doc.badge.plus", title: "New Project…", action: #selector(newProjectTapped)))
+        startColumn.addArrangedSubview(linkRow(symbol: "folder", title: "Open Folder from Files…", action: #selector(openFolderTapped)))
         startColumn.addArrangedSubview(linkRow(symbol: "arrow.down.circle", title: "Clone Git Repository…", action: #selector(cloneTapped)))
         startColumn.addArrangedSubview(linkRow(symbol: "tray.and.arrow.down", title: "Import .love File…", action: #selector(importTapped)))
         accountButton = linkRow(symbol: "person.crop.circle", title: "Sign in to GitHub…", action: #selector(accountTapped))
@@ -163,7 +164,8 @@ final class WelcomeViewController: UIViewController, UIDocumentPickerDelegate {
             var cfg = UIButton.Configuration.plain()
             cfg.title = project.name
             let isCurrent = project.url.standardizedFileURL == current
-            cfg.subtitle = "Projects/\(project.name)  ·  \(isCurrent ? "open now" : formatter.localizedString(for: project.lastUsed, relativeTo: Date()))"
+            let place = project.isExternal ? "Files: \(project.url.deletingLastPathComponent().lastPathComponent)/\(project.name)" : "Projects/\(project.name)"
+            cfg.subtitle = "\(place)  ·  \(isCurrent ? "open now" : formatter.localizedString(for: project.lastUsed, relativeTo: Date()))"
             cfg.titleAlignment = .leading
             cfg.baseForegroundColor = Self.linkColor
             cfg.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 8)
@@ -206,8 +208,19 @@ final class WelcomeViewController: UIViewController, UIDocumentPickerDelegate {
 
     private func projectMenu(_ project: ProjectInfo) -> UIMenu {
         let url = project.url
+        let open = UIAction(title: "Open", image: UIImage(systemName: "folder")) { [weak self] _ in self?.open(url) }
+        // A folder from Files is only taken off the list; its files stay where they are.
+        if project.isExternal {
+            return UIMenu(title: project.name, children: [
+                open,
+                UIAction(title: "Remove from Recent", image: UIImage(systemName: "minus.circle")) { [weak self] _ in
+                    if ProjectStore.shared.forgetExternalFolder(url) { self?.onCurrentProjectDeleted?() }
+                    self?.reloadRecent()
+                },
+            ])
+        }
         return UIMenu(title: project.name, children: [
-            UIAction(title: "Open", image: UIImage(systemName: "folder")) { [weak self] _ in self?.open(url) },
+            open,
             UIAction(title: "Delete Project…", image: UIImage(systemName: "trash"), attributes: .destructive) { [weak self] _ in
                 self?.confirmDelete(project)
             },
@@ -397,7 +410,19 @@ final class WelcomeViewController: UIViewController, UIDocumentPickerDelegate {
                                                      withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .regular))
     }
 
+    /// Which picker is showing: a folder to open in place, or a .love file to import.
+    private var pickingFolder = false
+
+    @objc private func openFolderTapped() {
+        pickingFolder = true
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
+        picker.delegate = self
+        picker.allowsMultipleSelection = false
+        present(picker, animated: true)
+    }
+
     @objc private func importTapped() {
+        pickingFolder = false
         var types: [UTType] = [.archive]
         if let loveType = UTType(filenameExtension: "love") {
             types.append(loveType)
@@ -410,6 +435,14 @@ final class WelcomeViewController: UIViewController, UIDocumentPickerDelegate {
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         guard let url = urls.first else { return }
+        if pickingFolder {
+            do {
+                open(try ProjectStore.shared.addExternalFolder(url))
+            } catch {
+                showError(title: "Couldn't Open Folder", error)
+            }
+            return
+        }
         do {
             open(try ProjectStore.shared.importLoveArchive(from: url))
         } catch {

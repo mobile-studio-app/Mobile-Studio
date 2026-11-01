@@ -5,6 +5,8 @@ import { EditorView } from '@codemirror/view';
 import { indentUnit } from '@codemirror/language';
 import { themeExtension, applyChrome } from './theme.js';
 import { languageFor } from './languages.js';
+import { minimap, stickyScroll } from './overview.js';
+import { inlayHints } from './langfeatures.js';
 
 export const settings = {
   theme: 'dark-plus',
@@ -16,6 +18,10 @@ export const settings = {
   suggestions: true,
   ai: false,          // an AI model is selected and ready to be asked for completions
   aiMerge: false,     // the model picked for merge conflicts is ready ("Resolve for me")
+  // From settings.json: editor.minimap.enabled, editor.stickyScroll.enabled, editor.inlayHints.enabled.
+  minimap: true,
+  stickyScroll: true,
+  inlayHints: true,
 };
 
 const themeSlot = new Compartment();
@@ -23,11 +29,13 @@ const fontSlot = new Compartment();
 const indentSlot = new Compartment();
 const wrapSlot = new Compartment();
 const languageSlot = new Compartment();
+const overviewSlot = new Compartment();
 
 const fontExt = () => EditorView.theme({ '&': { fontSize: `${settings.fontSize}px` } });
 const indentExt = () => [EditorState.tabSize.of(settings.tabSize), indentUnit.of(' '.repeat(settings.tabSize))];
 const wrapExt = () => (settings.wordWrap ? EditorView.lineWrapping : []);
 const languageExt = (path) => languageFor(path, { suggestions: settings.suggestions }).extensions;
+const overviewExt = () => [settings.minimap ? minimap : [], settings.stickyScroll ? stickyScroll : [], settings.inlayHints ? inlayHints : []];
 
 /** The settings-driven extensions for a new editor state. */
 export function settingsExtensions(path) {
@@ -37,6 +45,7 @@ export function settingsExtensions(path) {
     indentSlot.of(indentExt()),
     wrapSlot.of(wrapExt()),
     languageSlot.of(languageExt(path)),
+    overviewSlot.of(overviewExt()),
   ];
 }
 
@@ -48,6 +57,7 @@ export function settingsEffects(path) {
     indentSlot.reconfigure(indentExt()),
     wrapSlot.reconfigure(wrapExt()),
     languageSlot.reconfigure(languageExt(path)),
+    overviewSlot.reconfigure(overviewExt()),
   ];
 }
 

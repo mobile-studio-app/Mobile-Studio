@@ -299,4 +299,6 @@ export function closePeekView(view) {
   return false;
 }
 
-export const languageFeatures = () => [lightBulb, hintField, hintFetcher, peekField];
+export const languageFeatures = () => [lightBulb, peekField];
+/** Inlay hints (settings.js turns them off with editor.inlayHints.enabled). */
+export const inlayHints = [hintField, hintFetcher];

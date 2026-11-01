@@ -10,7 +10,7 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
     override init() {
         let config = WKWebViewConfiguration()
         config.preferences.isElementFullscreenEnabled = false
-        webView = WKWebView(frame: .zero, configuration: config)
+        webView = EditorWKWebView(frame: .zero, configuration: config)
         super.init()
         webView.configuration.userContentController.addScriptMessageHandler(self, contentWorld: .page, name: "duocode")
         #if DEBUG
@@ -38,6 +38,8 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
 
     @objc private func extensionConfigurationChanged() {
         emit("extensionConfiguration", UserSettingsFiles.effectiveConfiguration(in: ProjectStore.shared.currentProject))
+        // Some editor settings (the minimap, sticky scroll, inlay hints) are only in settings.json.
+        pushSettings()
     }
 
     /// The editor's settings, with the project's .vscode/settings.json on top.

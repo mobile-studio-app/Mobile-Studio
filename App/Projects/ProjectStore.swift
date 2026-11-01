@@ -2,12 +2,14 @@ import Foundation
 import UIKit
 import UniformTypeIdentifiers
 
-/// A project folder under Documents/Projects.
+/// A project folder under Documents/Projects, or a folder elsewhere opened from the Files app.
 struct ProjectInfo {
     let url: URL
     var name: String { url.lastPathComponent }
     /// When DuoCode last opened it, or the folder's modification date if never.
     let lastUsed: Date
+    /// Opened from Files (iCloud Drive, On My iPad, another app's folder): edited where it is.
+    var isExternal = false
 }
 
 /// Projects live in Documents/Projects so they're visible in the Files app
@@ -25,6 +27,9 @@ final class ProjectStore {
 
     private let lastProjectKey = "duocode.lastProject"
     private let lastOpenedKey = "duocode.projectLastOpened"
+    /// Folders opened from Files: security-scoped bookmarks, so they can be opened again later.
+    private let externalKey = "mobilestudio.externalFolders"
+    private var accessing: Set<URL> = []
 
     private var _currentProject: URL?
     var currentProject: URL {
@@ -41,9 +46,9 @@ final class ProjectStore {
     func openProject(_ url: URL) {
         _currentProject = url
         let defaults = UserDefaults.standard
-        defaults.set(url.lastPathComponent, forKey: lastProjectKey)
+        defaults.set(projectKey(url), forKey: lastProjectKey)
         var opened = defaults.dictionary(forKey: lastOpenedKey) as? [String: Double] ?? [:]
-        opened[url.lastPathComponent] = Date().timeIntervalSince1970
+        opened[projectKey(url)] = Date().timeIntervalSince1970
         defaults.set(opened, forKey: lastOpenedKey)
     }
 
@@ -65,6 +70,10 @@ final class ProjectStore {
         }
         // Reopen the last project if it still exists.
         if let last = UserDefaults.standard.string(forKey: lastProjectKey) {
+            if last.hasPrefix("/"), let external = externalFolders().first(where: { $0.path == last }) {
+                _currentProject = external
+                return
+            }
             let url = projectsRoot.appendingPathComponent(last, isDirectory: true)
             if fm.fileExists(atPath: url.path) {
                 _currentProject = url
@@ -82,14 +91,84 @@ final class ProjectStore {
         let opened = UserDefaults.standard.dictionary(forKey: lastOpenedKey) as? [String: Double] ?? [:]
         let urls = (try? fm.contentsOfDirectory(at: projectsRoot, includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
                                                  options: [.skipsHiddenFiles])) ?? []
-        return urls.compactMap { url -> ProjectInfo? in
+        let projects = urls.compactMap { url -> ProjectInfo? in
             let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .contentModificationDateKey])
             guard values?.isDirectory == true else { return nil }
             let lastUsed = opened[url.lastPathComponent].map { Date(timeIntervalSince1970: $0) }
                 ?? values?.contentModificationDate ?? .distantPast
             return ProjectInfo(url: url, lastUsed: lastUsed)
         }
-        .sorted { $0.lastUsed > $1.lastUsed }
+        let external = externalFolders().map { url in
+            ProjectInfo(url: url, lastUsed: opened[url.path].map { Date(timeIntervalSince1970: $0) } ?? .distantPast, isExternal: true)
+        }
+        return (projects + external).sorted { $0.lastUsed > $1.lastUsed }
+    }
+
+    // MARK: - Folders from Files
+
+    /// Projects under Documents/Projects are known by name; folders from Files by their path.
+    private func projectKey(_ url: URL) -> String {
+        url.standardizedFileURL.deletingLastPathComponent().path == projectsRoot.standardizedFileURL.path ? url.lastPathComponent : url.path
+    }
+
+    /// Adds a folder picked in Files (UIDocumentPickerViewController for .folder) and returns it.
+    /// It's edited in place: files aren't copied.
+    func addExternalFolder(_ picked: URL) throws -> URL {
+        guard picked.startAccessingSecurityScopedResource() else { throw CocoaError(.fileReadNoPermission) }
+        accessing.insert(picked)
+        let bookmark = try picked.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+        var saved = UserDefaults.standard.array(forKey: externalKey) as? [Data] ?? []
+        let known = externalFolders()
+        if let index = known.firstIndex(where: { $0.standardizedFileURL == picked.standardizedFileURL }), index < saved.count {
+            saved[index] = bookmark
+        } else {
+            saved.append(bookmark)
+        }
+        UserDefaults.standard.set(saved, forKey: externalKey)
+        return picked
+    }
+
+    /// Folders opened from Files that can still be reached (each is kept accessible while the app runs).
+    func externalFolders() -> [URL] {
+        let saved = UserDefaults.standard.array(forKey: externalKey) as? [Data] ?? []
+        var refreshed = saved
+        var urls: [URL] = []
+        for (index, data) in saved.enumerated() {
+            var stale = false
+            guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else { continue }
+            if !accessing.contains(url) {
+                guard url.startAccessingSecurityScopedResource() else { continue }
+                accessing.insert(url)
+            }
+            if stale, let fresh = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
+                refreshed[index] = fresh
+            }
+            urls.append(url)
+        }
+        if refreshed != saved { UserDefaults.standard.set(refreshed, forKey: externalKey) }
+        return urls
+    }
+
+    /// Takes a folder from Files off the list (its files stay where they are).
+    @discardableResult
+    func forgetExternalFolder(_ url: URL) -> Bool {
+        let target = url.standardizedFileURL
+        let saved = UserDefaults.standard.array(forKey: externalKey) as? [Data] ?? []
+        let kept = saved.filter { data in
+            var stale = false
+            let resolved = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale)
+            return resolved?.standardizedFileURL != target
+        }
+        UserDefaults.standard.set(kept, forKey: externalKey)
+        if let held = accessing.first(where: { $0.standardizedFileURL == target }) {
+            held.stopAccessingSecurityScopedResource()
+            accessing.remove(held)
+        }
+        guard _currentProject?.standardizedFileURL == target else { return false }
+        _currentProject = nil
+        UserDefaults.standard.removeObject(forKey: lastProjectKey)
+        if let next = listProjects().first { openProject(next.url) } else { bootstrap(); openProject(currentProject) }
+        return true
     }
 
     /// Deletes a project folder and forgets it. If it was the open project, the most recently used
