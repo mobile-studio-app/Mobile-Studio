@@ -17,10 +17,60 @@ final class ExtensionsPanelView: UIView, UITableViewDataSource, UITableViewDeleg
     private var popular: [MarketplaceExtension] = []
     private var sections: [Section] = []
     private var installing: Set<String> = []
-    /// Extensions that can't work in DuoCode are left out of the lists unless this is on.
-    private var showUnsupported = UserDefaults.standard.bool(forKey: "extensions.showUnsupported") {
-        didSet { UserDefaults.standard.set(showUnsupported, forKey: "extensions.showUnsupported") }
+    // MARK: Filters (the filter button's menu, like VS Code's)
+
+    /// Which extensions show by how well they work here.
+    private enum Support: String, CaseIterable {
+        case supported, full, partial, unsupported, all
+        var title: String {
+            switch self {
+            case .supported: return "Supported"
+            case .full: return "Fully Supported"
+            case .partial: return "Partially Supported"
+            case .unsupported: return "Not Supported"
+            case .all: return "All"
+            }
+        }
+        func includes(_ level: ExtensionCompatibility.Level) -> Bool {
+            switch self {
+            case .supported: return level != .unsupported
+            case .full: return level == .full
+            case .partial: return level == .partial
+            case .unsupported: return level == .unsupported
+            case .all: return true
+            }
+        }
     }
+
+    /// Open VSX (search and popular) or only the installed ones, as VS Code's @installed, @enabled, @disabled.
+    private enum Scope: String, CaseIterable {
+        case marketplace, installed, enabled, disabled
+        var title: String {
+            switch self {
+            case .marketplace: return "Open VSX"
+            case .installed: return "Installed"
+            case .enabled: return "Enabled"
+            case .disabled: return "Disabled"
+            }
+        }
+    }
+
+    /// Open VSX's categories (VS Code's).
+    private static let categories = ["Programming Languages", "Snippets", "Linters", "Formatters", "Themes", "Debuggers",
+                                     "Keymaps", "SCM Providers", "Testing", "Notebooks", "Data Science", "Machine Learning",
+                                     "AI", "Chat", "Visualization", "Education", "Extension Packs", "Other"]
+
+    /// Open VSX's orders: nil is relevance for a search and installs otherwise.
+    private static let sorts: [(String?, String)] = [(nil, "Default"), ("downloadCount", "Install Count"),
+                                                     ("rating", "Rating"), ("timestamp", "Recently Updated")]
+
+    private var support = Support(rawValue: UserDefaults.standard.string(forKey: "extensions.support") ?? "") ?? .supported {
+        didSet { UserDefaults.standard.set(support.rawValue, forKey: "extensions.support") }
+    }
+    private var scope = Scope.marketplace
+    private var category: String?
+    private var sortBy: String?
+    private var isFiltered: Bool { support != .supported || scope != .marketplace || category != nil || sortBy != nil }
     private var checkTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
     private var debounce: DispatchWorkItem?
@@ -71,17 +121,69 @@ final class ExtensionsPanelView: UIView, UITableViewDataSource, UITableViewDeleg
 
     func headerActions() -> [UIView] {
         let refresh = VSIconButton(.refresh, label: "Refresh") { [weak self] in self?.runSearch() }
-        let filter = VSIconButton(showUnsupported ? .eye : .filter, label: showUnsupported ? "Hide Unsupported Extensions" : "Show Unsupported Extensions") { [weak self] in
+        let filter = VSIconButton(.filter, label: "Filter Extensions")
+        filter.isChecked = isFiltered
+        filter.menu = filterMenu()
+        filter.showsMenuAsPrimaryAction = true
+        let clear = VSIconButton(.clearAll, label: "Clear Search and Filters") { [weak self] in
             guard let self else { return }
-            self.showUnsupported.toggle()
-            self.onHeaderActionsChanged?()
-            self.rebuild()
-        }
-        let clear = VSIconButton(.clearAll, label: "Clear Search") { [weak self] in
-            self?.searchField.text = ""
-            self?.queryChanged()
+            self.searchField.text = ""
+            self.scope = .marketplace
+            self.category = nil
+            self.sortBy = nil
+            self.support = .supported
+            self.filtersChanged(search: true)
+            self.queryChanged()
         }
         return [filter, refresh, clear]
+    }
+
+    private func filterMenu() -> UIMenu {
+        let show = UIMenu(title: "Show", options: .displayInline, children: Scope.allCases.map { item in
+            UIAction(title: item.title, state: scope == item ? .on : .off) { [weak self] _ in
+                self?.scope = item
+                self?.filtersChanged(search: false)
+            }
+        })
+        let compatibility = UIMenu(title: "Compatibility", image: Codicon.verified.image(), children: Support.allCases.map { item in
+            UIAction(title: item.title, state: support == item ? .on : .off) { [weak self] _ in
+                self?.support = item
+                self?.filtersChanged(search: false)
+            }
+        })
+        let categories = UIMenu(title: "Category", image: Codicon.listTree.image(),
+                                children: ([nil] + Self.categories.map { Optional($0) }).map { item in
+            UIAction(title: item ?? "All Categories", state: category == item ? .on : .off) { [weak self] _ in
+                self?.category = item
+                self?.filtersChanged(search: true)
+            }
+        })
+        let sort = UIMenu(title: "Sort By", image: Codicon.listFlat.image(), children: Self.sorts.map { item in
+            UIAction(title: item.1, state: sortBy == item.0 ? .on : .off) { [weak self] _ in
+                self?.sortBy = item.0
+                self?.filtersChanged(search: true)
+            }
+        })
+        return UIMenu(children: [show, UIMenu(options: .displayInline, children: [compatibility, categories, sort])])
+    }
+
+    /// A filter changed: the button and lists follow, and Open VSX is asked again when what it
+    /// returns depends on it.
+    private func filtersChanged(search: Bool) {
+        onHeaderActionsChanged?()
+        if search { results = []; popular = []; runSearch() }
+        rebuild()
+    }
+
+    /// What the filters are, under the search box, when they're not the usual ones.
+    private var filterSummary: String? {
+        guard isFiltered else { return nil }
+        var parts: [String] = []
+        if scope != .marketplace { parts.append(scope.title) }
+        if let category { parts.append(category) }
+        if support != .supported { parts.append(support.title) }
+        if let sortBy, let title = Self.sorts.first(where: { $0.0 == sortBy })?.1 { parts.append("by \(title)") }
+        return "Filtered: " + parts.joined(separator: " · ")
     }
 
     /// Called when the view opens: loads the popular list the first time.
@@ -113,11 +215,11 @@ final class ExtensionsPanelView: UIView, UITableViewDataSource, UITableViewDeleg
         progress.isAnimating = true
         searchTask = Task { [weak self] in
             do {
-                let found = try await ExtensionManager.shared.search(text)
+                let found = try await ExtensionManager.shared.search(text, category: self?.category, sortBy: self?.sortBy)
                 await MainActor.run {
                     guard let self, text == self.query else { return }
                     if text.isEmpty { self.popular = found } else { self.results = found }
-                    self.messageLabel.text = !text.isEmpty && found.isEmpty ? "No extensions found." : nil
+                    self.searchMessage = !text.isEmpty && found.isEmpty ? "No extensions found." : nil
                     self.progress.isAnimating = false
                     self.rebuild()
                     self.checkCompatibility(of: found)
@@ -126,7 +228,8 @@ final class ExtensionsPanelView: UIView, UITableViewDataSource, UITableViewDeleg
                 await MainActor.run {
                     guard let self, !Task.isCancelled else { return }
                     self.progress.isAnimating = false
-                    self.messageLabel.text = "Couldn't reach Open VSX: \(error.localizedDescription)"
+                    self.searchMessage = "Couldn't reach Open VSX: \(error.localizedDescription)"
+                    self.rebuild()
                 }
             }
         }
@@ -153,23 +256,52 @@ final class ExtensionsPanelView: UIView, UITableViewDataSource, UITableViewDeleg
         }
     }
 
-    /// Whether a listed extension shows: installed, or checked and usable (or everything, when
-    /// unsupported ones are shown). Unchecked ones wait for their check.
+    /// Whether a listed extension shows, by the compatibility filter. Unchecked ones wait for their
+    /// check, unless every extension shows.
     private func isListed(_ ext: MarketplaceExtension) -> Bool {
-        if showUnsupported || manager.isInstalled(ext.id) { return true }
+        if support == .all { return true }
+        if let record = manager.installed.first(where: { $0.id == ext.id }) { return support.includes(record.level) }
         guard let level = manager.knownLevel(of: ext) else { return false }
-        return level != .unsupported
+        return support.includes(level)
     }
 
     private func rebuild() {
-        sections = query.isEmpty ? [.installed, .popular] : [.results]
+        if scope != .marketplace {
+            sections = [.installed]
+        } else {
+            sections = query.isEmpty ? [.installed, .popular] : [.results]
+        }
+        let summary = filterSummary
+        let message = [summary, searchMessage].compactMap { $0 }.joined(separator: "\n")
+        messageLabel.text = message.isEmpty ? nil : message
         messageLabel.isHidden = messageLabel.text == nil
         tableView.reloadData()
     }
 
+    /// The search's own message ("No extensions found.", an error), shown with the filter summary.
+    private var searchMessage: String?
+
     private func items(_ section: Section) -> [Any] {
         switch section {
-        case .installed: return manager.installed.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        case .installed:
+            let needle = query.trimmingCharacters(in: .whitespaces)
+            return manager.installed.filter { record in
+                switch scope {
+                case .enabled: if !record.enabled { return false }
+                case .disabled: if record.enabled { return false }
+                default: break
+                }
+                if support != .all && !support.includes(record.level) { return false }
+                if let category {
+                    let categories = (manager.manifest(of: record.id)?["categories"] as? [String]) ?? []
+                    if !categories.contains(where: { $0.caseInsensitiveCompare(category) == .orderedSame }) { return false }
+                }
+                // With a search, only the installed view lists installed ones, so it filters them.
+                if scope != .marketplace && !needle.isEmpty {
+                    return record.displayName.localizedCaseInsensitiveContains(needle) || record.id.localizedCaseInsensitiveContains(needle)
+                }
+                return true
+            }.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
         case .popular: return popular.filter(isListed)
         case .results: return results.filter(isListed)
         }
@@ -189,7 +321,7 @@ final class ExtensionsPanelView: UIView, UITableViewDataSource, UITableViewDeleg
         guard let header = tableView.dequeueReusableHeaderFooterView(withIdentifier: VSPaneHeader.reuseID) as? VSPaneHeader else { return nil }
         let title: String
         switch sections[section] {
-        case .installed: title = "Installed (\(manager.installed.count))"
+        case .installed: title = scope == .marketplace ? "Installed (\(manager.installed.count))" : "\(scope.title) (\(items(.installed).count))"
         case .popular: title = "Popular"
         case .results: title = "Open VSX"
         }
@@ -203,7 +335,8 @@ final class ExtensionsPanelView: UIView, UITableViewDataSource, UITableViewDeleg
         let item = items(sections[indexPath.section])[indexPath.row]
         if let record = item as? InstalledExtension {
             cell.configure(title: record.displayName, publisher: record.publisher, summary: record.summary,
-                           detail: record.enabled ? nil : "Disabled", warning: record.level == .partial)
+                           detail: !record.enabled ? "Disabled" : record.level == .unsupported ? "Not supported (experimental)" : nil,
+                           warning: record.level != .full)
             cell.iconView.image = manager.iconImage(of: record) ?? Codicon.extensions.image(28)
             cell.setAction(menu: manageMenu(record))
         } else if let ext = item as? MarketplaceExtension {
@@ -214,7 +347,7 @@ final class ExtensionsPanelView: UIView, UITableViewDataSource, UITableViewDeleg
             if manager.isInstalled(ext.id) {
                 cell.setAction(menu: manager.installed.first { $0.id == ext.id }.map(manageMenu))
             } else if manager.knownLevel(of: ext) == .unsupported || manager.cachedCompatibility(ext.id)?.canInstall == false {
-                cell.setUnsupported()
+                cell.setUnsupported(busy: installing.contains(ext.id)) { [weak self] in self?.confirmInstallAnyway(ext.namespace, ext.name, ext.id, ext.displayName) }
             } else {
                 // Yellow: it installs, but not everything in it works here.
                 let partial = manager.knownLevel(of: ext) == .partial || manager.cachedCompatibility(ext.id)?.level == .partial
@@ -236,7 +369,7 @@ final class ExtensionsPanelView: UIView, UITableViewDataSource, UITableViewDeleg
             namespace = ext.namespace; name = ext.name
         } else { return }
         let detail = ExtensionDetailViewController(namespace: namespace, name: name)
-        detail.onInstall = { [weak self] in self?.install(namespace: namespace, name: name, id: "\(namespace).\(name)".lowercased()) }
+        detail.onInstall = { [weak self] anyway in self?.install(namespace: namespace, name: name, id: "\(namespace).\(name)".lowercased(), anyway: anyway) }
         presenter?.present(UINavigationController(rootViewController: detail), animated: true)
     }
 
@@ -287,7 +420,20 @@ final class ExtensionsPanelView: UIView, UITableViewDataSource, UITableViewDeleg
         install(namespace: ext.namespace, name: ext.name, id: ext.id)
     }
 
-    private func install(namespace: String, name: String, id: String) {
+    /// Install Anyway, for an extension that isn't supported: experimental, so it asks first.
+    private func confirmInstallAnyway(_ namespace: String, _ name: String, _ id: String, _ title: String) {
+        let notes = manager.cachedCompatibility(id)?.notes.joined(separator: " ") ?? ""
+        let alert = UIAlertController(title: "Install \(title) Anyway?",
+                                      message: "It isn't supported in Mobile Studio. \(notes)\n\nThis is experimental: parts of it, or all of it, may not work.",
+                                      preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Install Anyway", style: .destructive) { [weak self] _ in
+            self?.install(namespace: namespace, name: name, id: id, anyway: true)
+        })
+        presenter?.present(alert, animated: true)
+    }
+
+    private func install(namespace: String, name: String, id: String, anyway: Bool = false) {
         guard !installing.contains(id) else { return }
         installing.insert(id)
         progress.isAnimating = true
@@ -296,7 +442,7 @@ final class ExtensionsPanelView: UIView, UITableViewDataSource, UITableViewDeleg
             var message: String?
             var skipped: [String] = []
             do {
-                skipped = try await ExtensionManager.shared.install(namespace: namespace, name: name)
+                skipped = try await ExtensionManager.shared.install(namespace: namespace, name: name, anyway: anyway)
             } catch {
                 message = error.localizedDescription
             }
@@ -426,14 +572,19 @@ final class ExtensionCell: UITableViewCell {
         actionButton.accessibilityLabel = "Manage \(title.text ?? "")"
     }
 
-    func setUnsupported() {
+    /// "Not supported", with Install Anyway (experimental) in its menu.
+    func setUnsupported(busy: Bool, installAnyway: @escaping () -> Void) {
         onAction = nil
-        actionButton.menu = nil
-        actionButton.isEnabled = false
+        actionButton.isEnabled = !busy
         actionButton.setImage(nil, for: .normal)
-        actionButton.setTitle("Not supported", for: .normal)
+        actionButton.setTitle(busy ? "Installing…" : "Not supported", for: .normal)
         actionButton.setTitleColor(VS.description, for: .normal)
         actionButton.backgroundColor = .clear
+        actionButton.menu = UIMenu(children: [
+            UIAction(title: "Install Anyway (Experimental)", image: Codicon.warning.image()) { _ in installAnyway() },
+        ])
+        actionButton.showsMenuAsPrimaryAction = true
+        actionButton.accessibilityLabel = "\(title.text ?? "") isn't supported"
     }
 
     override func prepareForReuse() {

@@ -453,10 +453,10 @@ do {
     }
     let native = analyze(["main": "./client/out/extension", "contributes": ["configuration": [:]]], ["darwin-arm64", "linux-x64", "win32-x64"])
     check(native.level == .unsupported, "platform-specific (native) extension blocked")
-    check(native.notes.first?.contains("signing certificate") == true, "a macOS build points to the certificate: \(native.notes)")
+    check(native.notes.first?.contains("macOS programs") == true, "a macOS build says its programs can't run yet: \(native.notes)")
     let mac = ExtensionCompatibility.analyze(manifest: ["main": "./client/out/extension", "contributes": ["configuration": [:]]],
                                              platforms: ["darwin-arm64", "linux-x64"], nodeCode: "module.exports = {}", macPrograms: true)
-    check(mac.level == .partial && mac.canInstall, "a macOS build installs with a certificate: \(mac.notes)")
+    check(mac.level == .unsupported && !mac.canInstall, "a macOS build is blocked even with a certificate, for now: \(mac.notes)")
     let linuxOnly = ExtensionCompatibility.analyze(manifest: ["main": "./x"], platforms: ["linux-x64", "win32-x64"], macPrograms: true)
     check(linuxOnly.level == .unsupported, "no macOS build is still blocked")
 

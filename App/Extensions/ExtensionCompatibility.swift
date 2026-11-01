@@ -104,16 +104,15 @@ struct ExtensionCompatibility: Equatable {
         var notes: [String] = []
 
         let portable = platforms.isEmpty || platforms.contains("universal") || platforms.contains("web")
-        let usesMacBuild = !portable && macPrograms && platforms.contains("darwin-arm64")
-        if !portable && !usesMacBuild {
+        // Builds for each platform mean bundled programs (Claude Code's, Codex's), which iOS doesn't
+        // load yet even when they're signed (`macPrograms` doesn't change that for now). They can
+        // still be installed anyway, as an experiment.
+        if !portable {
             return ExtensionCompatibility(level: .unsupported, notes: [
                 platforms.contains("darwin-arm64")
-                    ? "It includes macOS programs. Mobile Studio can run them once you import your signing certificate in Settings > Programs from Extensions."
+                    ? "It comes with macOS programs, which iOS can't run yet. You can install it anyway as an experiment; the parts that need its programs won't work."
                     : "This extension includes native applications which cannot run on this device.",
             ])
-        }
-        if usesMacBuild {
-            notes.append("It comes with macOS programs, which Mobile Studio signs with your certificate and runs. This is experimental.")
         }
 
         let categories = (manifest["categories"] as? [String] ?? []).map { $0.lowercased() }
@@ -167,7 +166,7 @@ struct ExtensionCompatibility: Equatable {
             return ExtensionCompatibility(level: .unsupported, notes: notes + ["It doesn't contribute anything Mobile Studio supports."])
         }
 
-        let level: Level = nodeLimited || usesMacBuild || !ignored.isEmpty ? .partial : .full
+        let level: Level = nodeLimited || !ignored.isEmpty ? .partial : .full
         return ExtensionCompatibility(level: level, notes: notes)
     }
 

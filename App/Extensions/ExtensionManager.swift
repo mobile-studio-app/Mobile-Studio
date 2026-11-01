@@ -69,6 +69,16 @@ final class ExtensionManager {
            let list = try? JSONDecoder().decode([InstalledExtension].self, from: data) {
             installed = list
         }
+        // Extensions installed from their macOS build when its programs counted as supported: they
+        // aren't now (iOS doesn't load the programs yet), so they're marked as installed anyway.
+        installed = installed.map { record in
+            guard record.level != .unsupported, record.notes.contains(where: { $0.contains("comes with macOS programs") }) else { return record }
+            return InstalledExtension(id: record.id, version: record.version, displayName: record.displayName, summary: record.summary,
+                                      publisher: record.publisher, enabled: record.enabled, level: .unsupported,
+                                      notes: ["It comes with macOS programs, which iOS can't run yet; the parts that need them won't work.",
+                                              "Installed anyway, as an experiment."],
+                                      folder: record.folder, hasIcon: record.hasIcon)
+        }
         // Extensions an older unpacker left incomplete (no package.json): removed, so they can be
         // installed again.
         let broken = installed.filter { manifest(of: $0.id) == nil }
@@ -108,15 +118,18 @@ final class ExtensionManager {
     }
 
     /// Search results, most relevant first; an empty query lists the most downloaded.
-    func search(_ query: String) async throws -> [MarketplaceExtension] {
+    /// `category`: one of Open VSX's (VS Code's) categories, such as "Themes". `sortBy`: relevance,
+    /// downloadCount, rating or timestamp (nil: relevance for a search, downloads otherwise).
+    func search(_ query: String, category: String? = nil, sortBy: String? = nil) async throws -> [MarketplaceExtension] {
         var components = URLComponents(url: api.appendingPathComponent("-/search"), resolvingAgainstBaseURL: false)!
         let trimmed = query.trimmingCharacters(in: .whitespaces)
         components.queryItems = [
             URLQueryItem(name: "size", value: "40"),
-            URLQueryItem(name: "sortBy", value: trimmed.isEmpty ? "downloadCount" : "relevance"),
+            URLQueryItem(name: "sortBy", value: sortBy ?? (trimmed.isEmpty ? "downloadCount" : "relevance")),
             URLQueryItem(name: "sortOrder", value: "desc"),
         ]
         if !trimmed.isEmpty { components.queryItems?.append(URLQueryItem(name: "query", value: trimmed)) }
+        if let category { components.queryItems?.append(URLQueryItem(name: "category", value: category)) }
         let json = try await getJSON(components.url!)
         return (json["extensions"] as? [[String: Any]] ?? []).compactMap(MarketplaceExtension.init(json:))
     }
@@ -127,6 +140,8 @@ final class ExtensionManager {
         let manifest: [String: Any]
         let platforms: [String]
         let download: URL?
+        /// What "Install Anyway" downloads when nothing runs here: the macOS build, say.
+        let anyDownload: URL?
         let readme: URL?
         let compatibility: ExtensionCompatibility
     }
@@ -141,6 +156,7 @@ final class ExtensionManager {
         let macBuild = macPrograms ? downloads["darwin-arm64"] : nil
         let download = (downloads["universal"] ?? downloads["web"] ?? macBuild ?? (downloads.isEmpty ? files["download"] as? String : nil))
             .flatMap(URL.init(string:))
+        let anyDownload = download ?? (downloads["darwin-arm64"] ?? downloads["darwin-x64"] ?? downloads.values.first).flatMap(URL.init(string:))
         var manifest: [String: Any] = [:]
         if let url = (files["manifest"] as? String).flatMap(URL.init(string:)) {
             manifest = (try? JSONSerialization.jsonObject(with: try await get(url)) as? [String: Any]) ?? [:]
@@ -154,7 +170,7 @@ final class ExtensionManager {
         let compatibility = ExtensionCompatibility.analyze(manifest: manifest, platforms: platforms, nodeCode: nodeCode,
                                                            nativePackages: nativePackages, macPrograms: macPrograms)
         compatibilityCache["\(namespace).\(name)".lowercased()] = compatibility
-        return Details(info: info, manifest: manifest, platforms: platforms, download: download,
+        return Details(info: info, manifest: manifest, platforms: platforms, download: download, anyDownload: anyDownload,
                        readme: (files["readme"] as? String).flatMap(URL.init(string:)), compatibility: compatibility)
     }
 
@@ -256,7 +272,7 @@ final class ExtensionManager {
     private struct CheckedLevel: Codable { let version: String; let level: ExtensionCompatibility.Level }
     /// Answers depend on whether macOS programs can run, so each case has its own file.
     private var checkedLevelsFile: URL {
-        root.appendingPathComponent(SigningCertificate.isImported ? "compatibility-5-mac.json" : "compatibility-5.json")
+        root.appendingPathComponent(SigningCertificate.isImported ? "compatibility-6-mac.json" : "compatibility-6.json")
     }
     private var checkedLevelsLoadedFrom: URL?
     private var loadedCheckedLevels: [String: CheckedLevel] = [:]
@@ -295,15 +311,16 @@ final class ExtensionManager {
     /// Installs an extension and the extensions it depends on. Incompatible ones are refused
     /// before downloading. Returns notes on anything that was skipped.
     @discardableResult
-    func install(namespace: String, name: String, visited: Set<String> = []) async throws -> [String] {
+    /// `anyway`: install an unsupported extension too (Install Anyway, experimental).
+    func install(namespace: String, name: String, anyway: Bool = false, visited: Set<String> = []) async throws -> [String] {
         let id = "\(namespace).\(name)".lowercased()
         guard !visited.contains(id), !isInstalled(id) else { return [] }
         let details = try await self.details(namespace: namespace, name: name)
-        guard details.compatibility.canInstall else {
+        guard details.compatibility.canInstall || anyway else {
             throw NSError(domain: "Extensions", code: 1, userInfo: [NSLocalizedDescriptionKey:
                 "\(details.info["displayName"] as? String ?? name) can't work in Mobile Studio. " + details.compatibility.notes.joined(separator: " ")])
         }
-        guard let download = details.download else {
+        guard let download = details.download ?? (anyway ? details.anyDownload : nil) else {
             throw NSError(domain: "Extensions", code: 2, userInfo: [NSLocalizedDescriptionKey: "Open VSX has no download that runs on iOS."])
         }
 
@@ -342,7 +359,8 @@ final class ExtensionManager {
             displayName: manifest["displayName"] as? String ?? details.info["displayName"] as? String ?? name,
             summary: manifest["description"] as? String ?? details.info["description"] as? String ?? "",
             publisher: (details.info["namespaceDisplayName"] as? String) ?? namespace,
-            enabled: true, level: details.compatibility.level, notes: details.compatibility.notes,
+            enabled: true, level: details.compatibility.level,
+            notes: details.compatibility.notes + (details.compatibility.canInstall ? [] : ["Installed anyway, as an experiment."]),
             folder: folder, hasIcon: hasIcon)
         await MainActor.run {
             self.installed.removeAll { $0.id == id }

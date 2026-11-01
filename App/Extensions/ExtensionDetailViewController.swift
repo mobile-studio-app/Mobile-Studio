@@ -3,7 +3,8 @@ import UIKit
 /// An extension's page, as VS Code shows it: icon, name, publisher, install or manage, whether
 /// it can work in DuoCode (and what won't), and its README.
 final class ExtensionDetailViewController: UIViewController {
-    var onInstall: (() -> Void)?
+    /// Installs it; true is Install Anyway, for one that isn't supported (experimental).
+    var onInstall: ((Bool) -> Void)?
 
     private let namespace: String
     private let name: String
@@ -185,20 +186,33 @@ final class ExtensionDetailViewController: UIViewController {
             navigationItem.leftBarButtonItem = uninstall
         } else {
             navigationItem.leftBarButtonItem = nil
-            actionButton.isWarning = details.compatibility.level == .partial
-            actionButton.setTitle(details.compatibility.canInstall ? "Install" : "Not Supported", icon: details.compatibility.canInstall ? .cloudDownload : nil)
-            actionButton.isEnabled = details.compatibility.canInstall
+            let supported = details.compatibility.canInstall
+            actionButton.isWarning = details.compatibility.level == .partial || !supported
+            actionButton.setTitle(supported ? "Install" : "Install Anyway (Experimental)", icon: supported ? .cloudDownload : .warning)
+            actionButton.isEnabled = true
         }
     }
 
     private func primaryAction() {
         if let record = ExtensionManager.shared.installed.first(where: { $0.id == id }) {
             ExtensionManager.shared.setEnabled(id, !record.enabled)
+        } else if let details, !details.compatibility.canInstall {
+            // Not supported: installing is an experiment, so ask first.
+            let alert = UIAlertController(title: "Install Anyway?",
+                                          message: "It isn't supported in Mobile Studio. \(details.compatibility.notes.joined(separator: " "))\n\nThis is experimental: parts of it, or all of it, may not work.",
+                                          preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+            alert.addAction(UIAlertAction(title: "Install Anyway", style: .destructive) { [weak self] _ in self?.startInstall(anyway: true) })
+            present(alert, animated: true)
         } else {
-            actionButton.setTitle("Installing…", icon: nil)
-            actionButton.isEnabled = false
-            onInstall?()
+            startInstall(anyway: false)
         }
+    }
+
+    private func startInstall(anyway: Bool) {
+        actionButton.setTitle("Installing…", icon: nil)
+        actionButton.isEnabled = false
+        onInstall?(anyway)
     }
 
     /// README markdown as styled text: headings, code blocks, lists and inline styles.
