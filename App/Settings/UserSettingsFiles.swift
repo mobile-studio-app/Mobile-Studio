@@ -73,7 +73,7 @@ enum UserSettingsFiles {
 
     /// The app's settings under VS Code's names.
     private static let appKeys: Set<String> = [
-        "workbench.colorTheme", "editor.fontSize", "editor.tabSize", "editor.wordWrap", "files.autoSave",
+        "workbench.colorTheme", "workbench.iconTheme", "editor.fontSize", "editor.tabSize", "editor.wordWrap", "files.autoSave",
         "editor.formatOnSave", "mobileStudio.codeSuggestions", "mobileStudio.ai.model", "mobileStudio.ai.mergeModel", "mobileStudio.ai.chatModel",
         "mobileStudio.ai.downloadOverMobileData", "mobileStudio.luajit.jit", "git.enableSmartCommit",
     ]
@@ -82,6 +82,7 @@ enum UserSettingsFiles {
         let s = AppSettings.shared
         var values: [String: Any] = [
             "workbench.colorTheme": s.editorTheme,
+            "workbench.iconTheme": s.fileIconTheme,
             "editor.fontSize": s.fontSize,
             "editor.tabSize": s.tabSize,
             "editor.wordWrap": s.wordWrap ? "on" : "off",
@@ -114,6 +115,7 @@ enum UserSettingsFiles {
         let bool = { (key: String) -> Bool? in (values[key] as? NSNumber)?.boolValue }
         let int = { (key: String) -> Int? in (values[key] as? NSNumber)?.intValue }
         if let theme = values["workbench.colorTheme"] as? String, theme != s.editorTheme { s.editorTheme = theme }
+        if let theme = values["workbench.iconTheme"] as? String, theme != s.fileIconTheme { s.fileIconTheme = theme }
         if let size = int("editor.fontSize"), size != s.fontSize { s.fontSize = max(6, min(48, size)) }
         if let size = int("editor.tabSize"), size != s.tabSize { s.tabSize = max(1, min(16, size)) }
         if let wrap = values["editor.wordWrap"] {

@@ -2,6 +2,15 @@
 // opened replaces until it's edited or double-tapped. Diffs open in their own preview tab.
 
 const tabs = [];        // { key, path, title, icon, preview, dirty }
+// The file icon theme's icons (FileIconTheme.swift): name → data URL, or null for none.
+let iconSource = null;
+const themeIcons = new Map();
+
+/** Where a file's themed icon comes from (a function of its name returning a data URL or null). */
+export function setFileIconSource(source) { iconSource = source; refreshFileIcons(); }
+
+/** The theme changed, or more of its icons were drawn. */
+export function refreshFileIcons() { themeIcons.clear(); render(); }
 let activeKey = null;
 let container = null;
 let handlers = { select() {}, close() {} };
@@ -103,6 +112,19 @@ function render() {
     const icon = document.createElement('span');
     icon.className = 'tab-icon';
     icon.textContent = tab.icon || '📄';
+    if (tab.path && iconSource) {
+      const fileName = tab.path.split('/').pop();
+      const url = themeIcons.get(fileName);
+      if (url) {
+        const img = document.createElement('img');
+        img.src = url;
+        img.alt = '';
+        icon.replaceChildren(img);
+      } else if (url === undefined) {
+        themeIcons.set(fileName, null);
+        Promise.resolve(iconSource(fileName)).then((found) => { if (found) { themeIcons.set(fileName, found); render(); } }, () => {});
+      }
+    }
     const name = document.createElement('span');
     name.className = 'tab-name';
     const label = tab.title || fileName(tab.path);

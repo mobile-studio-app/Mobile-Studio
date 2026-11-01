@@ -51,6 +51,7 @@ final class AppSettings {
             Key.useJIT: true,
             Key.downloadOverCellular: false,
             Key.smartCommit: false,
+            Key.fileIconTheme: "",
             Key.testAutomation: false,
         ])
     }
@@ -69,6 +70,7 @@ final class AppSettings {
         static let useJIT = "settings.run.jit"
         static let downloadOverCellular = "settings.ai.cellular"
         static let smartCommit = "settings.git.smartCommit"
+        static let fileIconTheme = "settings.workbench.iconTheme"
         static let testAutomation = "settings.dev.automation"
     }
 
@@ -140,6 +142,12 @@ final class AppSettings {
     }
 
     /// Commit every change when nothing is staged, without asking (VS Code's git.enableSmartCommit).
+    /// The file icon theme (FileIconTheme): "<extension id>/<theme id>", or "" for the built-in icons.
+    var fileIconTheme: String {
+        get { defaults.string(forKey: Key.fileIconTheme) ?? "" }
+        set { set(newValue, Key.fileIconTheme) }
+    }
+
     var smartCommit: Bool {
         get { defaults.bool(forKey: Key.smartCommit) }
         set { set(newValue, Key.smartCommit) }

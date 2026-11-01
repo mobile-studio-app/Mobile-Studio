@@ -30,6 +30,9 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
             NotificationCenter.default.addObserver(self, selector: #selector(pushSettings), name: name, object: nil)
         }
         NotificationCenter.default.addObserver(self, selector: #selector(extensionsChanged), name: ExtensionManager.didChange, object: nil)
+        NotificationCenter.default.addObserver(forName: FileIconTheme.didChange, object: nil, queue: .main) { [weak self] _ in
+            self?.emit("fileIconsChanged", [:])
+        }
         NotificationCenter.default.addObserver(self, selector: #selector(breakpointsChanged), name: BreakpointStore.didChange, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(gitIndexChanged), name: GitManager.indexDidChange, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(extensionConfigurationChanged),
@@ -359,6 +362,17 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                     }
                     DispatchQueue.main.async { replyHandler(["commits": commits, "lines": lines], nil) }
                 }
+            case "fileIconThemes":
+                // Preferences: File Icon Theme (the Command Palette).
+                replyHandler(["current": AppSettings.shared.fileIconTheme,
+                              "themes": FileIconTheme.shared.options.map { ["id": $0.id, "label": $0.label] }], nil)
+            case "setFileIconTheme":
+                AppSettings.shared.fileIconTheme = body["id"] as? String ?? ""
+                replyHandler(true, nil)
+            case "fileIcon":
+                // A tab's icon from the file icon theme (nil: the built-in one).
+                let name = body["name"] as? String ?? ""
+                replyHandler(FileIconTheme.shared.dataURL(forFile: name) ?? NSNull(), nil)
             case "nodeHostLog":
                 // The end of the Node.js extension host's log (node-host.js writes it to the temp folder).
                 let url = FileManager.default.temporaryDirectory.appendingPathComponent("mobile-studio-node-host.log")

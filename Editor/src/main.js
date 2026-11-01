@@ -41,7 +41,8 @@ import { setupMarkdownPreview, setPreview, refreshPreview, fileOpened, previewMo
 import { extensionKeys, buildExtensionKeymap, currentExtensionKeymap } from './ext/keybindings.js';
 import { runCommand } from './ext/host.js';
 import { setupBreadcrumbs, updateBreadcrumbs } from './breadcrumbs.js';
-import { setupTabs, showTab, setTabIcon, setActiveDirty, removeTab, clearTabs, activeTab, renameTabs } from './tabs.js';
+import { setupTabs, showTab, setTabIcon, setActiveDirty, removeTab, clearTabs, activeTab, renameTabs, setFileIconSource, refreshFileIcons } from './tabs.js';
+import { renderFileIcons } from './ext/fileicons.js';
 import { setupSplit, mainChanged, sideText, openToSide, refreshSplit, flushSplit } from './split.js';
 import { setupTasks } from './tasks.js';
 import { setupDebugConsole, showPanel, togglePanel } from './panel.js';
@@ -300,6 +301,17 @@ async function reopenWith() {
   await openCustomEditor(editors[chosen - 1].viewType, path, path.split('/').pop());
 }
 addCommands([{ command: 'workbench.action.reopenWithEditor', title: 'View: Reopen Editor With…', run: () => reopenWith() }]);
+addCommands([{
+  command: 'workbench.action.selectIconTheme', title: 'Preferences: File Icon Theme',
+  run: async () => {
+    const info = await native({ cmd: 'fileIconThemes' }).catch(() => null);
+    if (!info) return;
+    const items = [{ label: 'None', description: 'The built-in icons', id: '' }, ...info.themes.map((t) => ({ label: t.label, id: t.id }))];
+    if (items.length === 1) items.push({ separator: true, label: 'Install an icon theme from Extensions, such as Material Icon Theme' });
+    const picked = await quickPick({ placeholder: 'Select File Icon Theme', items, activeIndex: Math.max(0, items.findIndex((i) => i.id === info.current)) });
+    if (picked != null && items[picked] && !items[picked].separator) native({ cmd: 'setFileIconTheme', id: items[picked].id }).catch(() => {});
+  },
+}]);
 addCommands([{ command: 'git.viewFileHistory', title: 'Git: View File History', run: () => fileHistory((request) => openDiff(request)) }]);
 addCommands([{ command: 'toggle.diff.renderSideBySide', title: 'Diff Editor: Toggle Inline View', run: () => toggleDiffLayout() }]);
 $('diff-mode').addEventListener('click', () => toggleDiffLayout());
@@ -490,6 +502,8 @@ setupWebviews({
 });
 setupNavigation({ native, view, current: () => (readOnly ? null : current), openFile: (path) => openFile(path) });
 setupBlame({ native, current: () => (readOnly ? null : current) });
+// Tabs show the file icon theme's icons when one is picked.
+setFileIconSource((name) => native({ cmd: 'fileIcon', name }).catch(() => null));
 setupChat({
   native, view, openURL, current: () => (readOnly ? null : current),
   appCommand: (cmd) => native({ cmd }).catch(() => {}),
@@ -694,6 +708,8 @@ window.duocode = {
   view,
   // The extension host's log, for debugging.
   extensionOutput: () => outputLog(),
+  // The file icon theme's icons, drawn for the app's lists (FileIconTheme.swift).
+  renderFileIcons: (extensionId, items, fonts, size) => renderFileIcons(extensionId, items, fonts, size),
   // Awaited by the host (EditorWebView.flushSaves) before it runs the game or switches projects.
   async flush() {
     await save();
@@ -720,6 +736,7 @@ window.duocode = {
     if (name === 'reveal' && payload?.file) reveal(payload.file, payload.line || 1, payload.column || 0, payload.length || 0);
     if (name === 'openDiff' && payload?.path) openDiff(payload);
     if (name === 'aiChatText' || name === 'aiChatDone') chatEvent(name, payload);
+    if (name === 'fileIconsChanged') refreshFileIcons();
     if (name === 'key' && payload?.name) barKey(payload.name);
     if (name === 'saveAll') save();
     if (name === 'reload') reload();

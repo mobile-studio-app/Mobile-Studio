@@ -73,6 +73,9 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
         super.init(frame: frame)
         setupViews()
         // Check Out on a pull request (PullRequestsViewController).
+        NotificationCenter.default.addObserver(forName: FileIconTheme.didChange, object: nil, queue: .main) { [weak self] _ in
+            self?.tableView.reloadData()
+        }
         NotificationCenter.default.addObserver(forName: PullRequestsViewController.checkoutRequest, object: nil, queue: .main) { [weak self] note in
             guard let branch = note.userInfo?["branch"] as? String else { return }
             self?.checkoutRemote(branch)
@@ -1018,6 +1021,7 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
             cell.configure(depth: depth, twistie: nil, icon: icon, iconColor: color, title: name,
                            titleColor: VS.color(for: file.status), strikethrough: file.status == .deleted,
                            description: viewAsTree ? nil : (file.path as NSString).deletingLastPathComponent)
+            cell.useThemeIcon(file: name)
             let focused = focusedKey == fileKey(group, file.path)
             cell.setTrailing((focused ? fileActions(file, group: group) : []) + [VSListCell.statusLetter(file.status)])
             cell.isMarked = focused
@@ -1037,6 +1041,7 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
             cell.configure(depth: 3, twistie: nil, icon: icon, iconColor: color, title: name,
                            titleColor: VS.color(for: file.status), strikethrough: file.status == .deleted,
                            description: (file.path as NSString).deletingLastPathComponent)
+            cell.useThemeIcon(file: name)
             cell.setTrailing([VSListCell.statusLetter(file.status)])
             // Carry the lane down past the commit's files, unless it's the oldest commit.
             if commits.last?.id != commit.id {

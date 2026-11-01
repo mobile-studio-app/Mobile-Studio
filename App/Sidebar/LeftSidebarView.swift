@@ -124,6 +124,10 @@ final class LeftSidebarView: UIView, UITableViewDataSource, UITableViewDelegate 
             DispatchQueue.main.async { self?.scmPanel.refresh() }
         }
         // Saving in the editor updates Source Control, as it does in VS Code.
+        // A file icon theme picked, or more of its icons drawn.
+        NotificationCenter.default.addObserver(forName: FileIconTheme.didChange, object: nil, queue: .main) { [weak self] _ in
+            self?.filesTableView.reloadData()
+        }
         NotificationCenter.default.addObserver(self, selector: #selector(projectFilesChanged),
                                                name: ProjectStore.filesDidChange, object: nil)
     }
@@ -534,6 +538,7 @@ final class LeftSidebarView: UIView, UITableViewDataSource, UITableViewDelegate 
             let status = folderDecoration(row.path)
             cell.configure(depth: row.depth, twistie: expandedFolders.contains(row.path), icon: nil,
                            title: row.name, titleColor: status.map(VS.color(for:)) ?? VS.foreground)
+            cell.useThemeIcon(folder: row.name, expanded: expandedFolders.contains(row.path))
             if let status {
                 let dot = UILabel()
                 dot.text = "•"
@@ -547,6 +552,7 @@ final class LeftSidebarView: UIView, UITableViewDataSource, UITableViewDelegate 
             // A leaf keeps the twistie's space, so file icons line up under their folder's name.
             cell.configure(depth: row.depth, twistie: nil, icon: icon, iconColor: color, title: row.name,
                            titleColor: status.map(VS.color(for:)) ?? VS.foreground)
+            cell.useThemeIcon(file: row.name)
             if let status { cell.setTrailing([VSListCell.statusLetter(status)]) }
             cell.isMarked = row.path == activeFile
         }

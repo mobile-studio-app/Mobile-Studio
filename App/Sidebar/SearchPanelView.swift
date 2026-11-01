@@ -60,6 +60,9 @@ final class SearchPanelView: UIView, UITableViewDataSource, UITableViewDelegate,
         setupInputs()
         setupTable()
         updateReplaceVisibility()
+        NotificationCenter.default.addObserver(forName: FileIconTheme.didChange, object: nil, queue: .main) { [weak self] _ in
+            self?.tableView.reloadData()
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -403,6 +406,7 @@ final class SearchPanelView: UIView, UITableViewDataSource, UITableViewDelegate,
             let (icon, color) = VS.fileIcon(name)
             cell.configure(depth: depth, twistie: !collapsed.contains(fileKey(file.path)), icon: icon, iconColor: color,
                            title: name, description: viewAsTree ? nil : folder)
+            cell.useThemeIcon(file: name)
             cell.setTrailing([badge(file.matches.count)])
         case let .match(fileIndex, matchIndex, depth):
             let match = outcome.files[fileIndex].matches[matchIndex]

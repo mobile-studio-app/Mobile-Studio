@@ -605,6 +605,22 @@ final class VSListCell: UITableViewCell {
         accessibilityValue = expanded.map { $0 ? "expanded" : "collapsed" }
     }
 
+    /// The file icon theme's icon for a file (FileIconTheme), in place of the built-in one.
+    func useThemeIcon(file name: String) {
+        if let image = FileIconTheme.shared.image(forFile: name) { showThemeIcon(image) }
+    }
+
+    /// The file icon theme's icon for a folder; the built-in look has none.
+    func useThemeIcon(folder name: String, expanded: Bool) {
+        if let image = FileIconTheme.shared.image(forFolder: name, expanded: expanded) { showThemeIcon(image) }
+    }
+
+    private func showThemeIcon(_ image: UIImage) {
+        iconView.image = image.withRenderingMode(.alwaysOriginal)
+        iconView.isHidden = false
+        iconWidth.constant = 16
+    }
+
     /// Replaces the icon with a custom view of the given width (the Graph's commit lane).
     func setLeadingView(_ view: UIView?, width: CGFloat) {
         leadingCustomView?.removeFromSuperview()

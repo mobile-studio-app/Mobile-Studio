@@ -268,6 +268,11 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
             guard let self else { return completion(nil) }
             self.editor.call(body, arguments, completion: completion)
         }
+        // The file icon theme's icons are drawn by the editor page (they're SVG or font characters).
+        FileIconTheme.shared.callEditor = { [weak self] body, arguments, completion in
+            guard let self else { return completion(nil) }
+            self.editor.call(body, arguments, completion: completion)
+        }
         // Settings > Advanced's settings files open in the editor, by the Command Palette's commands.
         NotificationCenter.default.addObserver(forName: SettingsViewController.openFileRequest, object: nil, queue: .main) { [weak self] note in
             guard let command = note.userInfo?["command"] as? String else { return }

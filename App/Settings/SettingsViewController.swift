@@ -43,7 +43,7 @@ final class SettingsViewController: UITableViewController {
         /// The settings on this page, for Settings' search.
         var searchTerms: [String] {
             switch self {
-            case .general: return ["Color Theme", "Font Size", "Indent Width", "Tab Size", "Word Wrap", "Auto Save", "Format on Save", "Code Suggestions", "Completion"]
+            case .general: return ["Color Theme", "File Icon Theme", "Icons", "Font Size", "Indent Width", "Tab Size", "Word Wrap", "Auto Save", "Format on Save", "Code Suggestions", "Completion"]
             case .ai: return ["AI Suggestions", "Apple Intelligence", "Fast AI", "Regular AI", "Download over Mobile Data", "AI Merge Conflicts", "Chat", "Models"]
             case .running: return ["LuaJIT JIT Compiler", "Running Games", "Programs from Extensions", "Signing Certificate"]
             case .sourceControl: return ["GitHub", "Sign in", "Smart Commit"]
@@ -61,7 +61,7 @@ final class SettingsViewController: UITableViewController {
     static let openFileRequest = Notification.Name("DuoCodeOpenSettingsFile")
 
     private enum EditorRow: Int, CaseIterable {
-        case theme, fontSize, tabSize, wordWrap, autoSave, formatOnSave
+        case theme, iconTheme, fontSize, tabSize, wordWrap, autoSave, formatOnSave
     }
 
     /// Off, Apple Intelligence, Fast and Regular AI, and code models downloaded in Advanced → AI Models.
@@ -362,6 +362,9 @@ final class SettingsViewController: UITableViewController {
         case .theme:
             content.text = "Color Theme"
             cell.accessoryView = makeThemeButton()
+        case .iconTheme:
+            content.text = "File Icon Theme"
+            cell.accessoryView = makeIconThemeButton()
         case .fontSize:
             content.text = "Font Size"
             content.secondaryText = "\(settings.fontSize) pt"
@@ -664,6 +667,27 @@ final class SettingsViewController: UITableViewController {
                 if !themes.isEmpty { groups.append(UIMenu(title: ext.displayName, options: .displayInline, children: themes.map(action))) }
             }
             done(groups)
+        }])
+        button.showsMenuAsPrimaryAction = true
+        button.sizeToFit()
+        return button
+    }
+
+    /// None (the built-in icons) and the icon themes installed extensions offer.
+    private func makeIconThemeButton() -> UIButton {
+        let button = UIButton(configuration: .plain())
+        button.configuration?.title = FileIconTheme.shared.label(of: settings.fileIconTheme)
+        button.configuration?.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 4, bottom: 4, trailing: 0)
+        button.menu = UIMenu(children: [AutomationMenus.deferred { [weak self] done in
+            guard let self else { return done([]) }
+            let current = self.settings.fileIconTheme
+            let choices = [("", "None")] + FileIconTheme.shared.options.map { ($0.id, $0.label) }
+            done(choices.map { id, label in
+                UIAction(title: label, state: id == current ? .on : .off) { [weak self] _ in
+                    self?.settings.fileIconTheme = id
+                    if let section = self?.index(.editor) { self?.tableView.reconfigureRows(at: [IndexPath(row: EditorRow.iconTheme.rawValue, section: section)]) }
+                }
+            })
         }])
         button.showsMenuAsPrimaryAction = true
         button.sizeToFit()
