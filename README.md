@@ -2,13 +2,28 @@
 
 A VS Code-style IDE for iPhone and iPad that runs your code on the device: no server, no streaming.
 
+![Mobile Studio editing a LÖVE game, with the Explorer open](docs/screenshots/editor.png)
+
 - **Languages and runtimes:** Lua 5.4, Python 3, JavaScript (Node.js 18 with ICU), and LÖVE 11.5 / 12 games, each built in as a plug-in runtime. More languages can be added through the same runtime interface.
 - **VS Code extensions** from [Open VSX](https://open-vsx.org): themes, grammars, snippets, language settings, web extensions and Node.js extensions, with views, custom editors and tasks. Each extension is checked before it installs and labelled as working, partly working or not supported.
 - **macOS programs from extensions** (language servers, linters) run inside the app, signed with your own development certificate. No JIT or VPN is needed (Settings → Programs from Extensions).
 - **Debugging** with breakpoints, stepping and variables for Lua, Python and JavaScript.
-- **Git** (clone, commit, branches, merge, push) with GitHub sign-in.
-- **AI code completion** on the device (Apple Intelligence or a local model).
-- **Editor:** CodeMirror 6 with completions, diagnostics, split editor, Output panel and Command Palette.
+- **Git** (clone, commit, branches, merge, push, blame, side-by-side diffs) and **GitHub pull requests**, with GitHub sign-in.
+- **On-device AI:** code completion and a Chat panel that runs on Apple Intelligence or a model you download. Nothing is sent anywhere.
+- **Terminal** with a shell, `git` and your project's files, plus Problems, Output and Debug Console panels.
+- **Live Preview** of HTML pages, updating as you type.
+- **Editor:** CodeMirror 6 with completions, diagnostics, quick fixes, inlay hints, peek definition, minimap, sticky scroll, split editor and Command Palette.
+
+## Screenshots
+
+| | |
+|:-:|:-:|
+| ![Terminal running ls, git status and grep](docs/screenshots/terminal.png) | ![Source Control with a diff of uncommitted changes](docs/screenshots/source-control.png) |
+| **Terminal** | **Source Control** |
+| ![Chat panel answering a question about the open file](docs/screenshots/chat.png) | ![Live Preview of an HTML page beside its code](docs/screenshots/live-preview.png) |
+| **Chat** (on-device AI) | **Live Preview** |
+| ![Settings listing AI models to download](docs/screenshots/ai-models.png) | ![A LÖVE game running beside the editor](docs/screenshots/running.png) |
+| **AI models to download** | **Running a LÖVE game** |
 
 ## Installing
 

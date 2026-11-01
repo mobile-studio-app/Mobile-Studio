@@ -7,7 +7,7 @@
 //
 // usage: npm run docs     (needs git and network)
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -187,12 +187,21 @@ function parseLoveSource(modulesDir) {
     for (const m of src.matchAll(/luax_register_type\(\s*L\s*,\s*&[\w:]*?(\w+)::type\s*,([^;]*?)\)\s*;/g)) {
       typeArrays[m[1]] = m[2].split(',').map((s) => s.trim()).filter((s) => s && s !== 'nullptr');
     }
-    // Module wrappers declare `static const luaL_Reg functions[]`; the module is the first
-    // folder under src/modules (physics lives in physics/box2d, data in wrap_DataModule.cpp, …).
-    const fns = src.match(/static const luaL_Reg (?:module_)?functions\[\]\s*=\s*\{([\s\S]*?)\};/);
+    // A module's wrapper registers it (luax_register_module) with `static const luaL_Reg functions[]`;
+    // type wrappers (wrap_Transform.cpp, …) have arrays of that name too, for their methods. The
+    // module is the first folder under src/modules (physics lives in physics/box2d, …).
+    const fns = src.includes('luax_register_module') && src.match(/static const luaL_Reg (?:module_)?functions\[\]\s*=\s*\{([\s\S]*?)\};/);
     if (fns) {
       const mod = file.slice(modulesDir.length + 1).split(/[\\/]/)[0];
-      moduleFns[mod] = [...new Set([...(moduleFns[mod] || []), ...[...fns[1].matchAll(/\{\s*"(\w+)"\s*,/g)].map((x) => x[1])])];
+      const names = [...fns[1].matchAll(/\{\s*"(\w+)"\s*,/g)].map((x) => x[1]);
+      // Some functions are written in Lua, in the wrapper's .lua twin (love.math.random, …).
+      const lua = file.replace(/\.cpp$/, '.lua');
+      if (existsSync(lua)) {
+        for (const m of readFileSync(lua, 'utf8').matchAll(/^function [\w.]+\.(\w+)\s*\(/gm)) {
+          if (!m[1].startsWith('_')) names.push(m[1]);
+        }
+      }
+      moduleFns[mod] = [...new Set([...(moduleFns[mod] || []), ...names])];
     }
   }
   const typeMethods = {};
