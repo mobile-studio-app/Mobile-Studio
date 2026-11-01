@@ -42,6 +42,8 @@ final class ExtensionViewsPanelView: UIView, UITableViewDataSource, UITableViewD
         let icon: String?
         let extensionPath: String
         let when: String?
+        /// Contributed for VS Code's secondary side bar (where chat panels go) rather than the activity bar.
+        var isSecondary = false
     }
 
     struct Item {
@@ -93,7 +95,7 @@ final class ExtensionViewsPanelView: UIView, UITableViewDataSource, UITableViewD
         didSet { if container != oldValue { updateShownViews(); if !isHidden { reloadAll() } } }
     }
     private var rows: [[Row]] = []
-    /// Items under a parent: "viewId\u{0}handle" ("" for the top level).
+    /// Items under a parent: "viewId\|handle" ("" for the top level).
     private var children: [String: [Item]] = [:]
     private var messages: [String: String] = [:]
     private var expanded: Set<String> = []
@@ -147,8 +149,23 @@ final class ExtensionViewsPanelView: UIView, UITableViewDataSource, UITableViewD
     var hasViews: Bool { allViews.contains { !isOwnContainer($0.container) && evaluate($0.when, view: $0.id) } }
 
     /// The extension containers with a view showing, for the activity bar.
+    /// An extension can show more than one container that looks the same: Claude Code has its sessions
+    /// list in the activity bar and its chat in the secondary side bar, both "Claude Code" with one icon.
+    /// With one activity bar for both, they're one button: the secondary side bar's, which VS Code shows open.
     var shownContainers: [Container] {
-        containers.filter { c in evaluate(c.when, view: "") && allViews.contains { $0.container == c.id && evaluate($0.when, view: $0.id) } }
+        let shown = containers.filter { c in evaluate(c.when, view: "") && allViews.contains { $0.container == c.id && evaluate($0.when, view: $0.id) } }
+        var seen: [String: Int] = [:]
+        var out: [Container] = []
+        for c in shown {
+            let key = "\(c.extensionPath)|\(c.title)|\(c.icon ?? "")"
+            if let index = seen[key] {
+                if c.isSecondary && !out[index].isSecondary { out[index] = c }
+            } else {
+                seen[key] = out.count
+                out.append(c)
+            }
+        }
+        return out
     }
 
     /// The title for the side bar: the container's, or EXTENSION VIEWS.
@@ -240,12 +257,13 @@ final class ExtensionViewsPanelView: UIView, UITableViewDataSource, UITableViewD
             let name = manifest["displayName"] as? String ?? manifest["name"] as? String ?? ""
             let contributes = manifest["contributes"] as? [String: Any] ?? [:]
             let extensionPath = payload["path"] as? String ?? ""
-            for (_, list) in contributes["viewsContainers"] as? [String: Any] ?? [:] {
+            for (location, list) in contributes["viewsContainers"] as? [String: Any] ?? [:] {
                 for entry in list as? [[String: Any]] ?? [] {
                     guard let id = entry["id"] as? String else { continue }
                     let icon = entry["icon"] as? String ?? ((entry["icon"] as? [String: Any])?["dark"] as? String)
                     ownContainers.append(Container(id: id, title: Self.text(entry["title"]) ?? name, icon: icon,
-                                                   extensionPath: extensionPath, when: entry["when"] as? String))
+                                                   extensionPath: extensionPath, when: entry["when"] as? String,
+                                                   isSecondary: location == "secondarySidebar"))
                 }
             }
             for (containerId, list) in contributes["views"] as? [String: Any] ?? [:] {
@@ -344,7 +362,7 @@ final class ExtensionViewsPanelView: UIView, UITableViewDataSource, UITableViewD
         reloadAll()
     }
 
-    private func key(_ viewId: String, _ handle: String?) -> String { viewId + "\u{0}" + (handle ?? "") }
+    private func key(_ viewId: String, _ handle: String?) -> String { viewId + "\|" + (handle ?? "") }
 
     private func reloadAll() {
         rebuildRows()
@@ -363,7 +381,7 @@ final class ExtensionViewsPanelView: UIView, UITableViewDataSource, UITableViewD
         refreshing.insert(viewId)
         fetch(viewId, nil) { [weak self] in
             guard let self else { return }
-            let open = self.expanded.filter { $0.hasPrefix(viewId + "\u{0}") }.map { String($0.dropFirst(viewId.count + 1)) }
+            let open = self.expanded.filter { $0.hasPrefix(viewId + "\|") }.map { String($0.dropFirst(viewId.count + 1)) }
             var remaining = open.count
             let finish = { self.refreshing.remove(viewId); self.rebuildRows() }
             if remaining == 0 { finish(); return }
