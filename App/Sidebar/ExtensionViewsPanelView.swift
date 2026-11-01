@@ -95,7 +95,7 @@ final class ExtensionViewsPanelView: UIView, UITableViewDataSource, UITableViewD
         didSet { if container != oldValue { updateShownViews(); if !isHidden { reloadAll() } } }
     }
     private var rows: [[Row]] = []
-    /// Items under a parent: "viewId\|handle" ("" for the top level).
+    /// Items under a parent: "viewId\u{0}handle" ("" for the top level).
     private var children: [String: [Item]] = [:]
     private var messages: [String: String] = [:]
     private var expanded: Set<String> = []
@@ -362,7 +362,7 @@ final class ExtensionViewsPanelView: UIView, UITableViewDataSource, UITableViewD
         reloadAll()
     }
 
-    private func key(_ viewId: String, _ handle: String?) -> String { viewId + "\|" + (handle ?? "") }
+    private func key(_ viewId: String, _ handle: String?) -> String { viewId + "\u{0}" + (handle ?? "") }
 
     private func reloadAll() {
         rebuildRows()
@@ -381,7 +381,7 @@ final class ExtensionViewsPanelView: UIView, UITableViewDataSource, UITableViewD
         refreshing.insert(viewId)
         fetch(viewId, nil) { [weak self] in
             guard let self else { return }
-            let open = self.expanded.filter { $0.hasPrefix(viewId + "\|") }.map { String($0.dropFirst(viewId.count + 1)) }
+            let open = self.expanded.filter { $0.hasPrefix(viewId + "\u{0}") }.map { String($0.dropFirst(viewId.count + 1)) }
             var remaining = open.count
             let finish = { self.refreshing.remove(viewId); self.rebuildRows() }
             if remaining == 0 { finish(); return }

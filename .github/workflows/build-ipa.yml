@@ -250,7 +250,9 @@ jobs:
   # cancelled ("not acquired by Runner"). Then the same commit is built again on an Intel Mac.
   fallback:
     needs: [node, build]
-    if: always() && github.event_name != 'pull_request' && (inputs.runner || 'macos-15') == 'macos-15' && (needs.node.result == 'cancelled' || needs.build.result == 'cancelled')
+    # A job that never got a runner shows to the jobs after it as failed, not cancelled; the step
+    # below checks it was the runner shortage (a failed build has nothing to retry).
+    if: always() && github.event_name != 'pull_request' && (inputs.runner || 'macos-15') == 'macos-15' && needs.build.result != 'success'
     runs-on: ubuntu-latest
     permissions:
       actions: write
