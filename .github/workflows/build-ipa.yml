@@ -8,6 +8,12 @@ on:
   pull_request:
     paths-ignore: ["tools/**", "**.md"]
   workflow_dispatch:
+    inputs:
+      runner:
+        description: Mac runner (the fallback job picks Intel when Apple silicon runners are all busy)
+        type: choice
+        options: [macos-15, macos-15-intel]
+        default: macos-15
 
 # A newer push to the same ref makes the older build pointless.
 concurrency:
@@ -20,7 +26,7 @@ jobs:
   # Once the framework is cached this job only checks for it. Its own job: it needs an older
   # Xcode than the app.
   node:
-    runs-on: macos-15
+    runs-on: ${{ inputs.runner || 'macos-15' }}
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
@@ -95,7 +101,7 @@ jobs:
 
   build:
     needs: node
-    runs-on: macos-15
+    runs-on: ${{ inputs.runner || 'macos-15' }}
     timeout-minutes: 60
     permissions:
       contents: write   # releases for version tags
@@ -106,7 +112,12 @@ jobs:
 
       # Xcode 26 has the iOS 26 SDK, which Apple Intelligence (FoundationModels) needs.
       - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_26.3.app
+        run: |
+          # Xcode 26.3, or the newest Xcode 26 the image has (the Intel image can lag behind).
+          xcode=/Applications/Xcode_26.3.app
+          [ -d "$xcode" ] || xcode=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
 
       # The git engine's tests run first: they take seconds and stop the build if, say, a
       # checkout leaves files looking changed or a push re-sends unchanged files.
@@ -234,3 +245,34 @@ jobs:
           files: dist/MobileStudio.ipa
           body: |
             Download `MobileStudio.ipa` below and install it with a sideloading tool. The [README](https://github.com/${{ github.repository }}#installing) explains how, step by step.
+
+  # GitHub's Apple silicon Macs are sometimes all busy, and a job that waits too long for one is
+  # cancelled ("not acquired by Runner"). Then the same commit is built again on an Intel Mac.
+  fallback:
+    needs: [node, build]
+    if: always() && github.event_name != 'pull_request' && (inputs.runner || 'macos-15') == 'macos-15' && (needs.node.result == 'cancelled' || needs.build.result == 'cancelled')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      checks: read
+      contents: read
+    steps:
+      - name: Build on an Intel Mac if no Apple silicon Mac was free
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN: ${{ github.run_id }}
+          REF: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          starved=
+          for id in $(gh api "repos/$REPO/actions/runs/$RUN/jobs" --jq '.jobs[] | select(.conclusion == "cancelled") | .id'); do
+            if gh api "repos/$REPO/check-runs/$id/annotations" --jq '.[].message' | grep -q "not acquired by Runner"; then starved=1; fi
+          done
+          if [ -z "$starved" ]; then echo "Cancelled for another reason (a newer push, or by hand): nothing to do."; exit 0; fi
+          # A newer commit has its own build; don't start one for this one.
+          if [ "$GITHUB_REF_TYPE" = branch ] && [ "$(gh api "repos/$REPO/commits/$REF" --jq .sha)" != "$SHA" ]; then
+            echo "$REF has moved on from $SHA: skipping."; exit 0
+          fi
+          gh workflow run build-ipa.yml --repo "$REPO" --ref "$REF" -f runner=macos-15-intel
+          echo "Started the build again on macos-15-intel."
