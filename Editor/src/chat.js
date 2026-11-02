@@ -57,6 +57,8 @@ const modelInfo = (id) => settings.models.find((m) => m.id === id) || {};
 function effectiveContext(modelId, wanted) {
   const contexts = modelInfo(modelId).contexts || [];
   if (!contexts.length) return wanted;
+  // A cloud model's context is its provider's, not a memory budget.
+  if (modelInfo(modelId).cloud) return contexts[0].tokens;
   const usable = contexts.filter((c) => c.fits).map((c) => c.tokens);
   return Math.min(wanted, usable.length ? Math.max(...usable) : 2048, Math.max(...contexts.map((c) => c.tokens)));
 }
@@ -532,6 +534,7 @@ function build() {
     api.native({ cmd: 'aiChatSelect', id: model.value }).catch(() => {});
     renderSettings();
     updateMeter();
+    if (!messages.length) render();
   });
   const options = element('button', 'chat-icon codicon', '');
   options.title = 'Chat Settings';
@@ -623,12 +626,26 @@ async function loadSettings() {
   settings = { ...settings, ...info, models: info.models || [] };
   const select = $('chat-model');
   select.replaceChildren();
-  for (const m of settings.models.filter((x) => !x.suggested)) {
+  for (const m of settings.models.filter((x) => !x.suggested && !x.cloud)) {
     const option = element('option', null, m.ready ? m.name : `${m.name} (${m.detail})`);
     option.value = m.id;
     option.disabled = !m.ready;
     option.selected = m.id === settings.selected;
     select.append(option);
+  }
+  // Cloud models the user set up with their own key: these send the conversation to the provider.
+  const cloud = settings.models.filter((x) => x.cloud);
+  if (cloud.length) {
+    const group = element('optgroup');
+    group.label = 'Cloud (sends your code to the provider)';
+    for (const m of cloud) {
+      const option = element('option', null, '☁ ' + m.name);
+      option.value = m.id;
+      option.title = m.detail;
+      option.selected = m.id === settings.selected;
+      group.append(option);
+    }
+    select.append(group);
   }
   // Suggested models not downloaded yet: picking one opens Settings → AI, where it downloads.
   const suggested = settings.models.filter((x) => x.suggested);
@@ -657,6 +674,7 @@ async function loadSettings() {
   $('chat-mode').value = settings.mode || 'edit';
   updateControls();
   renderSettings();
+  if (!messages.length && liveText == null) render();
   updateMeter();
 }
 
@@ -664,10 +682,11 @@ async function loadSettings() {
 function contextSelect(modelId, current, onChange) {
   const s = element('select');
   const contexts = modelInfo(modelId).contexts || [];
-  const k = (n) => (n >= 1024 ? n / 1024 + 'K' : String(n));
+  const k = (n) => (n < 1024 ? String(n) : n % 1024 === 0 ? n / 1024 + 'K' : Math.round(n / 1000) + 'K');
   const gb = (b) => (b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : Math.round(b / 1e6) + ' MB');
   if (modelId === 'apple' || !contexts.some((c) => c.bytes > 0)) {
-    const o = element('option', null, `${k((contexts[0] || {}).tokens || 4096)}, fixed for Apple Intelligence`);
+    const tokens = k((contexts[0] || {}).tokens || 4096);
+    const o = element('option', null, modelInfo(modelId).cloud ? `${tokens}, the cloud model's` : `${tokens}, fixed for Apple Intelligence`);
     s.append(o);
     s.disabled = true;
     return s;
@@ -730,7 +749,8 @@ function updateMeter() {
   meter.querySelector('.chat-meter-bar').style.setProperty('--share', share);
   meter.classList.toggle('warn', share > 0.7);
   const k = (n) => (n >= 1024 ? (n / 1024).toFixed(1).replace(/\.0$/, '') + 'k' : String(n));
-  meter.querySelector('.chat-meter-text').textContent = `${k(used)} / ${k(limit)} tokens`;
+  const size = limit % 1024 === 0 ? k(limit) : Math.round(limit / 1000) + 'k';   // 200K, not 195.3K
+  meter.querySelector('.chat-meter-text').textContent = `${k(used)} / ${size} tokens`;
 }
 
 function updateControls() {
@@ -921,7 +941,10 @@ function render() {
     cards.length = 0;
     log.replaceChildren(element('div', 'chat-empty',
       'Ask about your code, or tell the agent what to change: it reads, searches and edits the project, runs commands and sends research to subagents. '
-      + 'The mode below says what it may do without asking. Everything runs on this device.'));
+      + 'The mode below says what it may do without asking. '
+      + (modelInfo(settings.selected).cloud
+        ? 'This is a cloud model: your messages and the files the agent reads are sent to its provider.'
+        : 'Everything runs on this device.')));
     updateMeter();
     return;
   }

@@ -9,18 +9,20 @@ struct ChatMessage {
 }
 
 /// The Chat panel's conversations and its agent's subagents, with Apple Intelligence or a model
-/// downloaded in Settings → Advanced. Everything runs on the device; nothing is sent anywhere.
-/// Requests have ids, so several can run at once (subagents): Apple Intelligence sessions run side
-/// by side, and each local model is loaded once with its requests taking turns.
+/// downloaded in Settings → Advanced, which run on the device; or a cloud model the user set up
+/// with their own key (CloudChat), the one case where the conversation leaves the device.
+/// Requests have ids, so several can run at once (subagents): Apple Intelligence and cloud requests
+/// run side by side, and each local model is loaded once with its requests taking turns.
 final class AIChatService {
     static let shared = AIChatService()
 
     /// Loaded local models, by catalog id.
     private var engines: [String: LlamaChatEngine] = [:]
     private var cancels: [String: CompletionCancel] = [:]
-    private var appleTasks: [String: Task<Void, Never>] = [:]
+    /// Apple Intelligence and cloud requests.
+    private var tasks: [String: Task<Void, Never>] = [:]
     /// A reply is being written.
-    var isBusy: Bool { !cancels.isEmpty || !appleTasks.isEmpty }
+    var isBusy: Bool { !cancels.isEmpty || !tasks.isEmpty }
     /// A local chat model is loaded (or about to be).
     var hasEngine: Bool { !engines.isEmpty }
 
@@ -33,6 +35,8 @@ final class AIChatService {
         let contexts: [ContextSize]
         /// A suggested model that isn't downloaded yet: picking it opens Settings → AI to get it.
         var suggested = false
+        /// A cloud model: the conversation is sent to its provider.
+        var cloud = false
     }
 
     struct ContextSize {
@@ -90,15 +94,19 @@ final class AIChatService {
                                detail: "\(AIModelCatalog.suggestion(for: model) ?? model.detail) · \(model.sizeText)",
                                ready: false, contexts: [], suggested: true))
         }
+        for provider in CloudProvider.allCases where provider.isConfigured {
+            list.append(Option(choice: provider.choice, name: provider.displayName, detail: "Cloud · sends your code to \(provider.name)",
+                               ready: true, contexts: [ContextSize(tokens: provider.contextSize, bytes: 0, fits: true)], cloud: true))
+        }
         return list
     }
 
     /// Stops one request, or all of them.
     func cancel(_ id: String? = nil) {
-        let ids = id.map { [$0] } ?? Array(Set(cancels.keys).union(appleTasks.keys))
+        let ids = id.map { [$0] } ?? Array(Set(cancels.keys).union(tasks.keys))
         for id in ids {
             cancels.removeValue(forKey: id)?.cancel()
-            appleTasks.removeValue(forKey: id)?.cancel()
+            tasks.removeValue(forKey: id)?.cancel()
         }
     }
 
@@ -120,15 +128,30 @@ final class AIChatService {
                  onText: @escaping (String) -> Void, completion: @escaping (Result<String, Error>) -> Void) {
         cancel(id)
         let choice = choice ?? AppSettings.shared.chatModel
-        if choice == .appleIntelligence {
-            if let reason = AppleIntelligenceEngine.unavailableReason { return completion(.failure(Self.error(reason))) }
-            appleTasks[id] = Task { @MainActor [weak self] in
+        if let provider = CloudProvider.from(choice) {
+            tasks[id] = Task { @MainActor [weak self] in
                 do {
-                    let text = try await AppleIntelligenceEngine.chat(messages)
-                    self?.appleTasks[id] = nil
+                    let text = try await CloudChat.respond(provider, messages: messages, maxTokens: maxTokens) { text in
+                        DispatchQueue.main.async { if self?.tasks[id] != nil { onText(text) } }
+                    }
+                    self?.tasks[id] = nil
                     completion(.success(text))
                 } catch {
-                    self?.appleTasks[id] = nil
+                    self?.tasks[id] = nil
+                    completion(Task.isCancelled || error is CancellationError ? .success("") : .failure(error))
+                }
+            }
+            return
+        }
+        if choice == .appleIntelligence {
+            if let reason = AppleIntelligenceEngine.unavailableReason { return completion(.failure(Self.error(reason))) }
+            tasks[id] = Task { @MainActor [weak self] in
+                do {
+                    let text = try await AppleIntelligenceEngine.chat(messages)
+                    self?.tasks[id] = nil
+                    completion(.success(text))
+                } catch {
+                    self?.tasks[id] = nil
                     completion(Task.isCancelled ? .success("") : .failure(error))
                 }
             }

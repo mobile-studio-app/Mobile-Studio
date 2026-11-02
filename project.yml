@@ -104,7 +104,9 @@ targets:
         UIRequiresFullScreen: false
         UIApplicationSupportsIndirectInputEvents: true   # trackpad/mouse pointer events
         UIFileSharingEnabled: true                        # projects visible in Files.app
-        NSLocalNetworkUsageDescription: Test automation (Settings → Developer) lets a computer on your Wi-Fi control Mobile Studio for testing.
+        NSLocalNetworkUsageDescription: Mobile Studio connects to AI servers on your network (such as Ollama) when you set one up for Chat, and test automation (Settings → Developer) lets a computer on your Wi-Fi control it for testing.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true   # a Chat model server on the local network, often plain http
         LSSupportsOpeningDocumentsInPlace: true
         CFBundleDocumentTypes:
           - CFBundleTypeName: LOVE Game

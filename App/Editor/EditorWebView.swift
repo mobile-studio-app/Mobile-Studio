@@ -397,7 +397,7 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 let s = AppSettings.shared
                 replyHandler(["selected": s.chatModel.rawValue,
                               "models": AIChatService.shared.options.map {
-                                  ["id": $0.choice.rawValue, "name": $0.name, "detail": $0.detail, "ready": $0.ready, "suggested": $0.suggested,
+                                  ["id": $0.choice.rawValue, "name": $0.name, "detail": $0.detail, "ready": $0.ready, "suggested": $0.suggested, "cloud": $0.cloud,
                                    "contexts": $0.contexts.map { ["tokens": $0.tokens, "bytes": $0.bytes, "fits": $0.fits] }]
                               },
                               "subagentContextSize": s.subagentContextSize,

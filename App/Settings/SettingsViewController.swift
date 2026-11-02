@@ -32,7 +32,7 @@ final class SettingsViewController: UITableViewController {
         fileprivate var sections: [Section] {
             switch self {
             case .general: return [.editor, .suggestions]
-            case .ai: return [.ai, .aiMerge, .chat]
+            case .ai: return [.ai, .aiMerge, .chat, .cloud]
             case .running: return [.run, .programs]
             case .sourceControl: return [.account]
             case .advanced: return [.models, .files, .developer]
@@ -44,7 +44,7 @@ final class SettingsViewController: UITableViewController {
         var searchTerms: [String] {
             switch self {
             case .general: return ["Color Theme", "File Icon Theme", "Icons", "Font Size", "Indent Width", "Tab Size", "Word Wrap", "Auto Save", "Format on Save", "Code Suggestions", "Completion"]
-            case .ai: return ["AI Suggestions", "Apple Intelligence", "Fast AI", "Regular AI", "Download over Mobile Data", "AI Merge Conflicts", "Chat", "Models"]
+            case .ai: return ["AI Suggestions", "Apple Intelligence", "Fast AI", "Regular AI", "Download over Mobile Data", "AI Merge Conflicts", "Chat", "Models", "Cloud Models", "API Key", "Anthropic", "Claude", "OpenAI", "OpenRouter", "Ollama", "LM Studio"]
             case .running: return ["LuaJIT JIT Compiler", "Running Games", "Programs from Extensions", "Signing Certificate"]
             case .sourceControl: return ["GitHub", "Sign in", "Smart Commit"]
             case .advanced: return ["AI Models", "Download Models", "Ollama", "Llama", "Gemma", "Qwen", "Phi", "DeepSeek", "settings.json", "keybindings.json", "Keyboard Shortcuts", "Test Automation", "Pairing Code", "Developer"]
@@ -54,7 +54,7 @@ final class SettingsViewController: UITableViewController {
     }
 
     fileprivate enum Section: Int, CaseIterable {
-        case editor, suggestions, ai, aiMerge, chat, run, programs, account, models, files, developer, about
+        case editor, suggestions, ai, aiMerge, chat, cloud, run, programs, account, models, files, developer, about
     }
 
     /// Posted to open a settings file (userInfo "path") in the editor.
@@ -117,6 +117,7 @@ final class SettingsViewController: UITableViewController {
         if let section = index(.ai) { lists.append((section, aiChoices.map { Optional($0) })) }
         if let section = index(.aiMerge) { lists.append((section, mergeChoices)) }
         if let section = index(.chat) { lists.append((section, chatChoices.map { Optional($0) })) }
+        if let section = index(.cloud) { lists.append((section, CloudProvider.allCases.map { Optional($0.choice) })) }
         if let section = index(.models) { lists.append((section, AIModelCatalog.extras.map { Optional($0.choice) })) }
         return lists
     }
@@ -152,6 +153,7 @@ final class SettingsViewController: UITableViewController {
         case .ai: return aiChoices.count + 1
         case .aiMerge: return mergeChoices.count
         case .chat: return chatChoices.count
+        case .cloud: return CloudProvider.allCases.count
         case .models: return AIModelCatalog.extras.count
         case .run: return 1
         case .programs: return 1
@@ -169,6 +171,7 @@ final class SettingsViewController: UITableViewController {
         case .ai: return "AI Suggestions"
         case .aiMerge: return "AI Merge Conflicts"
         case .chat: return "Chat"
+        case .cloud: return "Cloud Models"
         case .models: return "AI Models"
         case .run: return "Running Games"
         case .programs: return "Programs from Extensions"
@@ -202,7 +205,15 @@ final class SettingsViewController: UITableViewController {
         case .chat:
             return """
                 The model the Chat panel (⌃⌘I) answers with. Apple Intelligence is built into iOS; the suggested models \
-                download when you pick them, and more are in Settings → Advanced → AI Models. Chats stay on this device.
+                download when you pick them, and more are in Settings → Advanced → AI Models. Chats stay on this \
+                device, unless you pick a cloud model (below).
+                """
+        case .cloud:
+            return """
+                Optional, and off until you add a key. A cloud model runs on its provider's servers with your own \
+                API key, which is kept in this device's Keychain. Unlike the models above, everything you send in \
+                Chat, and every file the agent reads, goes to that provider, under its terms and pricing. \
+                A Custom Server can be Ollama or LM Studio on your own network (its address ends in /v1).
                 """
         case .models:
             return """
@@ -274,6 +285,17 @@ final class SettingsViewController: UITableViewController {
             if let model = AIModelCatalog.model(for: choice), let why = AIModelCatalog.suggestion(for: model), !model.isDownloaded,
                model.isSupported, let detail = content.secondaryText {
                 content.secondaryText = "Suggested · \(why) · " + detail.replacingOccurrences(of: "\(model.detail) · ", with: "")
+            }
+        case .cloud:
+            content = UIListContentConfiguration.subtitleCell()
+            let provider = CloudProvider.allCases[indexPath.row]
+            content.text = provider.name
+            content.secondaryText = provider.isConfigured ? "\(provider.model) · set up · sends your code to \(provider.name)" : provider.detail
+            content.secondaryTextProperties.color = .secondaryLabel
+            if settings.chatModel == provider.choice {
+                cell.accessoryType = .checkmark
+            } else if !provider.isConfigured {
+                cell.accessoryView = accessoryLabel("Set Up", color: .tintColor, reusing: previousAccessory)
             }
         case .models:
             content = UIListContentConfiguration.subtitleCell()
@@ -478,6 +500,8 @@ final class SettingsViewController: UITableViewController {
             selectAI(aiChoices[indexPath.row]) { [weak self] choice in self?.settings.aiModel = choice }
         case .chat:
             selectAI(chatChoices[indexPath.row]) { [weak self] choice in self?.settings.chatModel = choice }
+        case .cloud:
+            setUpCloud(CloudProvider.allCases[indexPath.row], at: indexPath)
         case .models:
             selectAI(AIModelCatalog.extras[indexPath.row].choice) { _ in }
         case .aiMerge:
@@ -555,6 +579,58 @@ final class SettingsViewController: UITableViewController {
 
     private func reloadCertificateRow() {
         if let section = index(.programs) { tableView.reloadSections(IndexSet(integer: section), with: .none) }
+    }
+
+    /// Sets up a cloud model: its key, model and (for a custom server) address.
+    private func setUpCloud(_ provider: CloudProvider, at indexPath: IndexPath) {
+        let alert = UIAlertController(title: provider.name, message: """
+            \(provider.detail). Chat sends your messages and the files the agent reads to \(provider.name). \
+            The key is kept in this device's Keychain.
+            """, preferredStyle: .alert)
+        if provider == .custom {
+            alert.addTextField { field in
+                field.placeholder = "Address, like http://192.168.1.20:11434/v1"
+                field.text = provider.baseURL
+                field.keyboardType = .URL
+                field.autocapitalizationType = .none
+                field.autocorrectionType = .no
+            }
+        }
+        alert.addTextField { field in
+            field.placeholder = provider.modelPlaceholder
+            field.text = provider.model
+            field.autocapitalizationType = .none
+            field.autocorrectionType = .no
+        }
+        alert.addTextField { field in
+            field.placeholder = provider.needsKey ? "API key" : "API key (if the server needs one)"
+            field.text = provider.apiKey
+            field.isSecureTextEntry = true
+            field.autocapitalizationType = .none
+            field.autocorrectionType = .no
+        }
+        let save = { [weak self, weak alert] (use: Bool) in
+            guard let self, let fields = alert?.textFields else { return }
+            let values = fields.map { ($0.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
+            if provider == .custom { provider.baseURL = values[0] }
+            provider.model = values[values.count - 2]
+            provider.apiKey = values[values.count - 1]
+            if use && provider.isConfigured { self.settings.chatModel = provider.choice }
+            self.reloadAIRows()
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        if provider.isConfigured {
+            alert.addAction(UIAlertAction(title: "Remove", style: .destructive) { [weak self] _ in
+                guard let self else { return }
+                if self.settings.chatModel == provider.choice { self.settings.chatModel = .appleIntelligence }
+                if self.settings.subagentModel == provider.choice { self.settings.subagentModel = nil }
+                provider.forget()
+                self.reloadAIRows()
+            })
+        }
+        alert.addAction(UIAlertAction(title: "Save", style: .default) { _ in save(false) })
+        alert.addAction(UIAlertAction(title: "Save and Use for Chat", style: .default) { _ in save(true) })
+        present(alert, animated: true)
     }
 
     /// Picks `choice` with `apply`, downloading it first if needed.
