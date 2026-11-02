@@ -40,6 +40,10 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
         }
         NotificationCenter.default.addObserver(self, selector: #selector(breakpointsChanged), name: BreakpointStore.didChange, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(gitIndexChanged), name: GitRepository.didChange, object: nil)
+        // Back from the background: the Node.js host's connection may need mending.
+        NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.emit("appForeground", [:])
+        }
         NotificationCenter.default.addObserver(self, selector: #selector(extensionConfigurationChanged),
                                                name: ExtensionHostBridge.didChangeConfiguration, object: nil)
     }
@@ -389,6 +393,9 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 // A tab's icon from the file icon theme (nil: the built-in one).
                 let name = body["name"] as? String ?? ""
                 replyHandler(FileIconTheme.shared.dataURL(forFile: name) ?? NSNull(), nil)
+            case "nodeHostStatus":
+                // Whether Node.js's thread is still running (the page can't reach it after iOS took its socket).
+                replyHandler(["running": NodeExtensionHost.shared.isRunning], nil)
             case "nodeHostLog":
                 // The end of the Node.js extension host's log (node-host.js writes it to the temp folder).
                 let url = FileManager.default.temporaryDirectory.appendingPathComponent("mobile-studio-node-host.log")

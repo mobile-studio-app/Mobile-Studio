@@ -9,6 +9,8 @@ final class NodeExtensionHost {
     static let shared = NodeExtensionHost()
 
     private(set) var port: Int?
+    /// Node.js has started and its thread hasn't ended.
+    private(set) var isRunning = false
     /// Where JavaScript programs (the Node.js runtime) are started: the next port.
     var programPort: Int? { port.map { $0 + 1 } }
 
@@ -62,10 +64,12 @@ final class NodeExtensionHost {
             pointers.initialize(from: argv, count: argv.count)
             let code = nodeStart(Int32(arguments.count), pointers)
             NSLog("DuoCode: Node.js exited with code %d", code)
+            DispatchQueue.main.async { NodeExtensionHost.shared.isRunning = false }
         }
         thread.name = "Node.js extension host"
         thread.stackSize = 16 << 20   // V8 without JIT recurses deeply
         thread.qualityOfService = .userInitiated
+        isRunning = true
         thread.start()
         return port
     }

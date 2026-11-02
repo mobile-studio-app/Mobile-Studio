@@ -49,7 +49,7 @@ import { setupDebugConsole, showPanel, togglePanel } from './panel.js';
 import { setupProblems, problemsChanged } from './problems.js';
 import { setupTerminal, showTerminal } from './terminal.js';
 import { setupOutput } from './ext/output.js';
-import { nodeAddress, nodeJob, hostDiagnostics } from './ext/host.js';
+import { nodeAddress, nodeJob, hostDiagnostics, checkNodeHost } from './ext/host.js';
 import { addCommands } from './palette.js';
 import { customEditorsFor } from './ext/registry.js';
 import { quickPick } from './ext/ui.js';
@@ -747,6 +747,7 @@ window.duocode = {
     if (name === 'key' && payload?.name) barKey(payload.name);
     if (name === 'saveAll') save();
     if (name === 'reload') reload();
+    if (name === 'appForeground') checkNodeHost();
     if (name === 'settings') applySettings(payload);
     if (name === 'commandPalette') commandPalette();
     if (name === 'gitChanged' && current && !readOnly) loadOriginal(view, native, current);

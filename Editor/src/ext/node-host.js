@@ -88,7 +88,7 @@ fetchPreloadArgv();
 
 const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*' };
 
-http.createServer((req, res) => {
+const server = http.createServer((req, res) => {
   if (req.method === 'OPTIONS') { res.writeHead(204, cors); res.end(); return; }
   if (req.url === '/ping') { res.writeHead(200, cors); res.end('ok'); return; }
   // Live Preview of HTML pages (node-preview.js).
@@ -178,4 +178,33 @@ http.createServer((req, res) => {
   }
   res.writeHead(404, cors);
   res.end();
-}).listen(port, '127.0.0.1');
+});
+
+// iOS can take a suspended app's sockets away, and then the editor can't reach the host though
+// Node.js is still running. The server listens again when it errors, and a watchdog pings it and
+// starts it afresh when it stops answering. The interval also keeps Node's event loop alive
+// while the server is between sockets.
+function listen() {
+  server.listen(port, '127.0.0.1');
+}
+server.on('error', (e) => {
+  record(`[warning] The host's server failed (${e.code || e.message}); listening again.`);
+  setTimeout(() => { try { server.close(); } catch (err) { /* not listening */ } listen(); }, 1000);
+});
+listen();
+let misses = 0;
+setInterval(() => {
+  const ping = http.get({ host: '127.0.0.1', port, path: '/ping', timeout: 3000 }, (res) => { res.resume(); misses = 0; });
+  const missed = () => {
+    misses += 1;
+    if (misses < 2) return;
+    misses = 0;
+    record('[warning] The host stopped answering; starting its server again.');
+    try { server.closeAllConnections(); } catch (e) { /* Node without it */ }
+    server.close(() => listen());
+    // When the server was already gone, close() doesn't call back.
+    setTimeout(() => { if (!server.listening) listen(); }, 1500);
+  };
+  ping.on('timeout', () => ping.destroy(new Error('timeout')));
+  ping.on('error', missed);
+}, 10000);

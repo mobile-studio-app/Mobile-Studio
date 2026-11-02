@@ -192,14 +192,37 @@ function nodeConnection(port) {
     const body = JSON.stringify(message);
     chain = chain.then(() => fetch(base + '/in', { method: 'POST', body, headers: { 'Content-Type': 'text/plain' } })).catch(() => {});
   };
-  const events = new EventSource(base + '/out');
-  events.onmessage = (e) => { try { conn.onmessage && conn.onmessage({ data: JSON.parse(e.data) }); } catch (err) { /* ignore */ } };
-  // EventSource reconnects by itself after a blip; when /ping fails too, Node.js has stopped.
-  events.onerror = () => {
-    setTimeout(() => {
-      fetch(base + '/ping').then((r) => { if (!r.ok) throw new Error(); }).catch(() => { events.close(); nodeHostStopped(); });
-    }, 1000);
+  let events = null;
+  const open = () => {
+    events = new EventSource(base + '/out');
+    events.onmessage = (e) => { try { conn.onmessage && conn.onmessage({ data: JSON.parse(e.data) }); } catch (err) { /* ignore */ } };
+    events.onerror = () => checkHealth();
   };
+  // EventSource reconnects by itself after a blip. When the host doesn't answer, it may be that
+  // iOS took its socket while the app was in the background (the host listens again by itself), so
+  // the page keeps trying for a couple of minutes, and only reports Node.js stopped when the app
+  // says its thread has ended, or it never comes back.
+  let checking = false;
+  const ping = () => fetch(base + '/ping').then((r) => r.ok, () => false);
+  async function checkHealth() {
+    if (checking || nodeStopped) return;
+    checking = true;
+    for (let wait = 1000, waited = 0; waited < 120000; waited += wait, wait = Math.min(wait * 2, 15000)) {
+      await new Promise((r) => setTimeout(r, wait));
+      if (await ping()) {
+        if (events.readyState === EventSource.CLOSED) open();
+        checking = false;
+        return;
+      }
+      const status = await app.native({ cmd: 'nodeHostStatus' }).catch(() => null);
+      if (status && status.running === false) break;
+    }
+    checking = false;
+    events.close();
+    nodeHostStopped();
+  }
+  conn.checkHealth = checkHealth;
+  open();
   conn.terminate = () => events.close();
   return conn;
 }
@@ -264,6 +287,11 @@ export async function startHost(api) {
   if (!hosts.length) return;
   const path = app.current();
   if (path) didOpen(path, app.view.state.doc.toString());
+}
+
+/** The app came back to the foreground: the Node.js host's connection is checked (and mended). */
+export function checkNodeHost() {
+  if (nodePort && nodePort.checkHealth) nodePort.checkHealth();
 }
 
 export function stopHost() {
