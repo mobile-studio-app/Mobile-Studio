@@ -542,14 +542,14 @@ enum AutomationDriver {
 
     private static func state() -> [String: Any] {
         let project = ProjectStore.shared.currentProject
-        let git = GitManager.shared
-        let status = git.status(in: project)
+        let git = try? GitRepository.open(project)
+        let status = git?.status() ?? GitStatus()
         let files = { (list: [GitChangedFile]) in list.map { "\($0.status.rawValue) \($0.path)" } }
         return [
             "project": project.lastPathComponent,
-            "isRepo": git.isGitRepo(at: project),
+            "isRepo": git != nil,
             "branch": status.currentBranch,
-            "branches": git.branches(in: project),
+            "branches": git?.branches().map(\.name) ?? [],
             "staged": files(status.stagedFiles),
             "changes": files(status.changedFiles),
             "conflicts": files(status.mergeConflicts),
@@ -557,7 +557,7 @@ enum AutomationDriver {
             "ahead": status.aheadCount,
             "hasUpstream": status.hasUpstream,
             "stashes": status.stashCount,
-            "history": git.history(in: project, limit: 10).map { "\($0.id) \($0.message)" },
+            "history": git?.log(limit: 10).map { "\($0.shortId) \($0.summary)" } ?? [],
             "aiReady": AICompletionService.shared.isReady,
             "aiMergeReady": AICompletionService.shared.isMergeReady,
             "keyboard": elements().contains { $0.view.isFirstResponder },
@@ -591,24 +591,29 @@ enum AutomationDriver {
     /// Scenario setup without tapping through the UI: {"op": "commit", "message": "..."} and so on.
     private static func git(_ body: [String: Any], reply: @escaping Reply) {
         let project = ProjectStore.shared.currentProject
-        let git = GitManager.shared
         let name = body["name"] as? String ?? ""
         do {
             var result: Any = true
-            switch body["op"] as? String ?? "" {
-            case "init": try git.initRepo(at: project)
-            case "commit": result = try git.commit(message: body["message"] as? String ?? "Automation", all: true, in: project).id
-            case "branch": try git.createBranch(name, checkout: body["checkout"] as? Bool ?? true, in: project)
-            case "checkout": try git.checkout(name, force: body["force"] as? Bool ?? false, in: project)
+            let op = body["op"] as? String ?? ""
+            if op == "init" {
+                try GitRepository.create(at: project)
+                NotificationCenter.default.post(name: ProjectStore.filesDidChange, object: nil)
+                return reply(HTTPResponse.json(["ok": true, "result": true]))
+            }
+            let git = try GitRepository.open(project)
+            switch op {
+            case "commit": result = try git.commit(message: body["message"] as? String ?? "Automation", stageAll: true).id
+            case "branch": try git.createBranch(name, checkout: body["checkout"] as? Bool ?? true)
+            case "checkout": try git.checkout(name, force: body["force"] as? Bool ?? false)
             case "merge":
-                switch try git.merge(name, in: project) {
+                switch try git.merge(name) {
                 case .upToDate: result = "upToDate"
                 case .fastForward: result = "fastForward"
                 case .merged: result = "merged"
                 case .conflicts(let paths): result = ["conflicts": paths]
                 }
-            case "abortMerge": try git.abortMerge(in: project)
-            case "deleteBranch": try git.deleteBranch(name, force: body["force"] as? Bool ?? false, in: project)
+            case "abortMerge": try git.abortMerge()
+            case "deleteBranch": try git.deleteBranch(name, force: body["force"] as? Bool ?? false)
             default: return reply(HTTPResponse.error("Unknown op. Use init, commit, branch, checkout, merge, abortMerge or deleteBranch."))
             }
             // Views refresh as they do after an edit, and the editor re-reads the open file.

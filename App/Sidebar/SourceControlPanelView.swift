@@ -36,8 +36,8 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
         case group(Group, count: Int)
         case folder(Group, path: String, name: String, depth: Int)
         case file(Group, GitChangedFile, depth: Int)
-        case commit(GitCommit, index: Int)
-        case commitFile(GitCommit, GitChangedFile)
+        case commit(GitCommit, index: Int, lanes: GitGraphRow)
+        case commitFile(GitCommit, GitChangedFile, lanes: [Int])
         case graphMessage(String)
     }
 
@@ -45,6 +45,7 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
     private var isRepo = false
     private var status = GitStatus()
     private var commits: [GitCommit] = []
+    private var lanes: [GitGraphRow] = []
     private var changeRows: [Row] = []
     private var graphRows: [Row] = []
     private var collapsed: Set<String> = []
@@ -83,6 +84,9 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// The project's repository, opened for this call (nil when it isn't one).
+    private var repo: GitRepository? { try? GitRepository.open(project) }
 
     private func setupViews() {
         messageView.onSubmit = { [weak self] in self?.commit() }
@@ -207,18 +211,21 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
             UIAction(title: "Sync", image: Codicon.sync.image()) { [weak self] _ in self?.sync() },
             UIAction(title: "Pull", image: Codicon.repoPull.image()) { [weak self] _ in self?.pull() },
             UIAction(title: "Push", image: Codicon.repoPush.image()) { [weak self] _ in self?.push() },
+            UIAction(title: "Force Push", attributes: .destructive) { [weak self] _ in self?.confirmForcePush() },
+            UIAction(title: "Fetch", image: Codicon.refresh.image()) { [weak self] _ in self?.fetch(prune: false) },
+            UIAction(title: "Fetch (Prune)") { [weak self] _ in self?.fetch(prune: true) },
         ])
+        let tagMenu = UIMenu(title: "Tags", children: tagMenuItems())
         let branchMenu = UIMenu(title: "Branch", children: branchMenuItems())
         let stashMenu = UIMenu(title: "Stash", children: stashMenuItems())
         var mergeItems: [UIMenuElement] = []
-        if status.mergingBranch != nil {
-            mergeItems.append(UIAction(title: "Abort Merge", image: Codicon.discard.image(), attributes: .destructive) { [weak self] _ in
+        if status.state != .none {
+            let title = status.state == .reverting ? "Abort Revert" : status.state == .cherryPicking ? "Abort Cherry-Pick" : "Abort Merge"
+            mergeItems.append(UIAction(title: title, image: Codicon.discard.image(), attributes: .destructive) { [weak self] _ in
                 self?.abortMerge()
             })
         }
-        let remoteMenu = UIMenu(title: "Remote", children: [
-            UIAction(title: status.remoteURL == nil ? "Add Remote..." : "Change Remote URL...") { [weak self] _ in self?.promptRemote(then: nil) },
-        ])
+        let remoteMenu = UIMenu(title: "Remote", children: remoteMenuItems())
         let showPullRequests = { (create: Bool) in
             NotificationCenter.default.post(name: PullRequestsViewController.showRequest, object: nil, userInfo: ["create": create])
         }
@@ -234,9 +241,10 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
             UIMenu(options: .displayInline, children: [
                 UIAction(title: "Pull", image: Codicon.repoPull.image()) { [weak self] _ in self?.pull() },
                 UIAction(title: "Push", image: Codicon.repoPush.image()) { [weak self] _ in self?.push() },
+                UIAction(title: "Fetch", image: Codicon.refresh.image()) { [weak self] _ in self?.fetch(prune: false) },
                 checkout,
             ]),
-            UIMenu(options: .displayInline, children: mergeItems + [commitMenu, changesMenu, syncMenu, branchMenu, remoteMenu, stashMenu]),
+            UIMenu(options: .displayInline, children: mergeItems + [commitMenu, changesMenu, syncMenu, branchMenu, remoteMenu, stashMenu, tagMenu]),
             pullRequestMenu,
             UIMenu(options: .displayInline, children: [viewMenu]),
         ]
@@ -252,7 +260,7 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
         ]
     }
 
-    private var canUndoLastCommit: Bool { commits.first?.isOutgoing == true && commits.first?.hasSnapshot == true }
+    private var canUndoLastCommit: Bool { status.head != nil }
 
     private func setTreeView(_ tree: Bool) {
         viewAsTree = tree
@@ -265,17 +273,21 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
         refreshGeneration += 1
         let generation = refreshGeneration
         let root = project
-        // Hashing can take a moment in big projects, so it happens off the main thread.
+        // Status and history can take a moment in big repositories, so they're read off the main thread.
         DispatchQueue.global(qos: .userInitiated).async {
-            let repo = GitManager.shared.isGitRepo(at: root)
-            let status = GitManager.shared.status(in: root)
-            let commits = GitManager.shared.history(in: root)
+            let repository = try? GitRepository.open(root)
+            let status = repository?.status() ?? GitStatus()
+            // Every branch's history, as the Graph shows it.
+            let commits = repository?.log(all: true, limit: 400) ?? []
+            let lanes = GitGraph.layout(commits)
             DispatchQueue.main.async {
                 guard generation == self.refreshGeneration else { return }
                 let wasRepo = self.isRepo
-                self.isRepo = repo
+                self.isRepo = repository != nil
+                let repo = self.isRepo
                 self.status = status
                 self.commits = commits
+                self.lanes = lanes
                 self.commitFiles.removeAll()
                 self.rebuildRows()
                 self.onStatusChanged?(status)
@@ -310,12 +322,14 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
             if commits.isEmpty {
                 graphRows.append(.graphMessage("No commits yet."))
             }
+            let repo = expandedCommits.isEmpty ? nil : self.repo
             for (index, commit) in commits.enumerated() {
-                graphRows.append(.commit(commit, index: index))
+                let row = lanes[index]
+                graphRows.append(.commit(commit, index: index, lanes: row))
                 guard expandedCommits.contains(commit.id) else { continue }
-                let files = commitFiles[commit.id] ?? GitManager.shared.changes(inCommit: commit.id, in: project)
+                let files = commitFiles[commit.id] ?? repo?.changes(inCommit: commit.id) ?? []
                 commitFiles[commit.id] = files
-                files.forEach { graphRows.append(.commitFile(commit, $0)) }
+                files.forEach { graphRows.append(.commitFile(commit, $0, lanes: row.below)) }
             }
         }
         tableView.reloadData()
@@ -357,12 +371,12 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
     private enum After { case none, push, sync }
 
     private func updateActionButton() {
-        let ahead = status.aheadCount
-        if isRepo && status.isClean && !commits.isEmpty && (status.remoteURL == nil || !status.hasUpstream) {
+        let ahead = status.aheadCount, behind = status.behindCount
+        if isRepo && status.isClean && status.head != nil && status.branch != nil && (status.remoteURL == nil || !status.hasUpstream) {
             syncButton.setTitle("Publish Branch", icon: .cloudUpload)
             showSync(true)
-        } else if isRepo && status.isClean && ahead > 0 {
-            syncButton.setTitle("Sync Changes \(ahead)↑", icon: .sync)
+        } else if isRepo && status.isClean && (ahead > 0 || behind > 0) {
+            syncButton.setTitle("Sync Changes " + [behind > 0 ? "\(behind)↓" : nil, ahead > 0 ? "\(ahead)↑" : nil].compactMap { $0 }.joined(separator: " "), icon: .sync)
             showSync(true)
         } else {
             showSync(false)
@@ -399,7 +413,7 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
         saveEdits { [weak self] in
             guard let self else { return }
             let message = self.messageView.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            let status = GitManager.shared.status(in: self.project)
+            let status = self.repo?.status() ?? GitStatus()
             self.status = status
             if message.isEmpty && !amend {
                 self.setValidation("Enter a commit message to commit.")
@@ -436,7 +450,8 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
 
     private func performCommit(message: String, all: Bool, amend: Bool, then after: After) {
         do {
-            try GitManager.shared.commit(message: message, all: all, amend: amend, in: project)
+            guard let repo else { return }
+            try repo.commit(message: message, stageAll: all, amend: amend)
             messageView.text = ""
             messageView.resignFirstResponder()
             setValidation(nil)
@@ -453,7 +468,8 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
 
     private func undoLastCommit() {
         do {
-            let message = try GitManager.shared.undoLastCommit(in: project)
+            guard let repo else { return }
+            let message = try repo.undoLastCommit()
             if messageView.text.isEmpty { messageView.text = message }
             refresh()
         } catch {
@@ -466,27 +482,33 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
     private func stage(_ paths: [String]) {
         saveEdits { [weak self] in
             guard let self else { return }
-            self.perform { try GitManager.shared.stage(paths, in: self.project) }
+            self.perform { try $0.stage(paths) }
         }
     }
 
     private func unstage(_ paths: [String]) {
-        perform { try GitManager.shared.unstage(paths, in: project) }
+        perform { try $0.unstage(paths) }
     }
 
     private func stageAll() {
         saveEdits { [weak self] in
             guard let self else { return }
-            self.perform { try GitManager.shared.stageAll(in: self.project) }
+            self.perform { try $0.stageAll() }
         }
     }
 
     private func unstageAll() {
-        perform { try GitManager.shared.unstageAll(in: project) }
+        perform { try $0.unstageAll() }
     }
 
-    private func perform(_ work: () throws -> Void) {
-        do { try work() } catch { showAlert(error.localizedDescription) }
+    /// Runs `work` on the repository, showing what went wrong, then refreshes.
+    private func perform(_ work: (GitRepository) throws -> Void) {
+        do {
+            guard let repo else { throw GitError("This project isn't a Git repository.") }
+            try work(repo)
+        } catch {
+            showAlert(error.localizedDescription)
+        }
         refresh()
     }
 
@@ -518,9 +540,7 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
             guard let self else { return }
             // Write the editor's edits first, so a discarded file isn't saved again afterwards.
             self.saveEdits {
-                self.perform {
-                    for file in files { try GitManager.shared.discardChanges(for: file.path, in: self.project) }
-                }
+                self.perform { try $0.discard(files) }
                 self.onFilesChangedOnDisk?()
             }
         })
@@ -531,43 +551,48 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
 
     // MARK: Checkout
 
-    /// "Checkout to...": new branch, local branches, then GitHub's branches (fetched when the menu opens).
+    /// "Checkout to...": new branch, local branches, remote branches (from the last fetch) and tags.
     private func checkoutItems(_ done: @escaping ([UIMenuElement]) -> Void) {
-        let local = GitManager.shared.branches(in: project)
-        let current = status.currentBranch
+        let repo = self.repo
+        let local = repo?.branches() ?? []
+        let remote = (repo?.branches(remote: true) ?? []).filter { branch in
+            !local.contains { $0.upstream == branch.name || $0.name == branch.name.split(separator: "/", maxSplits: 1).last.map(String.init) }
+        }
+        let tags = repo?.tags() ?? []
+        let current = status.branch
         var items: [UIMenuElement] = [
             UIMenu(options: .displayInline, children: [
                 UIAction(title: "Create New Branch...", image: Codicon.add.image()) { [weak self] _ in self?.promptNewBranch(from: nil) },
-                UIMenu(title: "Create New Branch From...", children: local.map { name in
-                    UIAction(title: name) { [weak self] _ in self?.promptNewBranch(from: name) }
+                UIMenu(title: "Create New Branch From...", children: (local + remote).map { branch in
+                    UIAction(title: branch.name) { [weak self] _ in self?.promptNewBranch(from: branch.name) }
                 }),
             ]),
-            UIMenu(title: "Branches", options: .displayInline, children: local.map { name in
-                UIAction(title: name, image: Codicon.gitBranch.image(), state: name == current ? .on : .off) { [weak self] _ in
-                    self?.checkout(name)
+            UIMenu(title: "Branches", options: .displayInline, children: local.map { branch in
+                UIAction(title: branch.name, subtitle: branch.summary, image: Codicon.gitBranch.image(), state: branch.name == current ? .on : .off) { [weak self] _ in
+                    self?.checkout(branch.name)
                 }
             }),
         ]
-        guard status.remoteURL != nil, GitAccountManager.shared.isSignedIn else { return done(items) }
-        GitManager.shared.remoteBranches(in: project) { [weak self] result in
-            let remote = ((try? result.get()) ?? []).filter { !local.contains($0) }
-            if !remote.isEmpty {
-                items.append(UIMenu(title: "Remote Branches", options: .displayInline, children: remote.map { name in
-                    UIAction(title: "origin/\(name)", image: Codicon.cloudUpload.image()) { [weak self] _ in self?.checkoutRemote(name) }
-                }))
-            }
-            _ = self
-            done(items)
+        if !remote.isEmpty {
+            items.append(UIMenu(title: "Remote Branches", options: .displayInline, children: remote.map { branch in
+                UIAction(title: branch.name, subtitle: branch.summary, image: Codicon.cloudUpload.image()) { [weak self] _ in self?.checkoutRemote(branch.name) }
+            }))
         }
+        if !tags.isEmpty {
+            items.append(UIMenu(title: "Tags", options: .displayInline, children: tags.prefix(30).map { tag in
+                UIAction(title: tag.name, image: Codicon.tag.image()) { [weak self] _ in self?.checkout(commit: tag.target, title: tag.name) }
+            }))
+        }
+        done(items)
     }
 
     private func checkout(_ branch: String, force: Bool = false) {
         saveEdits { [weak self] in
             guard let self else { return }
             do {
-                try GitManager.shared.checkout(branch, force: force, in: self.project)
+                try self.repo?.checkout(branch, force: force)
                 self.didSwitchBranch()
-            } catch let error as NSError where error.code == GitManager.checkoutConflictCode {
+            } catch let error as GitError where error.isConflict {
                 self.confirmCheckoutConflict(branch, error: error)
             } catch {
                 self.showAlert(error.localizedDescription)
@@ -575,44 +600,73 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
         }
     }
 
+    /// A commit (or tag) checked out without a branch: a detached HEAD.
+    private func checkout(commit id: String, title: String) {
+        saveEdits { [weak self] in
+            guard let self else { return }
+            do {
+                try self.repo?.checkout(commit: id)
+                self.didSwitchBranch()
+                self.toast("Checked out \(title). You're not on a branch: create one to keep commits you make here.")
+            } catch let error as GitError where error.isConflict {
+                self.showAlert("Your local changes would be overwritten: commit or stash them first.\n\n" + error.paths.joined(separator: "\n"))
+            } catch {
+                self.showAlert(error.localizedDescription)
+            }
+        }
+    }
+
     /// VS Code's choices when local changes are in the way of a checkout.
-    private func confirmCheckoutConflict(_ branch: String, error: NSError) {
-        let paths = error.userInfo["paths"] as? [String] ?? []
+    private func confirmCheckoutConflict(_ branch: String, error: GitError) {
         let alert = UIAlertController(title: "Your local changes would be overwritten by checkout.",
-                                      message: paths.joined(separator: "\n"), preferredStyle: .alert)
+                                      message: error.paths.joined(separator: "\n"), preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "Stash & Checkout", style: .default) { [weak self] _ in
             guard let self else { return }
             do {
-                try GitManager.shared.stash(in: self.project)
-                try GitManager.shared.checkout(branch, in: self.project)
+                try self.repo?.stash()
+                if branch.contains("/"), !(self.repo?.branches().contains { $0.name == branch } ?? false) {
+                    try self.repo?.checkoutRemote(branch)
+                } else {
+                    try self.repo?.checkout(branch)
+                }
                 self.didSwitchBranch()
             } catch {
                 self.showAlert(error.localizedDescription)
                 self.didSwitchBranch()
             }
         })
-        alert.addAction(UIAlertAction(title: "Force Checkout", style: .destructive) { [weak self] _ in self?.checkout(branch, force: true) })
+        alert.addAction(UIAlertAction(title: "Force Checkout", style: .destructive) { [weak self] _ in
+            guard let self else { return }
+            if branch.contains("/"), !(self.repo?.branches().contains { $0.name == branch } ?? false) {
+                self.perform { try $0.checkoutRemote(branch, force: true) }
+                self.onFilesChangedOnDisk?()
+            } else {
+                self.checkout(branch, force: true)
+            }
+        })
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         presenter?.present(alert, animated: true)
     }
 
+    /// Checks out a remote branch ("origin/feature") as a local one following it. A bare name (a
+    /// pull request's branch) is fetched from origin first.
     private func checkoutRemote(_ name: String) {
         guard !isBusy else { return }
+        let fetchFirst = !name.contains("/") || !(repo?.branches(remote: true).contains { $0.name == name } ?? false)
+        let remoteName = name.contains("/") ? name : "origin/\(name)"
         saveEdits { [weak self] in
             guard let self else { return }
-            self.isBusy = true
-            GitManager.shared.checkoutRemoteBranch(name, in: self.project) { result in
-                self.isBusy = false
-                switch result {
-                case .success:
-                    self.didSwitchBranch()
-                case .failure(let error as NSError) where error.code == GitManager.checkoutConflictCode:
-                    self.refresh()
-                    self.confirmCheckoutConflict(name, error: error)
-                case .failure(let error):
-                    self.refresh()
-                    self.showGitError(error)
+            self.network("Checking out \(remoteName)", { repo, transfer in
+                if fetchFirst { try repo.fetch(String(remoteName.split(separator: "/").first ?? "origin"), transfer: transfer) }
+                try repo.checkoutRemote(remoteName)
+            }, failed: { error in
+                if let error = error as? GitError, error.isConflict {
+                    self.confirmCheckoutConflict(remoteName, error: error)
+                    return true
                 }
+                return false
+            }) {
+                self.didSwitchBranch()
             }
         }
     }
@@ -625,10 +679,17 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
 
     private func updateBranchButton() {
         var title = status.currentBranch
+        if status.branch == nil && status.head != nil { title += " (detached)" }
         if !status.isClean { title += "*" }
         if let merging = status.mergingBranch { title += "  (merging \(merging))" }
+        if status.state == .reverting { title += "  (reverting)" }
+        if status.state == .cherryPicking { title += "  (cherry-picking)" }
         let text = NSMutableAttributedString(attributedString: Codicon.gitBranch.attributed(14, color: VS.description))
         text.append(NSAttributedString(string: " " + title, attributes: [.font: VS.font(12), .foregroundColor: VS.description]))
+        if status.behindCount > 0 {
+            text.append(NSAttributedString(string: "  \(status.behindCount)", attributes: [.font: VS.font(12), .foregroundColor: VS.description]))
+            text.append(Codicon.arrowDown.attributed(13, color: VS.description))
+        }
         if status.aheadCount > 0 {
             text.append(NSAttributedString(string: "  \(status.aheadCount)", attributes: [.font: VS.font(12), .foregroundColor: VS.description]))
             text.append(Codicon.arrowUp.attributed(13, color: VS.description))
@@ -643,14 +704,16 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
     // MARK: Branch
 
     private func branchMenuItems() -> [UIMenuElement] {
-        let current = status.currentBranch
-        let others = GitManager.shared.branches(in: project).filter { $0 != current }
+        let repo = self.repo
+        let all = repo?.branches() ?? []
+        let others = all.map(\.name).filter { $0 != status.branch }
+        let remote = (repo?.branches(remote: true) ?? []).map(\.name)
         var items: [UIMenuElement] = [
-            UIMenu(title: "Merge Branch...", image: Codicon.gitBranch.image(), children: others.map { name in
+            UIMenu(title: "Merge Branch...", image: Codicon.gitBranch.image(), children: (others + remote).map { name in
                 UIAction(title: name) { [weak self] _ in self?.merge(name) }
             }),
             UIAction(title: "Create Branch...", image: Codicon.add.image()) { [weak self] _ in self?.promptNewBranch(from: nil) },
-            UIMenu(title: "Create Branch From...", children: GitManager.shared.branches(in: project).map { name in
+            UIMenu(title: "Create Branch From...", children: (all.map(\.name) + remote).map { name in
                 UIAction(title: name) { [weak self] _ in self?.promptNewBranch(from: name) }
             }),
             UIAction(title: "Rename Branch...", image: Codicon.edit.image()) { [weak self] _ in self?.promptRenameBranch() },
@@ -677,8 +740,7 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
             guard let self, let name = alert.textFields?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { return }
             self.saveEdits {
                 do {
-                    let start = source.flatMap { GitManager.shared.tip(of: $0, in: self.project) }
-                    try GitManager.shared.createBranch(name, from: start, in: self.project)
+                    try self.repo?.createBranch(name, at: source)
                     self.didSwitchBranch()
                 } catch {
                     self.showAlert(error.localizedDescription)
@@ -689,7 +751,7 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
     }
 
     private func promptRenameBranch() {
-        let current = status.currentBranch
+        guard let current = status.branch else { return showAlert("You're not on a branch.") }
         let alert = UIAlertController(title: "Rename Branch", message: "Please provide a new name for '\(current)'.", preferredStyle: .alert)
         alert.addTextField { field in
             field.text = current
@@ -699,22 +761,22 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         alert.addAction(UIAlertAction(title: "Rename", style: .default) { [weak self] _ in
             guard let self, let name = alert.textFields?.first?.text, !name.isEmpty else { return }
-            self.perform { try GitManager.shared.renameBranch(current, to: name, in: self.project) }
+            self.perform { try $0.renameBranch(current, to: name) }
         })
         presenter?.present(alert, animated: true)
     }
 
     private func confirmDeleteBranch(_ name: String) {
         do {
-            try GitManager.shared.deleteBranch(name, in: project)
+            try repo?.deleteBranch(name)
             refresh()
-        } catch let error as NSError where error.code == 409 {
+        } catch let error as GitError where error.code == GitError.notMerged {
             let alert = UIAlertController(title: "The branch '\(name)' is not fully merged. Delete anyway?",
-                                          message: "Its commits aren't on another branch or on GitHub, so they'll be lost.", preferredStyle: .alert)
+                                          message: "Its commits aren't on another branch or a remote, so they'll be lost.", preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
             alert.addAction(UIAlertAction(title: "Delete Branch", style: .destructive) { [weak self] _ in
                 guard let self else { return }
-                self.perform { try GitManager.shared.deleteBranch(name, force: true, in: self.project) }
+                self.perform { try $0.deleteBranch(name, force: true) }
             })
             presenter?.present(alert, animated: true)
         } catch {
@@ -728,24 +790,30 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
         saveEdits { [weak self] in
             guard let self else { return }
             do {
-                switch try GitManager.shared.merge(branch, in: self.project) {
-                case .upToDate:
-                    self.toast("Already up to date.")
-                case .fastForward, .merged:
-                    self.didSwitchBranch()
-                case .conflicts(let paths):
-                    self.didSwitchBranch()
-                    self.messageView.text = GitManager.shared.mergeMessage(in: self.project) ?? ""
-                    self.showAlert("Merging '\(branch)' left conflicts in \(paths.joined(separator: ", ")). Edit each file to keep what you want (remove the <<<<<<<, ======= and >>>>>>> lines), stage it, then commit.")
-                }
+                guard let repo = self.repo else { return }
+                self.showMergeResult(try repo.merge(branch), what: "Merging '\(branch)'")
             } catch {
                 self.showAlert(error.localizedDescription)
             }
         }
     }
 
+    /// After a merge, pull, revert or cherry-pick.
+    private func showMergeResult(_ result: GitMergeResult, what: String) {
+        switch result {
+        case .upToDate:
+            toast("Already up to date.")
+        case .fastForward, .merged:
+            didSwitchBranch()
+        case .conflicts(let paths):
+            didSwitchBranch()
+            messageView.text = repo?.mergeMessage ?? ""
+            showAlert("\(what) left conflicts in \(paths.joined(separator: ", ")). Edit each file to keep what you want (or open it to use the merge editor), stage it, then commit.")
+        }
+    }
+
     private func abortMerge() {
-        perform { try GitManager.shared.abortMerge(in: project) }
+        perform { try $0.abortMerge() }
         messageView.text = ""
         onFilesChangedOnDisk?()
     }
@@ -753,7 +821,7 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
     // MARK: Stash
 
     private func stashMenuItems() -> [UIMenuElement] {
-        let stashes = GitManager.shared.stashes(in: project)
+        let stashes = repo?.stashes() ?? []
         let none: UIMenuElement.Attributes = stashes.isEmpty ? [.disabled] : []
         let list = { (title: String, action: @escaping (Int) -> Void) -> UIMenu in
             UIMenu(title: title, children: stashes.map { stash in
@@ -768,7 +836,7 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
             list("Apply Stash...") { [weak self] index in self?.applyStash(index, drop: false) },
             list("Drop Stash...") { [weak self] index in
                 guard let self else { return }
-                self.perform { try GitManager.shared.dropStash(index, in: self.project) }
+                self.perform { try $0.dropStash(index) }
             },
             UIAction(title: "Drop All Stashes...", attributes: stashes.isEmpty ? [.disabled, .destructive] : [.destructive]) { [weak self] _ in
                 self?.confirmDropAllStashes()
@@ -784,7 +852,7 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
             guard let self else { return }
             let message = alert.textFields?.first?.text ?? ""
             self.saveEdits {
-                self.perform { try GitManager.shared.stash(message: message, in: self.project) }
+                self.perform { try $0.stash(message: message) }
                 self.onFilesChangedOnDisk?()
             }
         })
@@ -794,29 +862,56 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
     private func applyStash(_ index: Int, drop: Bool) {
         saveEdits { [weak self] in
             guard let self else { return }
-            self.perform { try GitManager.shared.applyStash(index, drop: drop, in: self.project) }
+            self.perform { try $0.applyStash(index, drop: drop) }
             self.onFilesChangedOnDisk?()
         }
     }
 
     private func confirmDropAllStashes() {
-        let count = GitManager.shared.stashes(in: project).count
+        let count = repo?.stashes().count ?? 0
         let alert = UIAlertController(title: "Are you sure you want to drop ALL stashes?",
                                       message: "There \(count == 1 ? "is 1 stash" : "are \(count) stashes") that will be dropped. This can't be undone.",
                                       preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         alert.addAction(UIAlertAction(title: "Drop All Stashes", style: .destructive) { [weak self] _ in
             guard let self else { return }
-            self.perform { try GitManager.shared.dropAllStashes(in: self.project) }
+            self.perform { try $0.dropAllStashes() }
         })
         presenter?.present(alert, animated: true)
     }
 
-    private func promptRemote(then: (() -> Void)?) {
-        let alert = UIAlertController(title: status.remoteURL == nil ? "Add Remote" : "Change Remote",
-                                      message: "The GitHub repository to push to and pull from.", preferredStyle: .alert)
-        alert.addTextField { [weak self] field in
-            field.text = self?.status.remoteURL
+    private func remoteMenuItems() -> [UIMenuElement] {
+        let remotes = repo?.remotes() ?? []
+        var items: [UIMenuElement] = [
+            UIAction(title: remotes.isEmpty ? "Add Remote..." : "Change Remote URL...", image: Codicon.edit.image()) { [weak self] _ in
+                self?.promptRemote(then: nil)
+            },
+            UIAction(title: "Add Another Remote...", image: Codicon.add.image()) { [weak self] _ in self?.promptRemote(name: nil, then: nil) },
+        ]
+        if !remotes.isEmpty {
+            items.append(UIMenu(title: "Remove Remote...", image: Codicon.trash.image(), children: remotes.map { remote in
+                UIAction(title: remote.name, subtitle: remote.url, attributes: .destructive) { [weak self] _ in
+                    self?.perform { try $0.removeRemote(remote.name) }
+                }
+            }))
+        }
+        return items
+    }
+
+    /// Adds or changes a remote (origin unless named; nil `name` asks for one).
+    private func promptRemote(name: String? = "origin", then: (() -> Void)?) {
+        let existing = name.flatMap { repo?.remoteURL($0) }
+        let alert = UIAlertController(title: existing == nil ? "Add Remote" : "Change Remote",
+                                      message: "The repository to push to and pull from: GitHub, GitLab, or any Git server's HTTPS address.", preferredStyle: .alert)
+        if name == nil {
+            alert.addTextField { field in
+                field.placeholder = "Name, like upstream"
+                field.autocapitalizationType = .none
+                field.autocorrectionType = .no
+            }
+        }
+        alert.addTextField { field in
+            field.text = existing
             field.placeholder = "https://github.com/owner/repo"
             field.autocapitalizationType = .none
             field.autocorrectionType = .no
@@ -824,9 +919,10 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
         }
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self] _ in
-            guard let self, let url = alert.textFields?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines), !url.isEmpty else { return }
-            GitManager.shared.setRemoteURL(url, in: self.project)
-            self.refresh()
+            guard let self, let fields = alert.textFields, let url = fields.last?.text?.trimmingCharacters(in: .whitespacesAndNewlines), !url.isEmpty else { return }
+            let remoteName = name ?? fields.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !remoteName.isEmpty else { return }
+            self.perform { try $0.setRemote(remoteName, url: url) }
             then?()
         })
         presenter?.present(alert, animated: true)
@@ -834,7 +930,7 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
 
     private func initializeRepository() {
         do {
-            try GitManager.shared.initRepo(at: project)
+            try GitRepository.create(at: project)
         } catch {
             showAlert(error.localizedDescription)
         }
@@ -844,45 +940,77 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
 
     // MARK: - Pull, push, sync
 
-    private func pull(then next: (() -> Void)? = nil) {
+    /// Runs network work off the main thread with the progress bar, then `done` on the main one.
+    /// A sign-in problem offers GitHub's sign-in or asks for the host's login, then tries again;
+    /// `failed` can handle other errors (true when it did).
+    private func network(_ what: String, _ work: @escaping (GitRepository, GitTransfer) throws -> Void,
+                         failed: ((Error) -> Bool)? = nil, done: @escaping () -> Void) {
         guard !isBusy else { return }
-        saveEdits { [weak self] in
-            guard let self else { return }
-            self.isBusy = true
-            GitManager.shared.pull(in: self.project) { result in
+        isBusy = true
+        let root = project
+        DispatchQueue.global(qos: .userInitiated).async {
+            let transfer = GitTransfer()
+            var failure: Error?
+            do { try work(try GitRepository.open(root), transfer) } catch { failure = error }
+            DispatchQueue.main.async {
                 self.isBusy = false
-                switch result {
-                case .success(let count):
-                    if count > 0 { self.onFilesChangedOnDisk?() }
-                    self.refresh()
-                    if let next { next() } else if count == 0 { self.toast("Already up to date.") }
-                case .failure(let error):
-                    self.refresh()
-                    self.showGitError(error)
+                self.refresh()
+                guard let failure else { return done() }
+                if failed?(failure) == true { return }
+                if let error = failure as? GitError, error.isAuthentication {
+                    self.askToSignIn(error) { self.network(what, work, failed: failed, done: done) }
+                } else {
+                    self.showGitError(failure)
                 }
             }
         }
     }
 
-    private func push() {
-        guard !isBusy else { return }
-        guard status.remoteURL != nil else {
-            promptRemote { [weak self] in self?.push() }
-            return
-        }
+    private func pull(then next: (() -> Void)? = nil) {
+        guard status.remoteURL != nil else { return promptRemote { [weak self] in self?.pull(then: next) } }
         saveEdits { [weak self] in
             guard let self else { return }
-            self.isBusy = true
-            GitManager.shared.push(in: self.project) { result in
-                self.isBusy = false
-                self.refresh()
-                switch result {
-                case .success(let count):
-                    if count == 0 { self.toast("Everything is already on GitHub.") }
-                case .failure(let error):
-                    self.showGitError(error)
+            var result = GitMergeResult.upToDate
+            self.network("Pulling", { repo, transfer in result = try repo.pull(transfer: transfer) }) {
+                if case .upToDate = result {
+                    if let next { next() } else { self.toast("Already up to date.") }
+                    return
                 }
+                self.showMergeResult(result, what: "Pulling")
+                if case .conflicts = result { return }
+                next?()
             }
+        }
+    }
+
+    private func push(force: Bool = false) {
+        guard status.remoteURL != nil else { return promptRemote { [weak self] in self?.push(force: force) } }
+        guard status.branch != nil else { return showAlert("You're not on a branch: create one to push.") }
+        let ahead = status.aheadCount, published = status.hasUpstream
+        saveEdits { [weak self] in
+            guard let self else { return }
+            self.network("Pushing", { repo, transfer in try repo.push(force: force, transfer: transfer) }) {
+                if published && ahead == 0 && !force { self.toast("Everything is already pushed.") }
+            }
+        }
+    }
+
+    private func confirmForcePush() {
+        let alert = UIAlertController(title: "Force push '\(status.currentBranch)'?",
+                                      message: "The remote's branch is replaced with yours: commits only it has are lost.", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Force Push", style: .destructive) { [weak self] _ in self?.push(force: true) })
+        presenter?.present(alert, animated: true)
+    }
+
+    private func fetch(prune: Bool) {
+        guard status.remoteURL != nil else { return promptRemote { [weak self] in self?.fetch(prune: prune) } }
+        network("Fetching", { repo, transfer in
+            for remote in repo.remotes() { try repo.fetch(remote.name, prune: prune, transfer: transfer) }
+        }) { [weak self] in
+            guard let self else { return }
+            let behind = self.status.behindCount
+            self.toast(behind > 0 ? "\(behind) new commit\(behind == 1 ? "" : "s") to pull." : "Fetched: nothing new.")
         }
     }
 
@@ -891,14 +1019,36 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
         pull { [weak self] in self?.push() }
     }
 
+    /// GitHub: its sign-in. Other hosts: their username and password (or token), kept in the Keychain.
+    private func askToSignIn(_ error: GitError, then retry: @escaping () -> Void) {
+        let url = status.remoteURL ?? ""
+        let host = GitCredentials.host(of: url) ?? url
+        guard let presenter else { return }
+        if host == "github.com" {
+            GitHubSignInViewController.present(from: presenter) { _ in retry() }
+            return
+        }
+        let alert = UIAlertController(title: "Sign in to \(host)", message: "\(error.message)\n\nUse your username and a password or access token. They're kept in this device's Keychain.", preferredStyle: .alert)
+        alert.addTextField { field in
+            field.placeholder = "Username"
+            field.autocapitalizationType = .none
+            field.autocorrectionType = .no
+        }
+        alert.addTextField { field in
+            field.placeholder = "Password or token"
+            field.isSecureTextEntry = true
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Sign In", style: .default) { [weak alert] _ in
+            guard let fields = alert?.textFields, let user = fields[0].text, !user.isEmpty, let password = fields[1].text else { return }
+            GitCredentials.save(GitCredentials.Login(user: user, password: password), for: host)
+            retry()
+        })
+        presenter.present(alert, animated: true)
+    }
+
     private func showGitError(_ error: Error) {
         let alert = UIAlertController(title: "Git", message: error.localizedDescription, preferredStyle: .alert)
-        if (error as NSError).code == 401 {
-            alert.addAction(UIAlertAction(title: "Sign in to GitHub", style: .default) { [weak self] _ in
-                guard let self, let presenter = self.presenter else { return }
-                GitHubSignInViewController.present(from: presenter) { _ in self.refresh() }
-            })
-        }
         alert.addAction(UIAlertAction(title: "OK", style: .cancel))
         presenter?.present(alert, animated: true)
     }
@@ -933,24 +1083,24 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
     // MARK: - Diffs
 
     private func openDiff(_ file: GitChangedFile, group: Group) {
-        let git = GitManager.shared
+        guard let git = repo else { return }
         let name = (file.path as NSString).lastPathComponent
         switch group {
         case .merge:
             onOpenFile?(file.path)
         case .changes:
             if file.status == .deleted {
-                let original = git.text(of: file.path, at: .index, in: project) ?? ""
+                let original = git.text(of: file.path, at: .index) ?? ""
                 onOpenDiff?(DiffRequest(path: file.path, original: original, modified: "", title: "\(name) (Deleted)"))
             } else if isTextFile(file.path) {
-                let original = git.text(of: file.path, at: .index, in: project) ?? ""
+                let original = git.text(of: file.path, at: .index) ?? ""
                 onOpenDiff?(DiffRequest(path: file.path, original: original, modified: nil, title: "\(name) (Working Tree)"))
             } else {
                 onOpenFile?(file.path)
             }
         case .staged:
-            let original = git.text(of: file.path, at: .head, in: project) ?? ""
-            guard let staged = git.text(of: file.path, at: .index, in: project) ?? (file.status == .deleted ? "" : nil) else {
+            let original = git.text(of: file.oldPath ?? file.path, at: .head) ?? ""
+            guard let staged = git.text(of: file.path, at: .index) ?? (file.status == .deleted ? "" : nil) else {
                 onOpenFile?(file.path)
                 return
             }
@@ -959,20 +1109,123 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
     }
 
     private func openDiff(_ file: GitChangedFile, commit: GitCommit) {
-        let git = GitManager.shared
+        guard let git = repo else { return }
         let name = (file.path as NSString).lastPathComponent
-        let original = git.text(of: file.path, at: .parent(of: commit.id), in: project) ?? ""
-        guard let modified = git.text(of: file.path, at: .commit(commit.id), in: project) ?? (file.status == .deleted ? "" : nil) else {
+        let original = git.text(of: file.oldPath ?? file.path, at: .parent(of: commit.id)) ?? ""
+        guard let modified = git.text(of: file.path, at: .commit(commit.id)) ?? (file.status == .deleted ? "" : nil) else {
             onOpenFile?(file.path)
             return
         }
-        let short = String(commit.id.prefix(7))
+        let short = commit.shortId
         onOpenDiff?(DiffRequest(path: file.path, original: original, modified: modified, title: "\(name) (\(short)^ ↔ \(short))"))
     }
 
     private func isTextFile(_ path: String) -> Bool {
         guard let url = try? ProjectStore.shared.resolve(path), let data = try? Data(contentsOf: url) else { return false }
         return !data.prefix(8000).contains(0) && String(data: data, encoding: .utf8) != nil
+    }
+
+    // MARK: - Commits in the Graph
+
+    private func commitActions(_ commit: GitCommit) -> [UIMenuElement] {
+        let isHead = commit.id == status.head
+        var items: [UIMenuElement] = [
+            UIMenu(options: .displayInline, children: [
+                UIAction(title: "Checkout (Detached)", image: Codicon.gitBranch.image()) { [weak self] _ in
+                    self?.checkout(commit: commit.id, title: commit.shortId)
+                },
+                UIAction(title: "Create Branch Here...", image: Codicon.add.image()) { [weak self] _ in self?.promptNewBranch(from: commit.id) },
+                UIAction(title: "Create Tag Here...", image: Codicon.tag.image()) { [weak self] _ in self?.promptTag(at: commit.id) },
+            ]),
+        ]
+        var change: [UIMenuElement] = []
+        if !isHead {
+            change.append(UIAction(title: "Cherry-Pick", image: Codicon.gitCommit.image()) { [weak self] _ in
+                self?.mergeLike("Cherry-picking \(commit.shortId)") { try $0.cherryPick(commit.id) }
+            })
+        }
+        change.append(UIAction(title: "Revert", image: Codicon.discard.image()) { [weak self] _ in
+            self?.mergeLike("Reverting \(commit.shortId)") { try $0.revert(commit.id) }
+        })
+        if !isHead && status.branch != nil {
+            change.append(UIMenu(title: "Reset '\(status.currentBranch)' to Here", image: Codicon.history.image(), children: [
+                UIAction(title: "Soft (keep the changes staged)") { [weak self] _ in self?.reset(to: commit, mode: .soft) },
+                UIAction(title: "Mixed (keep the changes, unstaged)") { [weak self] _ in self?.reset(to: commit, mode: .mixed) },
+                UIAction(title: "Hard (discard the changes)", attributes: .destructive) { [weak self] _ in self?.reset(to: commit, mode: .hard) },
+            ]))
+        }
+        if isHead && canUndoLastCommit {
+            change.append(UIAction(title: "Undo Last Commit", image: Codicon.discard.image()) { [weak self] _ in self?.undoLastCommit() })
+        }
+        items.append(UIMenu(options: .displayInline, children: change))
+        items.append(UIMenu(options: .displayInline, children: [
+            UIAction(title: "Copy Commit ID", image: Codicon.copy.image()) { _ in UIPasteboard.general.string = commit.id },
+            UIAction(title: "Copy Commit Message", image: Codicon.copy.image()) { _ in UIPasteboard.general.string = commit.message },
+        ]))
+        return items
+    }
+
+    /// A revert or cherry-pick: it may leave conflicts, like a merge.
+    private func mergeLike(_ what: String, _ work: @escaping (GitRepository) throws -> GitMergeResult) {
+        saveEdits { [weak self] in
+            guard let self else { return }
+            do {
+                guard let repo = self.repo else { return }
+                self.showMergeResult(try work(repo), what: what)
+            } catch {
+                self.showAlert(error.localizedDescription)
+                self.refresh()
+            }
+        }
+    }
+
+    private func reset(to commit: GitCommit, mode: GitResetMode) {
+        let apply = { [weak self] in
+            guard let self else { return }
+            self.saveEdits {
+                self.perform { try $0.reset(to: commit.id, mode: mode) }
+                self.onFilesChangedOnDisk?()
+            }
+        }
+        guard mode == .hard else { return apply() }
+        let alert = UIAlertController(title: "Reset '\(status.currentBranch)' to \(commit.shortId) and discard changes?",
+                                      message: "Commits after it leave the branch, and your uncommitted changes are lost.", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Reset", style: .destructive) { _ in apply() })
+        presenter?.present(alert, animated: true)
+    }
+
+    // MARK: Tags
+
+    private func tagMenuItems() -> [UIMenuElement] {
+        let tags = repo?.tags() ?? []
+        return [
+            UIAction(title: "Create Tag...", image: Codicon.tag.image(), attributes: status.head == nil ? [.disabled] : []) { [weak self] _ in
+                self?.promptTag(at: nil)
+            },
+            UIMenu(title: "Delete Tag...", image: Codicon.trash.image(), children: tags.map { tag in
+                UIAction(title: tag.name, attributes: .destructive) { [weak self] _ in self?.perform { try $0.deleteTag(tag.name) } }
+            }),
+            UIAction(title: "Push Tags", image: Codicon.repoPush.image(), attributes: tags.isEmpty || status.remoteURL == nil ? [.disabled] : []) { [weak self] _ in
+                self?.network("Pushing tags", { repo, transfer in try repo.pushTags(transfer: transfer) }) { self?.toast("Tags pushed.") }
+            },
+        ]
+    }
+
+    private func promptTag(at commit: String?) {
+        let alert = UIAlertController(title: "Create Tag", message: "A name, like v1.0, and an optional message (which makes an annotated tag).", preferredStyle: .alert)
+        alert.addTextField { field in
+            field.placeholder = "Tag name"
+            field.autocapitalizationType = .none
+            field.autocorrectionType = .no
+        }
+        alert.addTextField { field in field.placeholder = "Message (optional)" }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Create", style: .default) { [weak self, weak alert] _ in
+            guard let self, let fields = alert?.textFields, let name = fields[0].text?.trimmingCharacters(in: .whitespaces), !name.isEmpty else { return }
+            self.perform { try $0.createTag(name, at: commit, message: fields[1].text) }
+        })
+        presenter?.present(alert, animated: true)
     }
 
     // MARK: - Table
@@ -1025,17 +1278,15 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
             let focused = focusedKey == fileKey(group, file.path)
             cell.setTrailing((focused ? fileActions(file, group: group) : []) + [VSListCell.statusLetter(file.status)])
             cell.isMarked = focused
-        case let .commit(commit, index):
-            let expanded = commit.hasSnapshot ? expandedCommits.contains(commit.id) : nil
-            cell.configure(depth: 0, twistie: expanded, icon: nil, title: commit.message.components(separatedBy: .newlines).first ?? "",
+        case let .commit(commit, _, row):
+            cell.configure(depth: 0, twistie: expandedCommits.contains(commit.id), icon: nil, title: commit.summary,
                            description: commit.author)
             let lane = GraphLaneView()
-            lane.isFirst = index == 0
-            lane.isLast = index == commits.count - 1 && !(expandedCommits.contains(commit.id))
-            lane.isHead = index == 0
-            cell.setLeadingView(lane, width: 16)
-            cell.setTrailing(refLabels(for: commit, index: index))
-        case let .commitFile(commit, file):
+            lane.row = row
+            lane.isHead = commit.id == status.head
+            cell.setLeadingView(lane, width: GraphLaneView.width(for: row.width))
+            cell.setTrailing(refLabels(for: commit))
+        case let .commitFile(_, file, below):
             let name = (file.path as NSString).lastPathComponent
             let (icon, color) = VS.fileIcon(name)
             cell.configure(depth: 3, twistie: nil, icon: icon, iconColor: color, title: name,
@@ -1043,11 +1294,11 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
                            description: (file.path as NSString).deletingLastPathComponent)
             cell.useThemeIcon(file: name)
             cell.setTrailing([VSListCell.statusLetter(file.status)])
-            // Carry the lane down past the commit's files, unless it's the oldest commit.
-            if commits.last?.id != commit.id {
+            // Carry the lanes down past the commit's files.
+            if !below.isEmpty {
                 let lane = GraphLaneView()
-                lane.isPassThrough = true
-                cell.setOverlay(lane, x: 4 + 16, width: 16)
+                lane.row = GitGraphRow(node: -1, passThrough: below, incoming: [], outgoing: [], below: below)
+                cell.setOverlay(lane, x: 4 + 16, width: GraphLaneView.width(for: (below.max() ?? 0) + 1))
             }
         case let .graphMessage(text):
             cell.configure(depth: 1, twistie: nil, icon: nil, title: text, titleColor: VS.description)
@@ -1094,15 +1345,16 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
         return actions
     }
 
-    /// The branch badge on the newest commit and the GitHub badge where the last sync was.
-    private func refLabels(for commit: GitCommit, index: Int) -> [UIView] {
-        var labels: [UIView] = []
-        if index == 0 { labels.append(RefLabel(icon: .gitBranch, text: status.currentBranch, color: VS.graphLane)) }
-        for name in commit.branches.prefix(2) { labels.append(RefLabel(icon: .gitBranch, text: name, color: VS.graphOther)) }
-        if commit.isSynced, status.remoteURL != nil {
-            labels.append(RefLabel(icon: .cloudUpload, text: "origin", color: VS.graphRemote))
+    /// Branch, remote branch and tag badges, the checked-out branch first.
+    private func refLabels(for commit: GitCommit) -> [UIView] {
+        commit.refs.prefix(3).map { ref in
+            switch ref.kind {
+            case .head: return RefLabel(icon: .gitBranch, text: ref.name, color: VS.graphLane)
+            case .branch: return RefLabel(icon: .gitBranch, text: ref.name, color: VS.graphOther)
+            case .remote: return RefLabel(icon: .cloudUpload, text: ref.name, color: VS.graphRemote)
+            case .tag: return RefLabel(icon: .tag, text: ref.name, color: VS.graphOther)
+            }
         }
-        return labels
     }
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
@@ -1117,11 +1369,10 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
             focusedKey = fileKey(group, file.path)
             tableView.reloadSections(IndexSet(integer: 0), with: .none)
             openDiff(file, group: group)
-        case let .commit(commit, _):
-            guard commit.hasSnapshot else { return }
+        case let .commit(commit, _, _):
             if expandedCommits.contains(commit.id) { expandedCommits.remove(commit.id) } else { expandedCommits.insert(commit.id) }
             rebuildRows()
-        case let .commitFile(commit, file):
+        case let .commitFile(commit, file, _):
             openDiff(file, commit: commit)
         case .graphMessage:
             break
@@ -1212,16 +1463,9 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
                         },
                     ])
                 }
-            case let .commit(commit, index):
-                var items: [UIMenuElement] = [
-                    UIAction(title: "Copy Commit ID", image: Codicon.copy.image()) { _ in UIPasteboard.general.string = commit.id },
-                    UIAction(title: "Copy Commit Message", image: Codicon.copy.image()) { _ in UIPasteboard.general.string = commit.message },
-                ]
-                if index == 0 && self.canUndoLastCommit {
-                    items.append(UIAction(title: "Undo Last Commit", image: Codicon.discard.image()) { _ in self.undoLastCommit() })
-                }
-                return UIMenu(children: items)
-            case let .commitFile(commit, file):
+            case let .commit(commit, _, _):
+                return UIMenu(children: self.commitActions(commit))
+            case let .commitFile(commit, file, _):
                 return UIMenu(children: [
                     UIAction(title: "Open Changes", image: Codicon.diff.image()) { _ in self.openDiff(file, commit: commit) },
                     UIAction(title: "Copy Path", image: Codicon.copy.image()) { _ in UIPasteboard.general.string = file.path },
@@ -1233,12 +1477,15 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
     }
 }
 
-/// The Graph's lane: a line through the commits with a dot for each (a ring for the newest).
+/// The Graph's lanes for one row (GitGraph): lines through it, into and out of the commit's dot,
+/// each lane its own colour. The checked-out commit's dot is a ring.
 final class GraphLaneView: UIView {
-    var isFirst = false
-    var isLast = false
+    var row = GitGraphRow(node: 0, passThrough: [], incoming: [], outgoing: [], below: [])
     var isHead = false
-    var isPassThrough = false
+    static let laneWidth: CGFloat = 11
+    static let colors: [UIColor] = [VS.graphLane, VS.graphRemote, VS.graphOther, VS.hex(0xB180D7), VS.hex(0xE5C07B), VS.hex(0x4EC9B0), VS.hex(0xF14C4C)]
+
+    static func width(for lanes: Int) -> CGFloat { CGFloat(max(1, min(lanes, 8))) * laneWidth + 5 }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -1249,30 +1496,38 @@ final class GraphLaneView: UIView {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    private func x(_ lane: Int) -> CGFloat { 3 + (CGFloat(min(lane, 7)) + 0.5) * Self.laneWidth }
+    private func color(_ lane: Int) -> UIColor { Self.colors[lane % Self.colors.count] }
+
     override func draw(_ rect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext() else { return }
-        let x = bounds.midX
-        let y = bounds.midY
-        VS.graphLane.setStroke()
-        VS.graphLane.setFill()
-        context.setLineWidth(2)
-        if !isFirst || isPassThrough {
-            context.move(to: CGPoint(x: x, y: 0))
-            context.addLine(to: CGPoint(x: x, y: isPassThrough ? bounds.maxY : y))
+        let mid = bounds.midY
+        context.setLineWidth(1.6)
+        context.setLineCap(.round)
+        let line = { (lane: Int, from: CGPoint, to: CGPoint) in
+            self.color(lane).setStroke()
+            context.move(to: from)
+            if from.x == to.x {
+                context.addLine(to: to)
+            } else {
+                // A curve between lanes.
+                context.addCurve(to: to, control1: CGPoint(x: from.x, y: (from.y + to.y) / 2), control2: CGPoint(x: to.x, y: (from.y + to.y) / 2))
+            }
+            context.strokePath()
         }
-        if !isLast && !isPassThrough {
-            context.move(to: CGPoint(x: x, y: y))
-            context.addLine(to: CGPoint(x: x, y: bounds.maxY))
-        }
-        context.strokePath()
-        guard !isPassThrough else { return }
-        let dot = CGRect(x: x - 4, y: y - 4, width: 8, height: 8)
+        for lane in row.passThrough { line(lane, CGPoint(x: x(lane), y: 0), CGPoint(x: x(lane), y: bounds.maxY)) }
+        guard row.node >= 0 else { return }
+        let node = CGPoint(x: x(row.node), y: mid)
+        for lane in row.incoming { line(lane, CGPoint(x: x(lane), y: 0), node) }
+        for lane in row.outgoing { line(lane, node, CGPoint(x: x(lane), y: bounds.maxY)) }
+        let dot = CGRect(x: node.x - 4, y: mid - 4, width: 8, height: 8)
+        color(row.node).setStroke()
+        color(row.node).setFill()
         if isHead {
             VS.sideBar.setFill()
             context.fillEllipse(in: dot)
-            context.strokeEllipse(in: dot.insetBy(dx: 0.5, dy: 0.5))
-            VS.graphLane.setFill()
-            context.fillEllipse(in: dot.insetBy(dx: 2.5, dy: 2.5))
+            context.setLineWidth(2)
+            context.strokeEllipse(in: dot.insetBy(dx: 1, dy: 1))
         } else {
             context.fillEllipse(in: dot)
         }

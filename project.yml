@@ -79,13 +79,15 @@ targets:
           - "$(SRCROOT)/Runtimes/include"
           - "$(SRCROOT)/App/Runtime"
           - "$(SRCROOT)/App/NativeTools"
+        # libgit2 (scripts/build-libgit2.sh): `import Clibgit2` from its module map.
+        SWIFT_INCLUDE_PATHS: ["$(SRCROOT)/third_party/libgit2/include"]
         CODE_SIGN_ENTITLEMENTS: App/DuoCode.entitlements
         TARGETED_DEVICE_FAMILY: "1,2"
         ENABLE_BITCODE: NO
         # FoundationModels (Apple Intelligence) only exists on iOS 26+; weak-link it for iOS 17-25.
         # libduocode_prepare signs extensions' macOS programs (scripts/build-prepare.sh).
-        LIBRARY_SEARCH_PATHS: ["$(SRCROOT)/third_party/prepare"]
-        OTHER_LDFLAGS: ["-lz", "-weak_framework", "FoundationModels", "-lduocode_prepare",
+        LIBRARY_SEARCH_PATHS: ["$(SRCROOT)/third_party/prepare", "$(SRCROOT)/third_party/libgit2/ios"]
+        OTHER_LDFLAGS: ["-lz", "-lgit2", "-weak_framework", "FoundationModels", "-lduocode_prepare",
                         "-framework", "Security", "-framework", "CoreFoundation"]
     postBuildScripts:
       - name: Install Python standard library

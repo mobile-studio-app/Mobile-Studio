@@ -39,7 +39,7 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
             self?.emit("fileIconsChanged", [:])
         }
         NotificationCenter.default.addObserver(self, selector: #selector(breakpointsChanged), name: BreakpointStore.didChange, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(gitIndexChanged), name: GitManager.indexDidChange, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(gitIndexChanged), name: GitRepository.didChange, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(extensionConfigurationChanged),
                                                name: ExtensionHostBridge.didChangeConfiguration, object: nil)
     }
@@ -245,9 +245,9 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
             case "conflictInfo":
                 // Whether the file is one of the merge's unresolved files (it gets "Mark as Resolved").
                 let path = body["path"] as? String ?? ""
-                replyHandler(["inMerge": GitManager.shared.unresolvedConflicts(in: store.currentProject).contains(path)], nil)
+                replyHandler(["inMerge": (try? GitRepository.open(store.currentProject))?.conflicts().contains(path) ?? false], nil)
             case "markResolved":
-                try GitManager.shared.stage([body["path"] as? String ?? ""], in: store.currentProject)
+                try GitRepository.open(store.currentProject).stage([body["path"] as? String ?? ""])
                 NotificationCenter.default.post(name: ProjectStore.filesDidChange, object: store)
                 replyHandler(true, nil)
             case "extList":
@@ -275,8 +275,8 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 // the project isn't a repository or the file isn't tracked.
                 let path = body["path"] as? String ?? ""
                 let project = store.currentProject
-                guard GitManager.shared.isGitRepo(at: project) else { replyHandler(NSNull(), nil); return }
-                replyHandler((GitManager.shared.text(of: path, at: .index, in: project) as Any?) ?? NSNull(), nil)
+                guard let repo = try? GitRepository.open(project) else { replyHandler(NSNull(), nil); return }
+                replyHandler((repo.text(of: path, at: .index) as Any?) ?? NSNull(), nil)
             case "getBreakpoints":
                 let file = body["path"] as? String ?? ""
                 replyHandler(BreakpointStore.shared.breakpoints(in: file).map { bp -> [String: Any] in
@@ -352,9 +352,9 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 let root = store.currentProject
                 let path = body["path"] as? String ?? ""
                 let text = body["text"] as? String ?? ""
-                guard GitManager.shared.isGitRepo(at: root) else { replyHandler(NSNull(), nil); return }
+                guard GitRepository.isRepository(root) else { replyHandler(NSNull(), nil); return }
                 DispatchQueue.global(qos: .userInitiated).async {
-                    let owners = GitManager.shared.blame(path, current: text, in: root)
+                    let owners = (try? GitRepository.open(root))?.blame(path, contents: text) ?? []
                     var commits: [[String: Any]] = []
                     var index: [String: Int] = [:]
                     let lines: [Int] = owners.map { commit in
@@ -451,15 +451,15 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 // Git: View File History: the commits that changed a file, and a commit's change to it.
                 let root = store.currentProject
                 let path = body["path"] as? String ?? ""
-                let git = GitManager.shared
-                guard git.isGitRepo(at: root) else { replyHandler([Any](), nil); return }
+                guard let git = try? GitRepository.open(root) else { replyHandler([Any](), nil); return }
                 if let id = body["commit"] as? String {
-                    replyHandler(["original": git.text(of: path, at: .parent(of: id), in: root) ?? "",
-                                  "modified": git.text(of: path, at: .commit(id), in: root) ?? ""], nil)
+                    replyHandler(["original": git.text(of: path, at: .parent(of: id)) ?? "",
+                                  "modified": git.text(of: path, at: .commit(id)) ?? ""], nil)
                     return
                 }
                 DispatchQueue.global(qos: .userInitiated).async {
-                    let list = git.fileHistory(path, in: root).map { commit -> [String: Any] in
+                    // Its own handle: a repository isn't shared between threads.
+                    let list = ((try? GitRepository.open(root))?.log(path: path, limit: 300) ?? []).map { commit -> [String: Any] in
                         ["id": commit.id, "author": commit.author, "date": commit.date.timeIntervalSince1970 * 1000, "message": commit.message]
                     }
                     DispatchQueue.main.async { replyHandler(list, nil) }

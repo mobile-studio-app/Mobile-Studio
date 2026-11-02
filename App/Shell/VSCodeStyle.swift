@@ -70,7 +70,7 @@ enum VS {
 
     static func color(for status: GitFileStatus) -> UIColor {
         switch status {
-        case .modified: return gitModified
+        case .modified, .renamed, .typeChanged: return gitModified
         case .untracked: return gitUntracked
         case .added: return gitAdded
         case .deleted: return gitDeleted
@@ -117,7 +117,7 @@ enum Codicon: UInt32 {
     case debugAlt = 0xEB91, debugContinue = 0xEACF, debugPause = 0xEAD1, debugStepOver = 0xEAD6
     case debugStepInto = 0xEAD4, debugStepOut = 0xEAD5, debugRestart = 0xEAD2, debugStackframe = 0xEB8B
     case debugBreakpointConditional = 0xEAA7, debugBreakpointLog = 0xEAAB, circleOutline = 0xEABC, closeAll = 0xEAC1
-    case eye = 0xEA70, newFolder = 0xEA80, filter = 0xEAF1, gitPullRequest = 0xEA64
+    case eye = 0xEA70, newFolder = 0xEA80, filter = 0xEAF1, gitPullRequest = 0xEA64, tag = 0xEA66
 
     /// The branch glyph; VS Code draws branches with the source control icon.
     static let gitBranch = Codicon.sourceControl

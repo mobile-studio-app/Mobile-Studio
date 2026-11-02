@@ -149,7 +149,7 @@ final class PullRequestDetailViewController: UITableViewController {
     required init?(coder: NSCoder) { fatalError() }
 
     private var isFromFork: Bool {
-        guard let repo = try? GitManager.shared.gitHubRepository(in: project) else { return false }
+        guard let repo = try? GitRepository.open(project).gitHubRepository() else { return false }
         return !pull.headRepo.isEmpty && pull.headRepo.lowercased() != "\(repo.owner)/\(repo.repo)".lowercased()
     }
 
@@ -457,7 +457,7 @@ final class CreatePullRequestViewController: UITableViewController, UITextFieldD
 
     init(project: URL) {
         self.project = project
-        branch = GitManager.shared.currentBranch(in: project)
+        branch = (try? GitRepository.open(project))?.status().currentBranch ?? "main"
         super.init(style: .insetGrouped)
     }
 
@@ -472,18 +472,19 @@ final class CreatePullRequestViewController: UITableViewController, UITextFieldD
         titleField.clearButtonMode = .whileEditing
         titleField.delegate = self
         // The last commit's summary, as GitHub suggests.
-        titleField.text = GitManager.shared.history(in: project, limit: 1).first?.message.components(separatedBy: .newlines).first
+        titleField.text = (try? GitRepository.open(project))?.log(limit: 1).first?.summary
         bodyView.font = .preferredFont(forTextStyle: .body)
         bodyView.backgroundColor = .clear
         Task { [weak self] in
             guard let self else { return }
             let main = (try? await PullRequests.defaultBranch(in: self.project)) ?? "main"
             if self.base.isEmpty { self.base = main == self.branch ? "" : main }
-            GitManager.shared.remoteBranches(in: self.project) { result in
-                self.bases = ((try? result.get()) ?? [main]).filter { $0 != self.branch }
-                if self.base.isEmpty { self.base = self.bases.first ?? main }
-                self.tableView.reloadData()
-            }
+            // origin's branches, as of the last fetch.
+            let remote = ((try? GitRepository.open(self.project))?.branches(remote: true) ?? [])
+                .filter { $0.name.hasPrefix("origin/") }.map { String($0.name.dropFirst(7)) }
+            self.bases = (remote.isEmpty ? [main] : remote).filter { $0 != self.branch }
+            if self.base.isEmpty { self.base = self.bases.first ?? main }
+            self.tableView.reloadData()
         }
     }
 
@@ -565,9 +566,8 @@ final class CreatePullRequestViewController: UITableViewController, UITextFieldD
         }
         isBusy = true
         navigationItem.rightBarButtonItem?.isEnabled = false
-        let git = GitManager.shared
-        let status = git.status(in: project)
-        let needsPush = git.upstream(of: branch, in: project) == nil || status.aheadCount > 0
+        let status = (try? GitRepository.open(project))?.status() ?? GitStatus()
+        let needsPush = status.upstream == nil || status.aheadCount > 0
         let create = { [weak self] in
             guard let self else { return }
             Task { [weak self] in
@@ -582,10 +582,13 @@ final class CreatePullRequestViewController: UITableViewController, UITextFieldD
             }
         }
         guard needsPush else { create(); return }
-        git.push(in: project) { [weak self] result in
-            switch result {
-            case .success: create()
-            case .failure(let error): self?.failed(error)
+        let root = project
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                try GitRepository.open(root).push()
+                DispatchQueue.main.async { create() }
+            } catch {
+                DispatchQueue.main.async { self?.failed(error) }
             }
         }
     }

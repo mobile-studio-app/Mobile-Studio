@@ -1,12 +1,11 @@
 import Foundation
+import Clibgit2
 
-// Tests for GitManager, run on CI before the app builds:
-//   swiftc -swift-version 5 App/Git/GitManager.swift Tests/GitEngine/*.swift -o git-tests && ./git-tests
-// The recurring check is that the status is clean whenever nothing was edited, and that pushes
-// only send files that changed: the "every file changed" bug from an earlier build.
+// Tests for the app's git (GitRepository on libgit2), run on CI before the app builds:
+//   swiftc ... App/Git/*.swift Tests/GitEngine/*.swift (see .github/workflows/build-ipa.yml)
+// Repositories are real ones in a temporary folder; a bare repository stands in for GitHub, so
+// push, clone, fetch and pull run without a network.
 
-URLProtocol.registerClass(FakeGitHub.self)
-let git = GitManager.shared
 var failures = 0
 var checks = 0
 
@@ -20,38 +19,32 @@ func check(_ ok: Bool, _ what: @autoclosure () -> String, line: UInt = #line) {
 
 func section(_ name: String) { print("• \(name)") }
 
-func newRepo(remote: Bool = true) -> URL {
-    let url = FileManager.default.temporaryDirectory.appendingPathComponent("git-test-\(UUID().uuidString)")
+func temporary(_ name: String) -> URL {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("git-test-\(name)-\(UUID().uuidString)")
     try! FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-    try! git.initRepo(at: url)
-    if remote { git.setRemoteURL("https://github.com/owner/repo", in: url) }
     return url
 }
 
-func write(_ root: URL, _ path: String, _ text: String) {
-    let file = root.appendingPathComponent(path)
+func newRepo() -> GitRepository { try! GitRepository.create(at: temporary("repo")) }
+
+/// A bare repository, as a server has.
+func newRemote() -> URL {
+    _ = Git.ready
+    let url = temporary("remote")
+    var repo: OpaquePointer?
+    precondition(git_repository_init(&repo, url.path, 1) == 0)
+    git_repository_free(repo)
+    return url
+}
+
+func write(_ repo: GitRepository, _ path: String, _ text: String) {
+    let file = repo.root.appendingPathComponent(path)
     try! FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
     try! Data(text.utf8).write(to: file)
 }
 
-func read(_ root: URL, _ path: String) -> String? {
-    (try? Data(contentsOf: root.appendingPathComponent(path))).map { String(decoding: $0, as: UTF8.self) }
-}
-
-func remove(_ root: URL, _ path: String) {
-    try? FileManager.default.removeItem(at: root.appendingPathComponent(path))
-}
-
-/// The project's visible files as text.
-func files(_ root: URL) -> [String: String] {
-    var out: [String: String] = [:]
-    let base = root.standardizedFileURL.path + "/"
-    let e = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])!
-    for case let url as URL in e where !url.hasDirectoryPath {
-        let path = url.standardizedFileURL.path
-        if path.hasPrefix(base) { out[String(path.dropFirst(base.count))] = read(root, String(path.dropFirst(base.count))) }
-    }
-    return out
+func read(_ repo: GitRepository, _ path: String) -> String? {
+    (try? Data(contentsOf: repo.root.appendingPathComponent(path))).map { String(decoding: $0, as: UTF8.self) }
 }
 
 func describe(_ status: GitStatus) -> String {
@@ -59,364 +52,365 @@ func describe(_ status: GitStatus) -> String {
         + "changes \(status.changedFiles.map { "\($0.status.rawValue) \($0.path)" }), conflicts \(status.mergeConflicts.map(\.path))"
 }
 
-func checkClean(_ root: URL, _ what: String, line: UInt = #line) {
-    let status = git.status(in: root)
+func checkClean(_ repo: GitRepository, _ what: String, line: UInt = #line) {
+    let status = repo.status()
     check(status.isClean, "\(what): expected no changes, got \(describe(status))", line: line)
 }
 
-func wait<T>(_ start: (@escaping (T) -> Void) -> Void) -> T {
-    var result: T?
-    start { result = $0 }
-    let deadline = Date().addingTimeInterval(30)
-    while result == nil && Date() < deadline {
-        RunLoop.main.run(until: Date().addingTimeInterval(0.005))
-    }
-    guard let result else { fatalError("timed out") }
-    return result
-}
-
-@discardableResult
-func push(_ root: URL, line: UInt = #line) -> Int {
-    switch wait({ git.push(in: root, completion: $0) }) {
-    case .success(let count): return count
-    case .failure(let error):
-        check(false, "push failed: \(error.localizedDescription)", line: line)
-        return -1
-    }
-}
-
-@discardableResult
-func pull(_ root: URL, line: UInt = #line) -> Int {
-    switch wait({ git.pull(in: root, completion: $0) }) {
-    case .success(let count): return count
-    case .failure(let error):
-        check(false, "pull failed: \(error.localizedDescription)", line: line)
-        return -1
-    }
-}
-
-func expectError(_ what: String, code: Int? = nil, line: UInt = #line, _ body: () throws -> Void) {
+func expectError(_ what: String, line: UInt = #line, _ body: () throws -> Void) -> GitError? {
     do {
         try body()
         check(false, "\(what): expected an error", line: line)
+        return nil
+    } catch let error as GitError {
+        return error
     } catch {
-        if let code { check((error as NSError).code == code, "\(what): expected code \(code), got \((error as NSError).code)", line: line) }
+        check(false, "\(what): expected a GitError, got \(error)", line: line)
+        return nil
     }
+}
+
+func attempt(_ what: String, line: UInt = #line, _ body: () throws -> Void) {
+    do { try body() } catch { check(false, "\(what): \(error.localizedDescription)", line: line) }
 }
 
 // MARK: - Local
 
 section("commit and status")
 do {
-    let repo = newRepo(remote: false)
-    write(repo, "main.lua", "print('a')\n")
+    let repo = newRepo()
+    check(GitRepository.isRepository(repo.root), "a new repository is one")
+    check(repo.status().branch == "main" && repo.status().head == nil, "starts on main with no commits: \(String(describing: repo.status().branch))")
+    write(repo, "main.lua", "print('hi')\n")
     write(repo, "lib/util.lua", "return {}\n")
-    check(git.status(in: repo).changedFiles.count == 2, "two new files")
-    try git.commit(message: "first", all: true, in: repo)
-    checkClean(repo, "after commit")
-    checkClean(repo, "status again")
-    write(repo, "main.lua", "print('changed')\n")
-    let status = git.status(in: repo)
-    check(status.changedFiles.map(\.path) == ["main.lua"] && status.changedFiles.first?.status == .modified, "one modified file: \(describe(status))")
-    expectError("commit with nothing staged") { try git.commit(message: "x", in: repo) }
-    try git.stage(["main.lua"], in: repo)
-    check(git.status(in: repo).stagedFiles.map(\.path) == ["main.lua"], "staged")
-    try git.commit(message: "second", in: repo)
-    checkClean(repo, "after staged commit")
-    check(git.history(in: repo).count == 2, "two commits")
-}
+    check(repo.status().changedFiles.map(\.status) == [.untracked, .untracked], "new files are untracked: \(describe(repo.status()))")
+    attempt("stage all") { try repo.stageAll() }
+    check(repo.status().stagedFiles.count == 2 && repo.status().stagedFiles.allSatisfy { $0.status == .added }, "staged as added: \(describe(repo.status()))")
+    var first: GitCommit?
+    attempt("commit") { first = try repo.commit(message: "First") }
+    check(first?.id.count == 40 && first?.parents.isEmpty == true, "a real commit, the first")
+    checkClean(repo, "after committing")
+    check(repo.log().count == 1 && repo.log().first?.summary == "First", "history has it")
+    check(repo.status().head == first?.id, "HEAD is the commit")
 
-section("checkout switches files and leaves nothing changed")
-do {
-    let repo = newRepo(remote: false)
-    write(repo, "a.lua", "a = 1\n")
-    write(repo, "b.lua", "b = 1\n")
-    try git.commit(message: "base", all: true, in: repo)
-    try git.createBranch("feature", in: repo)
-    check(git.currentBranch(in: repo) == "feature", "on feature")
-    checkClean(repo, "after creating a branch")
-    write(repo, "a.lua", "a = 2 -- feature\n")
-    write(repo, "src/new.lua", "new = true\n")
-    remove(repo, "b.lua")
-    try git.commit(message: "feature work", all: true, in: repo)
-    checkClean(repo, "after feature commit")
+    write(repo, "main.lua", "print('hello')\n")
+    check(repo.status().changedFiles.map(\.status) == [.modified], "an edit is a change")
+    attempt("stage") { try repo.stage(["main.lua"]) }
+    check(repo.status().stagedFiles.map(\.path) == ["main.lua"] && repo.status().changedFiles.isEmpty, "staged")
+    attempt("unstage") { try repo.unstage(["main.lua"]) }
+    check(repo.status().stagedFiles.isEmpty && repo.status().changedFiles.count == 1, "unstaged")
+    check(repo.text(of: "main.lua", at: .index) == "print('hi')\n" && repo.text(of: "main.lua", at: .head) == "print('hi')\n", "the index and HEAD have the old text")
+    attempt("discard") { try repo.discard(repo.status().changedFiles) }
+    check(read(repo, "main.lua") == "print('hi')\n", "discarding restores the file")
+    write(repo, "scratch.txt", "x")
+    attempt("discard untracked") { try repo.discard(repo.status().changedFiles) }
+    check(read(repo, "scratch.txt") == nil, "discarding an untracked file deletes it")
+    checkClean(repo, "after discarding")
 
-    try git.checkout("main", in: repo)
-    check(git.currentBranch(in: repo) == "main", "on main")
-    check(files(repo) == ["a.lua": "a = 1\n", "b.lua": "b = 1\n"], "main's files: \(files(repo))")
-    check(!FileManager.default.fileExists(atPath: repo.appendingPathComponent("src").path), "empty folder removed")
-    checkClean(repo, "after checkout main")
-    check(git.history(in: repo).count == 1, "main has one commit")
+    let nothing = expectError("committing nothing") { try repo.commit(message: "Empty") }
+    check(nothing?.code == GitError.nothingToCommit, "nothing to commit is said so")
 
-    try git.checkout("feature", in: repo)
-    check(files(repo) == ["a.lua": "a = 2 -- feature\n", "src/new.lua": "new = true\n"], "feature's files: \(files(repo))")
-    checkClean(repo, "after checkout feature")
-    check(git.history(in: repo).count == 2, "feature has two commits")
-    for _ in 0..<3 {
-        try git.checkout("main", in: repo)
-        try git.checkout("feature", in: repo)
-    }
-    checkClean(repo, "after switching back and forth")
-
-    // Edits to files that are the same on both branches come along.
-    try git.checkout("main", in: repo)
-    write(repo, "b.lua", "b = 99 -- local edit\n")
-    expectError("checkout over a local change", code: GitManager.checkoutConflictCode) { try git.checkout("feature", in: repo) }
-    check(git.currentBranch(in: repo) == "main" && read(repo, "b.lua") == "b = 99 -- local edit\n", "failed checkout changed nothing")
-    try git.discardChanges(for: "b.lua", in: repo)
-    write(repo, "notes.txt", "todo\n")
-    try git.checkout("feature", in: repo)
-    check(read(repo, "notes.txt") == "todo\n", "untracked file came along")
-    let carried = git.status(in: repo)
-    check(carried.changedFiles.map(\.path) == ["notes.txt"], "only the carried file is changed: \(describe(carried))")
-    remove(repo, "notes.txt")
-
-    // Forced checkout throws the local change away.
-    write(repo, "a.lua", "a = 3 -- unsaved\n")
-    try git.checkout("main", force: true, in: repo)
-    check(read(repo, "a.lua") == "a = 1\n", "forced checkout wrote main's a.lua")
-    checkClean(repo, "after forced checkout")
-
-    expectError("bad branch name") { try git.createBranch("bad..name", in: repo) }
-    expectError("duplicate branch") { try git.createBranch("feature", in: repo) }
-    try git.createBranch("my feature", checkout: false, in: repo)
-    check(git.branches(in: repo).contains("my-feature"), "spaces become dashes")
-    try git.createBranch("topic/nested", in: repo)
-    check(git.branches(in: repo).contains("topic/nested"), "nested branch listed")
-    try git.checkout("main", in: repo)
-    try git.renameBranch("topic/nested", to: "topic-renamed", in: repo)
-    check(git.branches(in: repo).contains("topic-renamed") && !git.branches(in: repo).contains("topic/nested"), "renamed")
-    expectError("delete current branch") { try git.deleteBranch("main", in: repo) }
-    try git.deleteBranch("topic-renamed", in: repo)
-    expectError("delete unmerged branch", code: 409) { try git.deleteBranch("feature", in: repo) }
-    check(git.branches(in: repo).contains("feature"), "unmerged branch kept")
-}
-
-section("stash")
-do {
-    let repo = newRepo(remote: false)
-    write(repo, "a.lua", "one\n")
-    try git.commit(message: "base", all: true, in: repo)
-    write(repo, "a.lua", "two\n")
-    write(repo, "b.lua", "new file\n")
-    try git.stage(["b.lua"], in: repo)
-    try git.stash(in: repo)
-    check(files(repo) == ["a.lua": "one\n"], "stash put files back: \(files(repo))")
-    checkClean(repo, "after stash")
-    check(git.stashes(in: repo).count == 1, "one stash")
-    try git.applyStash(drop: true, in: repo)
-    check(files(repo) == ["a.lua": "two\n", "b.lua": "new file\n"], "pop restored files")
-    let status = git.status(in: repo)
-    check(status.stagedFiles.map(\.path) == ["b.lua"] && status.changedFiles.map(\.path) == ["a.lua"], "pop restored staging: \(describe(status))")
-    check(git.stashes(in: repo).isEmpty, "pop dropped the stash")
-
-    // Stash, switch branch, pop there.
-    try git.stash(message: "move me", in: repo)
-    try git.createBranch("other", in: repo)
-    try git.applyStash(drop: true, in: repo)
-    check(read(repo, "a.lua") == "two\n", "stash applied on another branch")
-}
-
-section("merge")
-do {
-    let repo = newRepo(remote: false)
-    write(repo, "game.lua", "line1\nline2\nline3\nline4\nline5\n")
-    write(repo, "other.lua", "x\n")
-    try git.commit(message: "base", all: true, in: repo)
-
-    // Fast-forward.
-    try git.createBranch("ff", in: repo)
-    write(repo, "other.lua", "x2\n")
-    try git.commit(message: "ff change", all: true, in: repo)
-    try git.checkout("main", in: repo)
-    guard case .fastForward = try git.merge("ff", in: repo) else { fatalError("expected fast-forward") }
-    check(read(repo, "other.lua") == "x2\n", "fast-forward moved files")
-    check(git.tip(of: "main", in: repo) == git.tip(of: "ff", in: repo), "fast-forward moved the branch")
-    checkClean(repo, "after fast-forward")
-    guard case .upToDate = try git.merge("ff", in: repo) else { fatalError("expected up to date") }
-
-    // Clean three-way merge of different lines in one file.
-    try git.createBranch("left", in: repo)
-    write(repo, "game.lua", "LINE1\nline2\nline3\nline4\nline5\n")
-    try git.commit(message: "left", all: true, in: repo)
-    try git.checkout("main", in: repo)
-    write(repo, "game.lua", "line1\nline2\nline3\nline4\nLINE5\n")
-    write(repo, "added.lua", "added on main\n")
-    try git.commit(message: "main side", all: true, in: repo)
-    guard case .merged = try git.merge("left", in: repo) else { fatalError("expected merged") }
-    check(read(repo, "game.lua") == "LINE1\nline2\nline3\nline4\nLINE5\n", "both edits kept: \(read(repo, "game.lua") ?? "")")
-    checkClean(repo, "after merge commit")
-    check(git.history(in: repo).first?.isMerge == true, "merge commit recorded")
-
-    // Conflict.
-    try git.createBranch("clash", in: repo)
-    write(repo, "game.lua", "LINE1\nfrom clash\nline3\nline4\nLINE5\n")
-    try git.commit(message: "clash", all: true, in: repo)
-    try git.checkout("main", in: repo)
-    write(repo, "game.lua", "LINE1\nfrom main\nline3\nline4\nLINE5\n")
-    try git.commit(message: "main clash", all: true, in: repo)
-    guard case .conflicts(let paths) = try git.merge("clash", in: repo) else { fatalError("expected conflicts") }
-    check(paths == ["game.lua"], "conflict in game.lua")
-    check(read(repo, "game.lua")?.contains("<<<<<<< HEAD\nfrom main\n=======\nfrom clash\n>>>>>>> clash\n") == true, "conflict markers written")
-    let merging = git.status(in: repo)
-    check(merging.mergeConflicts.map(\.path) == ["game.lua"] && merging.mergingBranch == "clash", "status shows the conflict")
-    expectError("commit with an unresolved conflict") { try git.commit(message: "", in: repo) }
-    expectError("checkout during a merge") { try git.checkout("clash", in: repo) }
-    try git.stage(["game.lua"], in: repo)
-    expectError("commit with markers left in") { try git.commit(message: "", in: repo) }
-    write(repo, "game.lua", "LINE1\nfrom both\nline3\nline4\nLINE5\n")
-    try git.stage(["game.lua"], in: repo)
-    try git.commit(message: "", in: repo)
-    check(git.history(in: repo).first?.message == "Merge branch 'clash' into main", "merge message used")
-    checkClean(repo, "after resolving")
-
-    // Abort.
-    try git.checkout("clash", in: repo)
-    write(repo, "game.lua", "again from clash\n")
-    try git.commit(message: "clash 2", all: true, in: repo)
-    try git.checkout("main", in: repo)
-    write(repo, "game.lua", "again from main\n")
-    try git.commit(message: "main 2", all: true, in: repo)
-    _ = try git.merge("clash", in: repo)
-    try git.abortMerge(in: repo)
-    check(read(repo, "game.lua") == "again from main\n", "abort restored the file")
-    checkClean(repo, "after abort")
+    try? FileManager.default.removeItem(at: repo.root.appendingPathComponent("lib/util.lua"))
+    attempt("commit -a with a deletion") { try repo.commit(message: "Remove util", stageAll: true) }
+    check(repo.changes(inCommit: repo.status().head!).map { "\($0.status.rawValue) \($0.path)" } == ["D lib/util.lua"], "the commit's changes")
+    check(repo.log().count == 2 && repo.log().last?.summary == "First", "newest first")
 }
 
 section("undo and amend")
 do {
-    let repo = newRepo(remote: false)
-    write(repo, "a.lua", "1\n")
-    try git.commit(message: "one", all: true, in: repo)
-    write(repo, "a.lua", "22\n")
-    try git.commit(message: "two", all: true, in: repo)
-    let message = try git.undoLastCommit(in: repo)
-    check(message == "two", "undo returns the message")
-    check(git.status(in: repo).stagedFiles.map(\.path) == ["a.lua"], "undone change is staged")
-    try git.commit(message: "two again", in: repo)
-    try git.commit(message: "two, amended", amend: true, in: repo)
-    check(git.history(in: repo).map(\.message) == ["two, amended", "one"], "amend replaced the commit")
-    checkClean(repo, "after amend")
-}
-
-section("migrating a repository from an older build")
-do {
-    let repo = FileManager.default.temporaryDirectory.appendingPathComponent("git-legacy-\(UUID().uuidString)")
-    let gitDir = repo.appendingPathComponent(".git")
-    try FileManager.default.createDirectory(at: gitDir.appendingPathComponent("objects"), withIntermediateDirectories: true)
-    try FileManager.default.createDirectory(at: gitDir.appendingPathComponent("refs/heads"), withIntermediateDirectories: true)
-    var tree1: [String: String] = [:], tree2: [String: String] = [:]
-    for (path, text, tree) in [("a.lua", "old\n", 1), ("a.lua", "new\n", 2), ("b.lua", "same\n", 0)] {
-        let data = Data(text.utf8)
-        let sha = GitManager.blobSHA(data)
-        try data.write(to: gitDir.appendingPathComponent("objects/\(sha)"))
-        if tree != 2 { tree1[path] = sha }
-        if tree != 1 { tree2[path] = sha }
-    }
-    let log: [[String: Any]] = [
-        ["hash": "c2c2c2c2", "author": "me", "timestamp": 2.0, "message": "second", "tree": tree2],
-        ["hash": "c1c1c1c1", "author": "me", "timestamp": 1.0, "message": "first", "tree": tree1],
-    ]
-    try JSONSerialization.data(withJSONObject: log).write(to: gitDir.appendingPathComponent("commits.json"))
-    try JSONEncoder().encode(tree2).write(to: gitDir.appendingPathComponent("index.json"))
-    try "ref: refs/heads/main\n".write(to: gitDir.appendingPathComponent("HEAD"), atomically: true, encoding: .utf8)
-    try "dev".write(to: gitDir.appendingPathComponent("refs/heads/dev"), atomically: true, encoding: .utf8)   // old builds wrote the name
-    try JSONEncoder().encode(["commit": "c1c1c1c1"]).write(to: gitDir.appendingPathComponent("pushed.json"))
-    write(repo, "a.lua", "new\n")
-    write(repo, "b.lua", "same\n")
-
-    checkClean(repo, "legacy repo after migration")
-    check(git.tip(of: "main", in: repo) == "c2c2c2c2" && git.tip(of: "dev", in: repo) == "c2c2c2c2", "branches point at the newest commit")
-    check(git.upstream(of: "main", in: repo) == "c1c1c1c1", "sync point kept")
-    check(git.status(in: repo).aheadCount == 1, "one commit to push")
-    check(git.history(in: repo).map(\.id) == ["c2c2c2c2", "c1c1c1c1"], "history linked")
-    try git.checkout("dev", in: repo)
-    checkClean(repo, "legacy repo after checkout")
-}
-
-// MARK: - GitHub
-
-section("push sends only changed files")
-do {
-    FakeGitHub.reset()
-    let head = FakeGitHub.seed("main", files: ["main.lua": "print(1)\n", "conf.lua": "-- conf\n", "assets/readme.txt": "hi\n", ".gitignore": "*.tmp\n"])
     let repo = newRepo()
-    check(pull(repo) == 3, "first pull brings the three visible files")
-    check(files(repo) == ["main.lua": "print(1)\n", "conf.lua": "-- conf\n", "assets/readme.txt": "hi\n"], "pulled files")
-    checkClean(repo, "after first pull")
-    check(git.status(in: repo).hasUpstream, "pull set the sync point")
-    check(push(repo) == 0 && FakeGitHub.blobUploads == 0 && FakeGitHub.treePaths.isEmpty, "nothing to push after pull")
+    write(repo, "a.txt", "1\n")
+    attempt("first") { try repo.commit(message: "One", stageAll: true) }
+    write(repo, "a.txt", "2\n")
+    attempt("second") { try repo.commit(message: "Two", stageAll: true) }
+    var message = ""
+    attempt("undo") { message = try repo.undoLastCommit() }
+    check(message == "Two" && repo.log().count == 1, "the last commit is undone: \(message)")
+    check(repo.status().stagedFiles.map(\.path) == ["a.txt"], "its changes stay staged")
+    attempt("amend") { try repo.commit(message: "One and two", amend: true) }
+    check(repo.log().count == 1 && repo.log().first?.summary == "One and two", "amending replaces the commit")
+    checkClean(repo, "after amending")
+    attempt("undo the first") { _ = try repo.undoLastCommit() }
+    check(repo.log().isEmpty && repo.status().stagedFiles.count == 1, "undoing the first commit leaves none, its files staged")
+}
 
-    write(repo, "main.lua", "print(2)\n")
-    try git.commit(message: "edit main", all: true, in: repo)
-    check(git.status(in: repo).aheadCount == 1, "one commit ahead")
-    check(push(repo) == 1, "one commit pushed")
-    check(FakeGitHub.blobUploads == 1 && FakeGitHub.treePaths == ["main.lua"], "only main.lua sent: \(FakeGitHub.treePaths)")
-    check(FakeGitHub.parents(FakeGitHub.refs["main"]!) == [head], "pushed on top of GitHub's head")
-    check(FakeGitHub.files("main")[".gitignore"] == "*.tmp\n", "hidden files on GitHub left alone")
-    check(git.status(in: repo).aheadCount == 0, "nothing ahead after push")
-    FakeGitHub.treePaths = []
-    check(push(repo) == 0 && FakeGitHub.treePaths.isEmpty, "second push sends nothing")
-    checkClean(repo, "after push")
+section("branches and checkout")
+do {
+    let repo = newRepo()
+    write(repo, "main.lua", "-- main\n")
+    attempt("commit") { try repo.commit(message: "Base", stageAll: true) }
+    attempt("create feature") { try repo.createBranch("feature") }
+    check(repo.status().branch == "feature", "on the new branch")
+    write(repo, "main.lua", "-- feature\n")
+    write(repo, "new.lua", "-- new\n")
+    attempt("commit on feature") { try repo.commit(message: "Feature work", stageAll: true) }
+    attempt("back to main") { try repo.checkout("main") }
+    check(read(repo, "main.lua") == "-- main\n" && read(repo, "new.lua") == nil, "main's files are back")
+    checkClean(repo, "after switching")
+    attempt("feature again") { try repo.checkout("feature") }
+    check(read(repo, "new.lua") == "-- new\n", "feature's files are back")
+    check(Set(repo.branches().map(\.name)) == ["main", "feature"] && repo.branches().first?.isHead == true, "branches: \(repo.branches().map(\.name))")
 
-    // A change made on GitHub comes down; nothing goes back up.
-    FakeGitHub.seed("main", files: ["main.lua": "print(2)\n", "conf.lua": "-- conf v2\n", "assets/readme.txt": "hi\n", ".gitignore": "*.tmp\n"])
-    check(pull(repo) == 1, "pull brought conf.lua")
-    check(read(repo, "conf.lua") == "-- conf v2\n", "conf.lua updated")
-    checkClean(repo, "after second pull")
-    FakeGitHub.treePaths = []
-    check(push(repo) == 0 && FakeGitHub.treePaths.isEmpty, "push after pull sends nothing")
+    attempt("main") { try repo.checkout("main") }
+    write(repo, "main.lua", "-- local edit\n")
+    let blocked = expectError("checkout over local changes") { try repo.checkout("feature") }
+    check(blocked?.isConflict == true && blocked?.paths == ["main.lua"], "the change in the way is named: \(String(describing: blocked?.paths))")
+    check(read(repo, "main.lua") == "-- local edit\n", "and kept")
+    attempt("force") { try repo.checkout("feature", force: true) }
+    check(read(repo, "main.lua") == "-- feature\n" && repo.status().branch == "feature", "force overwrites it")
 
-    // A new branch is published on top of the commit it started from.
-    try git.createBranch("feature", in: repo)
-    check(!git.status(in: repo).hasUpstream, "new branch has no upstream")
-    write(repo, "assets/readme.txt", "hello\n")
-    try git.commit(message: "readme", all: true, in: repo)
-    let mainHead = FakeGitHub.refs["main"]!
-    FakeGitHub.treePaths = []
-    check(push(repo) == 1, "feature published")
-    check(FakeGitHub.refs["feature"] != nil, "branch created on GitHub")
-    check(FakeGitHub.parents(FakeGitHub.refs["feature"]!) == [mainHead], "feature builds on main's head")
-    check(FakeGitHub.treePaths == ["assets/readme.txt"], "only the readme sent: \(FakeGitHub.treePaths)")
-    check(git.status(in: repo).hasUpstream, "feature now has an upstream")
-    check(FakeGitHub.refs["main"] == mainHead, "main untouched")
+    attempt("rename") { try repo.renameBranch("feature", to: "topic") }
+    check(repo.status().branch == "topic", "renamed the checked-out branch")
+    let notMerged = expectError("deleting the checked-out branch") { try repo.deleteBranch("topic") }
+    check(notMerged != nil, "can't delete the checked-out branch")
+    attempt("main") { try repo.checkout("main") }
+    let unmerged = expectError("deleting an unmerged branch") { try repo.deleteBranch("topic") }
+    check(unmerged?.code == GitError.notMerged, "an unmerged branch needs force")
+    attempt("force delete") { try repo.deleteBranch("topic", force: true) }
+    check(repo.branches().map(\.name) == ["main"], "deleted")
 
-    // Back on main, the branch's files are gone and nothing looks changed.
-    try git.checkout("main", in: repo)
-    check(read(repo, "assets/readme.txt") == "hi\n", "main's readme")
-    checkClean(repo, "main after publishing feature")
-    FakeGitHub.treePaths = []
-    check(push(repo) == 0 && FakeGitHub.treePaths.isEmpty, "main has nothing to push")
+    let base = repo.status().head!
+    attempt("detach") { try repo.checkout(commit: base) }
+    check(repo.status().branch == nil && repo.status().head == base, "a detached HEAD")
+    check(expectError("bad name") { try repo.createBranch("bad..name") } != nil, "invalid names are refused")
+}
 
-    // Merge the branch and push the merge.
-    guard case .fastForward = try git.merge("feature", in: repo) else { fatalError("expected fast-forward") }
-    FakeGitHub.treePaths = []
-    push(repo)
-    check(FakeGitHub.files("main") == FakeGitHub.files("feature"), "main matches feature on GitHub")
-    check(FakeGitHub.treePaths.isEmpty, "fast-forward push sent no files: \(FakeGitHub.treePaths)")
-    checkClean(repo, "after merge push")
+section("merge")
+do {
+    let repo = newRepo()
+    write(repo, "a.txt", "one\ntwo\nthree\n")
+    attempt("base") { try repo.commit(message: "Base", stageAll: true) }
+    attempt("branch") { try repo.createBranch("feature") }
+    write(repo, "b.txt", "feature\n")
+    attempt("feature") { try repo.commit(message: "Add b", stageAll: true) }
+    attempt("main") { try repo.checkout("main") }
+    var result: GitMergeResult?
+    attempt("fast-forward") { result = try repo.merge("feature") }
+    if case .fastForward = result {} else { check(false, "expected a fast-forward, got \(String(describing: result))") }
+    check(read(repo, "b.txt") == "feature\n" && repo.status().head == repo.branches().first { $0.name == "feature" }?.tip, "main moved to feature")
+    attempt("again") { result = try repo.merge("feature") }
+    if case .upToDate = result {} else { check(false, "expected up to date") }
 
-    // A branch that only exists on GitHub.
-    FakeGitHub.seed("art", files: ["main.lua": "print(2)\n", "conf.lua": "-- conf v2\n", "assets/readme.txt": "hello\n", "art/logo.txt": "logo\n"])
-    let remoteNames = wait { git.remoteBranches(in: repo, completion: $0) }
-    check((try? remoteNames.get())?.contains("art") == true, "remote branches listed")
-    let checkout = wait { git.checkoutRemoteBranch("art", in: repo, completion: $0) }
-    if case .failure(let error) = checkout { check(false, "checkout origin/art failed: \(error.localizedDescription)") }
-    check(git.currentBranch(in: repo) == "art" && read(repo, "art/logo.txt") == "logo\n", "on art with its files")
-    checkClean(repo, "after checking out a GitHub branch")
-    FakeGitHub.treePaths = []
-    check(push(repo) == 0 && FakeGitHub.treePaths.isEmpty, "a fresh GitHub branch has nothing to push")
+    // Both change the same line: a conflict.
+    attempt("branch 2") { try repo.createBranch("other") }
+    write(repo, "a.txt", "one\nTWO (other)\nthree\n")
+    attempt("other") { try repo.commit(message: "Other's two", stageAll: true) }
+    attempt("main") { try repo.checkout("main") }
+    write(repo, "a.txt", "one\nTWO (main)\nthree\n")
+    attempt("main's") { try repo.commit(message: "Main's two", stageAll: true) }
+    attempt("conflicting merge") { result = try repo.merge("other") }
+    guard case .conflicts(let paths) = result else { check(false, "expected conflicts, got \(String(describing: result))"); exit(1) }
+    check(paths == ["a.txt"] && repo.status().state == .merging && repo.status().mergingBranch == "other", "a conflict in a.txt, merging other")
+    let text = read(repo, "a.txt") ?? ""
+    check(text.contains("<<<<<<<") && text.contains("TWO (main)") && text.contains("TWO (other)") && text.contains(">>>>>>>"), "conflict markers: \(text)")
+    check(expectError("committing with conflicts") { try repo.commit(message: "x") } != nil, "can't commit unresolved conflicts")
+    write(repo, "a.txt", "one\nTWO (both)\nthree\n")
+    attempt("resolve") { try repo.stage(["a.txt"]) }
+    check(repo.status().mergeConflicts.isEmpty, "staging resolves it")
+    attempt("merge commit") { try repo.commit(message: repo.mergeMessage ?? "Merge") }
+    check(repo.log().first?.parents.count == 2 && repo.status().state == .none, "a merge commit, and the merge is over")
+    checkClean(repo, "after the merge")
 
-    // Conflicting edits on both sides stop the pull before anything is written.
-    try git.checkout("main", in: repo)
-    write(repo, "conf.lua", "-- local\n")
-    try git.commit(message: "local conf", all: true, in: repo)
-    FakeGitHub.seed("main", files: FakeGitHub.files("main").merging(["conf.lua": "-- remote\n"]) { $1 })
-    switch wait({ git.pull(in: repo, completion: $0) }) {
-    case .success: check(false, "pull should stop on a conflict")
-    case .failure(let error): check((error as NSError).code == 409, "pull conflict code")
+    // Abort.
+    attempt("branch 3") { try repo.createBranch("third") }
+    write(repo, "a.txt", "one\nthird\nthree\n")
+    attempt("third") { try repo.commit(message: "Third", stageAll: true) }
+    attempt("main") { try repo.checkout("main") }
+    write(repo, "a.txt", "one\nmain again\nthree\n")
+    attempt("main again") { try repo.commit(message: "Main again", stageAll: true) }
+    attempt("merge third") { result = try repo.merge("third") }
+    attempt("abort") { try repo.abortMerge() }
+    check(read(repo, "a.txt") == "one\nmain again\nthree\n" && repo.status().state == .none, "aborting goes back")
+    checkClean(repo, "after aborting")
+}
+
+section("revert, cherry-pick, reset")
+do {
+    let repo = newRepo()
+    write(repo, "a.txt", "1\n")
+    attempt("one") { try repo.commit(message: "One", stageAll: true) }
+    write(repo, "a.txt", "2\n")
+    var two: GitCommit?
+    attempt("two") { two = try repo.commit(message: "Two", stageAll: true) }
+    var result: GitMergeResult?
+    attempt("revert") { result = try repo.revert(two!.id) }
+    if case .merged = result {} else { check(false, "revert: \(String(describing: result))") }
+    check(read(repo, "a.txt") == "1\n" && repo.log().first?.summary == "Revert \"Two\"", "reverted: \(String(describing: repo.log().first?.summary))")
+
+    attempt("branch") { try repo.createBranch("pick", at: repo.log().last!.id) }
+    write(repo, "b.txt", "b\n")
+    var b: GitCommit?
+    attempt("b") { b = try repo.commit(message: "Add b", stageAll: true) }
+    attempt("main") { try repo.checkout("main") }
+    attempt("cherry-pick") { result = try repo.cherryPick(b!.id) }
+    check(read(repo, "b.txt") == "b\n" && repo.log().first?.summary == "Add b" && repo.log().first?.id != b?.id, "picked as a new commit")
+
+    let count = repo.log().count
+    attempt("reset hard") { try repo.reset(to: two!.id, mode: .hard) }
+    check(repo.log().count == 2 && read(repo, "a.txt") == "2\n" && read(repo, "b.txt") == nil, "reset --hard")
+    attempt("reset soft") { try repo.reset(to: repo.log().last!.id, mode: .soft) }
+    check(repo.log().count == 1 && repo.status().stagedFiles.map(\.path) == ["a.txt"], "reset --soft keeps the changes staged (from \(count))")
+}
+
+section("stash")
+do {
+    let repo = newRepo()
+    write(repo, "a.txt", "base\n")
+    attempt("base") { try repo.commit(message: "Base", stageAll: true) }
+    write(repo, "a.txt", "edited\n")
+    write(repo, "new.txt", "new\n")
+    attempt("stash") { try repo.stash(message: "work") }
+    checkClean(repo, "after stashing")
+    check(read(repo, "new.txt") == nil && repo.stashes().count == 1 && repo.stashes()[0].message.contains("work"), "stashed with untracked files")
+    attempt("pop") { try repo.applyStash(0, drop: true) }
+    check(read(repo, "a.txt") == "edited\n" && read(repo, "new.txt") == "new\n" && repo.stashes().isEmpty, "popped")
+    attempt("stash again") { try repo.stash() }
+    attempt("apply") { try repo.applyStash(0, drop: false) }
+    check(repo.stashes().count == 1, "apply keeps it")
+    attempt("drop all") { try repo.dropAllStashes() }
+    check(repo.stashes().isEmpty, "dropped")
+    attempt("clean up") { try repo.discard(repo.status().changedFiles) }
+    check(expectError("stashing nothing") { try repo.stash() } != nil, "nothing to stash")
+}
+
+section("tags, config, blame, file history, patches")
+do {
+    let repo = newRepo()
+    write(repo, "a.txt", "one\ntwo\n")
+    attempt("one") { try repo.commit(message: "One", stageAll: true) }
+    attempt("tag") { try repo.createTag("v1.0", message: "Release") }
+    write(repo, "a.txt", "one\nTWO\nthree\n")
+    write(repo, "b.txt", "b\n")
+    attempt("two") { try repo.commit(message: "Two", stageAll: true) }
+    attempt("light tag") { try repo.createTag("latest") }
+    check(Set(repo.tags().map(\.name)) == ["v1.0", "latest"], "tags: \(repo.tags().map(\.name))")
+    check(repo.tags().first { $0.name == "v1.0" }?.target == repo.log().last?.id, "an annotated tag points at its commit")
+    check(repo.log().first?.refs.contains(GitRefLabel(name: "latest", kind: .tag)) == true && repo.log().first?.refs.first?.kind == .head, "the Graph's labels")
+    attempt("delete tag") { try repo.deleteTag("latest") }
+    check(repo.tags().map(\.name) == ["v1.0"], "deleted")
+
+    attempt("config") { try repo.setConfig("user.name", "Someone") }
+    attempt("email") { try repo.setConfig("user.email", "someone@example.com") }
+    check(repo.config("user.name") == "Someone", "config set")
+    write(repo, "a.txt", "one\nTWO\nthree\nfour\n")
+    var three: GitCommit?
+    attempt("three") { three = try repo.commit(message: "Three", stageAll: true) }
+    check(three?.author == "Someone" && three?.email == "someone@example.com", "commits use user.name and user.email")
+
+    let blame = repo.blame("a.txt", contents: "one\nTWO\nthree\nfour\nfive (not committed)\n")
+    check(blame.count == 6, "a line each (and the last, empty one): \(blame.count)")
+    check(blame[0]?.summary == "One" && blame[1]?.summary == "Two" && blame[3]?.summary == "Three" && blame[4] == nil, "blame: \(blame.map { $0?.summary ?? "-" })")
+    check(repo.log(path: "a.txt").map(\.summary) == ["Three", "Two", "One"] && repo.log(path: "b.txt").map(\.summary) == ["Two"], "file history")
+
+    let patch = repo.patch(.commit(three!.id))
+    check(patch.contains("diff --git a/a.txt b/a.txt") && patch.contains("+four"), "a commit's patch: \(patch)")
+    write(repo, "a.txt", "changed\n")
+    check(repo.patch(.workingTree).contains("-one") && repo.patch(.workingTree).contains("+changed"), "the working tree's patch")
+    check(repo.patch(.staged).isEmpty, "nothing staged")
+}
+
+section("remotes: push, clone, fetch, pull")
+do {
+    let server = newRemote()
+    let mine = newRepo()
+    write(mine, "main.lua", "-- v1\n")
+    attempt("first") { try mine.commit(message: "First", stageAll: true) }
+    attempt("remote") { try mine.setRemote(url: server.path) }
+    check(mine.remotes() == [GitRemote(name: "origin", url: server.path)], "origin added")
+    attempt("push") { try mine.push() }
+    check(mine.status().upstream == "origin/main" && mine.status().aheadCount == 0, "pushed, with an upstream: \(String(describing: mine.status().upstream))")
+    write(mine, "main.lua", "-- v2\n")
+    attempt("second") { try mine.commit(message: "Second", stageAll: true) }
+    check(mine.status().aheadCount == 1, "one to push")
+    attempt("push again") { try mine.push() }
+    check(mine.status().aheadCount == 0, "pushed")
+
+    // Someone else clones it: the whole history comes along.
+    var theirs: GitRepository?
+    attempt("clone") { theirs = try GitRepository.clone(server.path, to: temporary("clone").appendingPathComponent("project")) }
+    guard let theirs else { exit(1) }
+    check(theirs.log().map(\.summary) == ["Second", "First"] && read(theirs, "main.lua") == "-- v2\n", "a clone has every commit")
+    check(theirs.status().upstream == "origin/main", "and follows origin")
+    write(theirs, "theirs.lua", "-- theirs\n")
+    attempt("their commit") { try theirs.commit(message: "Theirs", stageAll: true) }
+    attempt("their push") { try theirs.push() }
+
+    attempt("fetch") { try mine.fetch() }
+    check(mine.status().behindCount == 1 && read(mine, "theirs.lua") == nil, "fetching finds the new commit without merging it")
+    var result: GitMergeResult?
+    attempt("pull") { result = try mine.pull() }
+    if case .fastForward = result {} else { check(false, "pull: \(String(describing: result))") }
+    check(read(mine, "theirs.lua") == "-- theirs\n" && mine.status().behindCount == 0, "pulled")
+
+    // Both commit: pushing is refused until pulling merges.
+    write(mine, "mine.lua", "-- mine\n")
+    attempt("mine") { try mine.commit(message: "Mine", stageAll: true) }
+    write(theirs, "more.lua", "-- more\n")
+    attempt("more") { try theirs.commit(message: "More", stageAll: true) }
+    attempt("their push 2") { try theirs.push() }
+    check(expectError("pushing behind") { try mine.push() } != nil, "a push that would lose their commit is refused")
+    attempt("pull merges") { result = try mine.pull() }
+    if case .merged = result {} else { check(false, "pull merge: \(String(describing: result))") }
+    attempt("push after pull") { try mine.push() }
+    check(mine.status().aheadCount == 0 && mine.status().behindCount == 0 && read(mine, "more.lua") == "-- more\n", "in sync")
+
+    // A branch published, then checked out from the remote elsewhere.
+    attempt("branch") { try mine.createBranch("feature") }
+    write(mine, "f.lua", "-- f\n")
+    attempt("f") { try mine.commit(message: "F", stageAll: true) }
+    attempt("publish") { try mine.push() }
+    attempt("their fetch") { try theirs.fetch() }
+    check(theirs.branches(remote: true).map(\.name).contains("origin/feature"), "the branch shows as a remote one")
+    attempt("checkout remote") { try theirs.checkoutRemote("origin/feature") }
+    check(theirs.status().branch == "feature" && theirs.status().upstream == "origin/feature" && read(theirs, "f.lua") == "-- f\n", "a local branch following it")
+    attempt("push tags") { try mine.createTag("v2"); try mine.pushTags() }
+    attempt("fetch tags") { try theirs.fetch() }
+    check(theirs.tags().map(\.name).contains("v2"), "tags come with a fetch")
+
+    check(GitRepository.gitHubOwnerAndRepo("https://github.com/owner/repo.git")! == ("owner", "repo")
+        && GitRepository.gitHubOwnerAndRepo("git@github.com:owner/repo.git")! == ("owner", "repo")
+        && GitRepository.gitHubOwnerAndRepo("https://gitlab.com/owner/repo") == nil, "GitHub remotes are recognised")
+}
+
+section("the Graph's lanes")
+do {
+    func commit(_ id: String, _ parents: [String]) -> GitCommit {
+        GitCommit(id: id, summary: id, message: id, author: "", email: "", date: Date(), parents: parents)
     }
-    check(read(repo, "conf.lua") == "-- local\n", "local file untouched")
+    // m merges f into c; f and c both come from b.
+    let rows = GitGraph.layout([commit("m", ["c", "f"]), commit("f", ["b"]), commit("c", ["b"]), commit("b", ["a"]), commit("a", [])])
+    check(rows.map(\.node) == [0, 1, 0, 0, 0], "lanes: \(rows.map(\.node))")
+    check(rows[0].outgoing == [0, 1], "the merge has two lines down")
+    check(rows[2].passThrough == [1] && rows[3].incoming.sorted() == [0, 1], "the branch runs beside and joins at b: \(rows[2]) \(rows[3])")
+    check(rows[4].outgoing.isEmpty && rows[4].below.isEmpty, "the first commit ends the lane")
+}
+
+section("git in the Terminal (GitCommandLine)")
+do {
+    let repo = newRepo()
+    write(repo, "a.txt", "one\n")
+    var out = await GitCommandLine.run(["status"], root: repo.root, cwd: repo.root)
+    check(out.text.contains("No commits yet") && out.text.contains("a.txt"), "status: \(out.text)")
+    _ = await GitCommandLine.run(["add", "."], root: repo.root, cwd: repo.root)
+    out = await GitCommandLine.run(["commit", "-m", "Add a"], root: repo.root, cwd: repo.root)
+    check(out.code == 0 && out.text.contains("Add a"), "commit: \(out.text)")
+    write(repo, "a.txt", "one\ntwo\n")
+    out = await GitCommandLine.run(["diff"], root: repo.root, cwd: repo.root)
+    check(out.text.contains("+two"), "diff: \(out.text)")
+    out = await GitCommandLine.run(["commit", "-am", "Two"], root: repo.root, cwd: repo.root)
+    out = await GitCommandLine.run(["log", "--oneline"], root: repo.root, cwd: repo.root)
+    check(out.text.contains("Two") && out.text.contains("Add a") && out.text.contains("HEAD -> "), "log: \(out.text)")
+    out = await GitCommandLine.run(["checkout", "-b", "topic"], root: repo.root, cwd: repo.root)
+    check(out.text.contains("Switched to a new branch 'topic'"), "checkout -b: \(out.text)")
+    out = await GitCommandLine.run(["branch"], root: repo.root, cwd: repo.root)
+    check(out.text.contains("topic") && out.text.contains("main"), "branch: \(out.text)")
+    out = await GitCommandLine.run(["tag", "v1"], root: repo.root, cwd: repo.root)
+    out = await GitCommandLine.run(["tag"], root: repo.root, cwd: repo.root)
+    check(out.text == "v1\n", "tag: \(out.text)")
+    out = await GitCommandLine.run(["show", "HEAD"], root: repo.root, cwd: repo.root)
+    check(out.text.contains("+two") && out.text.contains("Author:"), "show: \(out.text)")
+    out = await GitCommandLine.run(["frobnicate"], root: repo.root, cwd: repo.root)
+    check(out.code != 0, "unknown commands fail")
 }
 
 // MARK: - AI merge answers
@@ -506,65 +500,6 @@ do {
 
     let debugger = analyze(["browser": "./web.js", "contributes": ["debuggers": [[:]], "snippets": [[:]]]], ["web"])
     check(debugger.level == .partial, "desktop-only contributions make it partial: \(debugger.notes)")
-}
-
-section("git in the Terminal (GitCommandLine) and line diffs")
-do {
-    /// Runs a git command line as the Terminal does, waiting for it.
-    func runGit(_ args: [String], _ root: URL, cwd: URL? = nil) -> GitCommandLine.Output {
-        var result: GitCommandLine.Output?
-        Task { @MainActor in result = await GitCommandLine.run(args, root: root, cwd: cwd ?? root) }
-        while result == nil { RunLoop.main.run(until: Date().addingTimeInterval(0.005)) }
-        return result!
-    }
-    func plain(_ text: String) -> String { text.replacingOccurrences(of: "\u{1B}\\[[0-9;]*m", with: "", options: .regularExpression) }
-
-    let edits = LineDiff.diff(["a", "b", "c", "d"], ["a", "x", "c", "d", "e"])
-    check(edits == [.same("a"), .removed("b"), .added("x"), .same("c"), .same("d"), .added("e")], "line diff: \(edits)")
-    let ten = (1...10).map(String.init).joined(separator: "\n") + "\n"
-    let hunk = LineDiff.unified(old: ten, new: ten.replacingOccurrences(of: "\n5\n", with: "\nfive\n"), path: "f.txt")
-    check(hunk.contains("@@ -2,7 +2,7 @@") && hunk.contains("-5\n+five\n"), "unified hunk with 3 lines of context: \(hunk)")
-    check(LineDiff.unified(old: "same\n", new: "same\n", path: "f") == "", "no diff for the same text")
-    let created = LineDiff.unified(old: "", new: "a\nb\n", path: "n", isNew: true)
-    check(created.contains("--- /dev/null") && created.contains("@@ -0,0 +1,2 @@"), "new file diff: \(created)")
-
-    let repo = newRepo(remote: false)
-    write(repo, "src/app.js", "one\ntwo\n")
-    var out = plain(runGit(["status"], repo).text)
-    check(out.contains("Untracked files") && out.contains("src/app.js"), "status lists untracked files: \(out)")
-    let added = runGit(["add", "app.js"], repo, cwd: repo.appendingPathComponent("src"))
-    check(added.code == 0, "add from a subfolder: \(added.text)")
-    out = plain(runGit(["status", "-s"], repo).text)
-    check(out.contains("src/app.js") && !out.hasPrefix(" ") && !out.hasPrefix("??"), "the file is staged: \(out)")
-    let commit = runGit(["commit", "-m", "First"], repo)
-    check(commit.code == 0 && plain(commit.text).contains("First"), "commit -m: \(commit.text)")
-    out = plain(runGit(["log", "--oneline"], repo).text)
-    check(out.contains("First"), "log --oneline: \(out)")
-    check(runGit(["checkout", "-b", "feature"], repo).code == 0 && git.currentBranch(in: repo) == "feature", "checkout -b")
-    out = plain(runGit(["branch"], repo).text)
-    check(out.contains("* feature") && out.contains("  main"), "branch lists both, current starred: \(out)")
-    write(repo, "src/app.js", "one\nTWO\n")
-    out = plain(runGit(["diff"], repo).text)
-    check(out.contains("-two") && out.contains("+TWO") && out.contains("a/src/app.js"), "diff shows the change: \(out)")
-    check(runGit(["stash"], repo).code == 0 && read(repo, "src/app.js") == "one\ntwo\n", "stash puts the change away")
-    check(runGit(["stash", "pop"], repo).code == 0 && read(repo, "src/app.js") == "one\nTWO\n", "stash pop brings it back")
-    check(runGit(["frobnicate"], repo).code == 1, "an unknown command fails")
-    check(runGit(["add", "missing.txt"], repo).code == 128, "adding a path with no changes fails")
-}
-
-section("git blame")
-do {
-    // Newest first: c3 changed line 2 and added "d"; c2 added "c"; c1 made the file.
-    let v1 = "a\nb\n"
-    let v2 = "a\nb\nc\n"
-    let v3 = "a\nB\nc\nd\n"
-    let current = "a\nB\nc\nd\nnew\n"
-    let owners = LineDiff.blame(current: current, versions: [v3, v2, v1])
-    check(owners == [2, 0, 1, 0, nil], "each line's commit, and uncommitted lines: \(owners)")
-    check(LineDiff.blame(current: "x\n", versions: []) == [nil], "no history: nothing committed")
-    check(LineDiff.blame(current: "a\n", versions: ["a\n", nil]) == [0], "the commit that created the file")
-    check(LineDiff.blame(current: "a\nb\n", versions: ["a\nb\n", "a\nb\n", "a\n"]) == [2, 1], "commits that didn't touch the file are skipped")
-    check(LineDiff.mapping(from: ["a", "x", "c"], to: ["a", "b", "c"]) == [0, nil, 2], "line mapping")
 }
 
 section("settings.json: JSON with comments")

@@ -143,11 +143,33 @@ jobs:
           sudo xcode-select -s "$xcode"
           xcodebuild -version
 
-      # The git engine's tests run first: they take seconds and stop the build if, say, a
-      # checkout leaves files looking changed or a push re-sends unchanged files.
+      # libgit2, the app's git, for iOS and this Mac (its tests), cached on the pinned version.
+      - name: Restore libgit2
+        id: libgit2-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: third_party/libgit2
+          key: libgit2-${{ hashFiles('scripts/build-libgit2.sh') }}
+
+      - name: Build libgit2
+        if: steps.libgit2-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-libgit2.sh
+
+      - name: Save libgit2
+        if: steps.libgit2-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: third_party/libgit2
+          key: libgit2-${{ hashFiles('scripts/build-libgit2.sh') }}
+
+      # The git tests run first: they take seconds and stop the build if, say, a checkout leaves
+      # files looking changed, a merge loses a change or a push doesn't arrive.
       - name: Test git engine
         run: |
-          swiftc -swift-version 5 App/Git/GitManager.swift App/Git/GitCommandLine.swift App/Settings/JSONC.swift App/AI/ConflictResolver.swift App/Extensions/ExtensionCompatibility.swift Tests/GitEngine/*.swift -o "$RUNNER_TEMP/git-tests"
+          swiftc -swift-version 5 -I third_party/libgit2/include -L third_party/libgit2/macos \
+            App/Git/Git.swift App/Git/GitRepository.swift App/Git/GitGraph.swift App/Git/GitCommandLine.swift App/Git/KeychainStore.swift \
+            App/Settings/JSONC.swift App/AI/ConflictResolver.swift App/Extensions/ExtensionCompatibility.swift Tests/GitEngine/*.swift \
+            -o "$RUNNER_TEMP/git-tests"
           "$RUNNER_TEMP/git-tests"
 
       - name: Install tools

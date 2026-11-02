@@ -256,9 +256,8 @@ final class WelcomeViewController: UIViewController, UIDocumentPickerDelegate {
 
     private func confirmDelete(_ project: ProjectInfo) {
         var message = "This deletes the project folder and everything in it, including its Git history. This can't be undone."
-        let git = GitManager.shared
-        if git.isGitRepo(at: project.url) {
-            let status = git.status(in: project.url)
+        if let git = try? GitRepository.open(project.url) {
+            let status = git.status()
             var unsaved: [String] = []
             if status.aheadCount > 0 { unsaved.append("\(status.aheadCount) commit\(status.aheadCount == 1 ? "" : "s") that aren't on GitHub") }
             let changes = status.stagedFiles.count + status.changedFiles.count
@@ -391,23 +390,39 @@ final class WelcomeViewController: UIViewController, UIDocumentPickerDelegate {
         present(alert, animated: true)
     }
 
+    /// Clones the whole repository (its history too) into a new project.
     private func clone(_ urlString: String) {
         setBusy("Cloning…")
-        GitManager.shared.clone(from: urlString) { [weak self] result in
-            self?.setBusy(nil)
-            switch result {
-            case .success(let url):
-                self?.open(url)
-            case .failure(let error as NSError) where error.domain == "GitManager" && [401, 403, 404].contains(error.code):
-                // GitHub answers 404 for private repos it won't show you, so offer to sign in and retry.
-                self?.offerSignIn(thenClone: urlString, error: error)
-            case .failure(let error):
-                self?.showError(title: "Clone Failed", error)
+        var name = URL(string: urlString)?.deletingPathExtension().lastPathComponent ?? ""
+        if name.isEmpty || name == "/" { name = "cloned-project" }
+        let target = ProjectStore.shared.uniqueProjectURL(named: name)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let transfer = GitTransfer { progress in
+                let percent = Int(progress.fraction * 100)
+                DispatchQueue.main.async { self?.setBusy("Cloning… \(progress.phase.lowercased()) \(percent)%") }
+            }
+            do {
+                try GitRepository.clone(urlString, to: target, transfer: transfer)
+                DispatchQueue.main.async {
+                    self?.setBusy(nil)
+                    self?.open(target)
+                }
+            } catch {
+                try? FileManager.default.removeItem(at: target)
+                DispatchQueue.main.async {
+                    self?.setBusy(nil)
+                    if let error = error as? GitError, error.isAuthentication, GitCredentials.host(of: urlString) == "github.com" {
+                        // GitHub asks for a sign-in for private repositories (and ones it won't show you).
+                        self?.offerSignIn(thenClone: urlString, error: error)
+                    } else {
+                        self?.showError(title: "Clone Failed", error)
+                    }
+                }
             }
         }
     }
 
-    private func offerSignIn(thenClone urlString: String, error: NSError) {
+    private func offerSignIn(thenClone urlString: String, error: Error) {
         let signedIn = GitAccountManager.shared.isSignedIn
         let login = GitAccountManager.shared.currentUser?.login ?? "your account"
         let alert = UIAlertController(

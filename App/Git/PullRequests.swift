@@ -63,7 +63,7 @@ enum PullRequests {
     /// repos/{owner}/{repo}/{path} on GitHub. HTTP errors throw with GitHub's message.
     private static func request(_ path: String, method: String = "GET", body: [String: Any]? = nil, raw: Bool = false,
                                 in project: URL) async throws -> Data {
-        let repo = try GitManager.shared.gitHubRepository(in: project)
+        let repo = try GitRepository.open(project).gitHubRepository()
         let suffix = path.isEmpty ? "" : "/\(path)"
         guard let url = URL(string: "https://api.github.com/repos/\(repo.owner)/\(repo.repo)\(suffix)") else {
             throw error("Invalid GitHub path \(path)")
