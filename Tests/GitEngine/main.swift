@@ -457,7 +457,8 @@ do {
     attempt("resolve") { try repo.stage(["a.txt"]) }
     attempt("continue") { result = try repo.continueRebase() }
     if case .done = result {} else { check(false, "continue: \(String(describing: result))") }
-    check(repo.log().first?.summary == "Feature's two" && repo.log()[1].summary == "Main's two" && repo.status().state == .none, "continued and finished")
+    check(repo.log().map(\.summary) == ["Feature's two", "F2", "F1", "Main's two", "M", "Base"] && repo.status().state == .none,
+          "continued and finished: \(repo.log().map(\.summary))")
     check(read(repo, "a.txt") == "one\nTWO (both)\nthree\n", "the fixed text is kept")
 
     // Abort.
