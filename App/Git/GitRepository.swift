@@ -197,6 +197,10 @@ final class GitRepository {
         DispatchQueue.main.async { NotificationCenter.default.post(name: didChange, object: nil) }
     }
 
+    /// Checkouts that may leave conflicts: their markers include the common ancestor (git's
+    /// diff3 style), which the merge editor and "Resolve for me" use.
+    static let conflictCheckout = GIT_CHECKOUT_SAFE.rawValue | GIT_CHECKOUT_ALLOW_CONFLICTS.rawValue | GIT_CHECKOUT_CONFLICT_STYLE_DIFF3.rawValue
+
     // MARK: Objects
 
     private func lookupCommit(_ spec: String) throws -> OpaquePointer {
@@ -327,7 +331,7 @@ final class GitRepository {
             }
         }
         status.remoteURL = remoteURL()
-        status.state = state
+        status.state = interactiveRebase != nil ? .rebasing : state
         if status.state == .merging { status.mergingBranch = mergingBranch() }
         status.stashCount = stashes().count
         return status
@@ -923,7 +927,7 @@ final class GitRepository {
         git_merge_options_init(&mergeOptions, UInt32(GIT_MERGE_OPTIONS_VERSION))
         var checkoutOptions = git_checkout_options()
         git_checkout_options_init(&checkoutOptions, UInt32(GIT_CHECKOUT_OPTIONS_VERSION))
-        checkoutOptions.checkout_strategy = GIT_CHECKOUT_SAFE.rawValue | GIT_CHECKOUT_ALLOW_CONFLICTS.rawValue | GIT_CHECKOUT_CONFLICT_STYLE_MERGE.rawValue
+        checkoutOptions.checkout_strategy = GitRepository.conflictCheckout
         try Git.check(heads.withUnsafeMutableBufferPointer { git_merge(pointer, $0.baseAddress, 1, &mergeOptions, &checkoutOptions) },
                       "Couldn't merge \(branch)")
         Self.notifyChange()
@@ -958,7 +962,7 @@ final class GitRepository {
         var options = git_revert_options()
         git_revert_options_init(&options, UInt32(GIT_REVERT_OPTIONS_VERSION))
         if git_commit_parentcount(commit) > 1 { options.mainline = 1 }
-        options.checkout_opts.checkout_strategy = GIT_CHECKOUT_SAFE.rawValue | GIT_CHECKOUT_ALLOW_CONFLICTS.rawValue
+        options.checkout_opts.checkout_strategy = GitRepository.conflictCheckout
         try Git.check(git_revert(pointer, commit, &options), "Couldn't revert")
         Self.notifyChange()
         let conflicts = self.conflicts()
@@ -974,7 +978,7 @@ final class GitRepository {
         var options = git_cherrypick_options()
         git_cherrypick_options_init(&options, UInt32(GIT_CHERRYPICK_OPTIONS_VERSION))
         if git_commit_parentcount(commit) > 1 { options.mainline = 1 }
-        options.checkout_opts.checkout_strategy = GIT_CHECKOUT_SAFE.rawValue | GIT_CHECKOUT_ALLOW_CONFLICTS.rawValue
+        options.checkout_opts.checkout_strategy = GitRepository.conflictCheckout
         try Git.check(git_cherrypick(pointer, commit, &options), "Couldn't cherry-pick")
         Self.notifyChange()
         let conflicts = self.conflicts()
@@ -1021,7 +1025,7 @@ final class GitRepository {
     func applyStash(_ index: Int = 0, drop: Bool) throws {
         var options = git_stash_apply_options()
         git_stash_apply_options_init(&options, UInt32(GIT_STASH_APPLY_OPTIONS_VERSION))
-        options.checkout_options.checkout_strategy = GIT_CHECKOUT_SAFE.rawValue
+        options.checkout_options.checkout_strategy = GitRepository.conflictCheckout
         let rc = drop ? git_stash_pop(pointer, index, &options) : git_stash_apply(pointer, index, &options)
         Self.notifyChange()
         if rc == GIT_ECONFLICT.rawValue || rc == GIT_EMERGECONFLICT.rawValue {
@@ -1294,7 +1298,7 @@ extension GitRepository {
     private func rebaseOptions() -> git_rebase_options {
         var options = git_rebase_options()
         git_rebase_options_init(&options, UInt32(GIT_REBASE_OPTIONS_VERSION))
-        options.checkout_options.checkout_strategy = GIT_CHECKOUT_SAFE.rawValue
+        options.checkout_options.checkout_strategy = GitRepository.conflictCheckout
         return options
     }
 
@@ -1447,7 +1451,7 @@ extension GitRepository {
         git_merge_options_init(&mergeOptions, UInt32(GIT_MERGE_OPTIONS_VERSION))
         var checkoutOptions = git_checkout_options()
         git_checkout_options_init(&checkoutOptions, UInt32(GIT_CHECKOUT_OPTIONS_VERSION))
-        checkoutOptions.checkout_strategy = GIT_CHECKOUT_SAFE.rawValue | GIT_CHECKOUT_ALLOW_CONFLICTS.rawValue | GIT_CHECKOUT_CONFLICT_STYLE_MERGE.rawValue
+        checkoutOptions.checkout_strategy = GitRepository.conflictCheckout
         var annotated: OpaquePointer?
         try Git.check(git_annotated_commit_lookup(&annotated, pointer, theirs))
         defer { git_annotated_commit_free(annotated) }
@@ -1696,5 +1700,281 @@ extension GitRepository {
             }
         }
         return hits
+    }
+}
+
+// MARK: - Conflicts, for the merge editor
+
+/// A conflicted file's three versions from the index, and what's being done.
+struct GitConflict {
+    let path: String
+    /// The common ancestor's text (nil when the file didn't exist there, or isn't text).
+    let base: String?
+    /// The current side: the branch being merged into, or the commits a rebase builds on.
+    let ours: String?
+    /// The incoming side: the branch, commit or stash being brought in.
+    let theirs: String?
+    /// "merge", "rebase", "cherry-pick", "revert" or "stash".
+    let operation: String
+    let oursLabel: String
+    let theirsLabel: String
+}
+
+extension GitRepository {
+    func conflict(_ path: String) -> GitConflict? {
+        guard let index = try? index() else { return nil }
+        defer { git_index_free(index) }
+        var ancestor: UnsafePointer<git_index_entry>?
+        var ours: UnsafePointer<git_index_entry>?
+        var theirs: UnsafePointer<git_index_entry>?
+        guard git_index_conflict_get(&ancestor, &ours, &theirs, index, path) == 0 else { return nil }
+        let text = { (entry: UnsafePointer<git_index_entry>?) -> String? in
+            guard var id = entry?.pointee.id, let data = self.blob(&id), !data.prefix(8000).contains(0) else { return nil }
+            return String(data: data, encoding: .utf8)
+        }
+        let (operation, oursLabel, theirsLabel) = conflictLabels()
+        return GitConflict(path: path, base: text(ancestor), ours: text(ours), theirs: text(theirs),
+                           operation: operation, oursLabel: oursLabel, theirsLabel: theirsLabel)
+    }
+
+    /// What the two sides are, in words: in a rebase "current" is what's being built on, and
+    /// "incoming" is the commit being replayed.
+    func conflictLabels() -> (String, String, String) {
+        let branch = currentBranchName ?? "HEAD"
+        func read(_ name: String) -> String? {
+            (try? String(contentsOf: gitDir.appendingPathComponent(name), encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        func short(_ id: String?) -> String {
+            guard let id, let commit = commit(id) else { return id.map { String($0.prefix(7)) } ?? "?" }
+            return "\(commit.shortId) \(commit.summary)"
+        }
+        if let plan = interactiveRebase {
+            let step = plan.current.map { "\($0.shortId) \($0.summary)" } ?? "a commit"
+            return ("rebase", "\(plan.branch), rebased so far", step)
+        }
+        switch state {
+        case .rebasing:
+            let onto = read("rebase-merge/onto_name") ?? short(read("rebase-merge/onto"))
+            return ("rebase", onto, short(read("rebase-merge/stopped-sha") ?? read("REBASE_HEAD")))
+        case .cherryPicking: return ("cherry-pick", branch, short(read("CHERRY_PICK_HEAD")))
+        case .reverting: return ("revert", branch, "the revert of " + short(read("REVERT_HEAD")))
+        case .merging: return ("merge", branch, mergingBranch() ?? "the incoming branch")
+        default: return ("stash", branch, "the stash")
+        }
+    }
+}
+
+// MARK: - Interactive rebase
+
+/// One commit in an interactive rebase, and what to do with it.
+struct GitRebaseStep: Codable, Hashable {
+    enum Action: String, Codable, CaseIterable {
+        /// Keep it as it is.
+        case pick
+        /// Keep its changes with a new message.
+        case reword
+        /// Stop after it, to amend it or add commits.
+        case edit
+        /// Fold it into the commit before, joining the messages.
+        case squash
+        /// Fold it into the commit before, keeping that one's message.
+        case fixup
+        /// Leave it out.
+        case drop
+    }
+    var action: Action
+    let id: String
+    let shortId: String
+    let summary: String
+    /// For reword, and the joined message of a squash.
+    var message: String
+}
+
+/// An interactive rebase in progress (.git/mobile-studio-rebase.json): the branch, where it was,
+/// and the steps left. git itself doesn't see this; it's Mobile Studio's own sequencer.
+struct GitInteractiveRebase: Codable {
+    let branch: String
+    let originalHead: String
+    let onto: String
+    var steps: [GitRebaseStep]
+    /// The step being applied (stopped at conflicts or an edit).
+    var position: Int
+    /// The step stopped at had conflicts, so it still needs committing.
+    var pending: Bool
+    var done: Int { position }
+    var current: GitRebaseStep? { steps.indices.contains(position) ? steps[position] : nil }
+}
+
+enum GitInteractiveResult {
+    case done(Int)
+    /// Stopped after an "edit" step: amend it or commit more, then continue.
+    case stoppedToEdit(GitRebaseStep)
+    case conflicts([String])
+}
+
+extension GitRepository {
+    private var planURL: URL { gitDir.appendingPathComponent("mobile-studio-rebase.json") }
+
+    /// The interactive rebase in progress, if there is one.
+    var interactiveRebase: GitInteractiveRebase? {
+        guard let data = try? Data(contentsOf: planURL) else { return nil }
+        return try? JSONDecoder().decode(GitInteractiveRebase.self, from: data)
+    }
+
+    private func save(_ plan: GitInteractiveRebase?) throws {
+        if let plan { try JSONEncoder().encode(plan).write(to: planURL) } else { try? FileManager.default.removeItem(at: planURL) }
+    }
+
+    /// The commits a rebase onto `base` replays, oldest first, all as pick.
+    func rebasePlan(onto base: String) throws -> [GitRebaseStep] {
+        guard let baseCommit = commit(branchSpec(base)) else { throw GitError("There's no \(base).") }
+        let commits = log(limit: 10_000)
+        guard let stop = commits.firstIndex(where: { $0.id == baseCommit.id }) ?? mergeBaseIndex(commits, baseCommit.id) else {
+            throw GitError("\(base) isn't an ancestor of this branch: rebase onto it first.")
+        }
+        let range = commits[..<stop]
+        if range.contains(where: { $0.isMerge }) { throw GitError("The commits since \(base) include merges, which an interactive rebase can't replay.") }
+        return range.reversed().map { GitRebaseStep(action: .pick, id: $0.id, shortId: $0.shortId, summary: $0.summary, message: $0.message) }
+    }
+
+    /// Where the branch and `base` meet, in `commits` (HEAD's history).
+    private func mergeBaseIndex(_ commits: [GitCommit], _ base: String) -> Int? {
+        guard let head = headCommit() else { return nil }
+        defer { git_object_free(head) }
+        var other = git_oid()
+        guard git_oid_fromstr(&other, base) == 0 else { return nil }
+        var meet = git_oid()
+        guard git_merge_base(&meet, pointer, git_commit_id(head), &other) == 0 else { return nil }
+        let id = Git.hex(meet)
+        return commits.firstIndex { $0.id == id }
+    }
+
+    /// Replays `steps` (from rebasePlan, edited) onto `base`.
+    func interactiveRebase(_ steps: [GitRebaseStep], onto base: String) throws -> GitInteractiveResult {
+        guard let branch = currentBranchName, let head = headId else { throw GitError("Check out the branch to rebase first.") }
+        guard state == .none, interactiveRebase == nil else { throw GitError("Finish or abort what's in progress first.") }
+        guard status().stagedFiles.isEmpty && status().changedFiles.allSatisfy({ $0.status == .untracked }) else {
+            throw GitError("Commit or stash your changes before rebasing.")
+        }
+        guard let onto = commit(branchSpec(base)) else { throw GitError("There's no \(base).") }
+        var steps = steps
+        // Nothing to fold into: a leading squash or fixup is a pick.
+        if let first = steps.firstIndex(where: { $0.action != .drop }), [.squash, .fixup].contains(steps[first].action) { steps[first].action = .pick }
+        try checkout(commit: onto.id, force: false)
+        let plan = GitInteractiveRebase(branch: branch, originalHead: head, onto: onto.id, steps: steps, position: 0, pending: false)
+        try save(plan)
+        return try run(plan)
+    }
+
+    /// Goes on after conflicts (once they're fixed and staged) or an edit stop.
+    func continueInteractiveRebase() throws -> GitInteractiveResult {
+        guard var plan = interactiveRebase else { throw GitError("There's no interactive rebase in progress.") }
+        if plan.pending {
+            if !conflicts().isEmpty { throw GitError("Resolve the conflicts and stage the files first.") }
+            guard let step = plan.current else { throw GitError("The rebase lost its place: abort it.") }
+            try commitStep(step)
+            plan.pending = false
+            plan.position += 1
+        } else if plan.current?.action == .edit {
+            plan.position += 1
+        }
+        try save(plan)
+        return try run(plan)
+    }
+
+    /// Drops the step stopped at, and goes on.
+    func skipInteractiveStep() throws -> GitInteractiveResult {
+        guard var plan = interactiveRebase else { throw GitError("There's no interactive rebase in progress.") }
+        try reset(to: "HEAD", mode: .hard)
+        git_repository_state_cleanup(pointer)
+        plan.pending = false
+        plan.position += 1
+        try save(plan)
+        return try run(plan)
+    }
+
+    /// Back to the branch as it was.
+    func abortInteractiveRebase() throws {
+        guard let plan = interactiveRebase else { throw GitError("There's no interactive rebase in progress.") }
+        git_repository_state_cleanup(pointer)
+        try reset(to: plan.originalHead, mode: .hard)
+        try Git.check(git_repository_set_head(pointer, "refs/heads/" + plan.branch))
+        try reset(to: plan.originalHead, mode: .hard)
+        try save(nil)
+        Self.notifyChange()
+    }
+
+    private func run(_ start: GitInteractiveRebase) throws -> GitInteractiveResult {
+        var plan = start
+        while let step = plan.current {
+            if step.action == .drop {
+                plan.position += 1
+                continue
+            }
+            let commit = try lookupCommit(step.id)
+            defer { git_object_free(commit) }
+            var options = git_cherrypick_options()
+            git_cherrypick_options_init(&options, UInt32(GIT_CHERRYPICK_OPTIONS_VERSION))
+            options.checkout_opts.checkout_strategy = GitRepository.conflictCheckout
+            try Git.check(git_cherrypick(pointer, commit, &options), "Couldn't apply \(step.shortId)")
+            let conflicted = conflicts()
+            if !conflicted.isEmpty {
+                plan.pending = true
+                try save(plan)
+                Self.notifyChange()
+                return .conflicts(conflicted)
+            }
+            try commitStep(step)
+            if step.action == .edit {
+                try save(plan)
+                Self.notifyChange()
+                return .stoppedToEdit(step)
+            }
+            plan.position += 1
+            try save(plan)
+        }
+        // Done: the branch moves to the result and is checked out again.
+        guard let result = headId else { throw GitError("The rebase lost HEAD.") }
+        var oid = git_oid()
+        try Git.check(git_oid_fromstr(&oid, result))
+        var ref: OpaquePointer?
+        try Git.check(git_reference_create(&ref, pointer, "refs/heads/" + plan.branch, &oid, 1, "rebase -i (finish): \(plan.branch)"))
+        git_reference_free(ref)
+        try Git.check(git_repository_set_head(pointer, "refs/heads/" + plan.branch))
+        try save(nil)
+        Self.notifyChange()
+        return .done(plan.steps.filter { $0.action != .drop }.count)
+    }
+
+    /// Records an applied step: a new commit with the original author, or folded into the last one.
+    private func commitStep(_ step: GitRebaseStep) throws {
+        let original = try lookupCommit(step.id)
+        defer { git_object_free(original) }
+        let index = try index()
+        defer { git_index_free(index) }
+        var treeId = git_oid()
+        try Git.check(git_index_write_tree(&treeId, index))
+        var tree: OpaquePointer?
+        try Git.check(git_tree_lookup(&tree, pointer, &treeId))
+        defer { git_tree_free(tree) }
+        let sig = try signature()
+        defer { git_signature_free(sig) }
+        let head = try lookupCommit("HEAD")
+        defer { git_object_free(head) }
+        var id = git_oid()
+        switch step.action {
+        case .squash, .fixup:
+            let message = step.action == .fixup ? Git.string(git_commit_message(head))
+                : Git.string(git_commit_message(head)).trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n" + (step.message.isEmpty ? Git.string(git_commit_message(original)) : step.message)
+            try Git.check(git_commit_amend(&id, head, "HEAD", nil, sig, nil, message, tree), "Couldn't fold \(step.shortId) in")
+        default:
+            let message = step.action == .reword && !step.message.isEmpty ? step.message : Git.string(git_commit_message(original))
+            var parents: [OpaquePointer?] = [head]
+            _ = try parents.withUnsafeMutableBufferPointer { buffer in
+                try Git.check(git_commit_create(&id, pointer, "HEAD", git_commit_author(original), sig, nil,
+                                                message.hasSuffix("\n") ? message : message + "\n", tree, 1, buffer.baseAddress), "Couldn't commit \(step.shortId)")
+            }
+        }
+        git_repository_state_cleanup(pointer)
     }
 }

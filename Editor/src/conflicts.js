@@ -2,7 +2,7 @@
 // Change | Accept Incoming Change | Accept Both Changes" above each one, and a merge bar to step
 // through them. "Resolve for me" asks the selected AI model for each conflict and shows its
 // answers in a review sheet; nothing changes until they're accepted.
-import { StateField } from '@codemirror/state';
+import { StateField, StateEffect } from '@codemirror/state';
 import { EditorView, Decoration, WidgetType, ViewPlugin } from '@codemirror/view';
 import { settings } from './settings.js';
 
@@ -31,7 +31,7 @@ export function parseConflicts(doc) {
       out.push({
         from: start.from,
         to,
-        start, base, sep, end,
+        start, baseLine: base, sep, end,
         ours: doc.sliceString(Math.min(start.to + 1, oursTo), oursTo),
         base: base ? doc.sliceString(Math.min(base.to + 1, sep.from), sep.from) : null,
         theirs: doc.sliceString(Math.min(sep.to + 1, end.from), end.from),
@@ -106,11 +106,20 @@ function lineClasses(ranges, doc, from, to, cls) {
   }
 }
 
+/** The app said what the two sides are (mergeInfo's labels): the labels are redrawn. */
+const labelsChanged = StateEffect.define();
+
 const conflictDecorations = StateField.define({
   create: (state) => build(state),
-  update: (value, tr) => (tr.docChanged ? build(tr.state) : value),
+  update: (value, tr) => (tr.docChanged || tr.effects.some((e) => e.is(labelsChanged)) ? build(tr.state) : value),
   provide: (f) => EditorView.decorations.from(f),
 });
+
+const sideLabel = (side) => {
+  const name = side === 'current' ? mergeInfo.oursLabel : mergeInfo.theirsLabel;
+  const title = side === 'current' ? 'Current Change' : 'Incoming Change';
+  return name ? `(${title}: ${name})` : `(${title})`;
+};
 
 function build(state) {
   const ranges = [];
@@ -118,16 +127,17 @@ function build(state) {
   for (const c of state.field(conflictField)) {
     ranges.push(Decoration.widget({ widget: new ActionsWidget(c.from), block: true, side: -1 }).range(c.from));
     ranges.push(Decoration.line({ class: 'cm-conflict-current-header' }).range(c.start.from));
-    ranges.push(Decoration.widget({ widget: new LabelWidget('(Current Change)'), side: 1 }).range(c.start.to));
-    lineClasses(ranges, doc, c.start.to + 1, (c.base || c.sep).from, 'cm-conflict-current');
-    if (c.base) {
-      ranges.push(Decoration.line({ class: 'cm-conflict-base-header' }).range(c.base.from));
-      lineClasses(ranges, doc, c.base.to + 1, c.sep.from, 'cm-conflict-base');
+    ranges.push(Decoration.widget({ widget: new LabelWidget(sideLabel('current')), side: 1 }).range(c.start.to));
+    lineClasses(ranges, doc, c.start.to + 1, (c.baseLine || c.sep).from, 'cm-conflict-current');
+    if (c.baseLine) {
+      ranges.push(Decoration.line({ class: 'cm-conflict-base-header' }).range(c.baseLine.from));
+      ranges.push(Decoration.widget({ widget: new LabelWidget('(Common Ancestor)'), side: 1 }).range(c.baseLine.to));
+      lineClasses(ranges, doc, c.baseLine.to + 1, c.sep.from, 'cm-conflict-base');
     }
     ranges.push(Decoration.line({ class: 'cm-conflict-separator' }).range(c.sep.from));
     lineClasses(ranges, doc, c.sep.to + 1, c.end.from, 'cm-conflict-incoming');
     ranges.push(Decoration.line({ class: 'cm-conflict-incoming-header' }).range(c.end.from));
-    ranges.push(Decoration.widget({ widget: new LabelWidget('(Incoming Change)'), side: 1 }).range(c.end.to));
+    ranges.push(Decoration.widget({ widget: new LabelWidget(sideLabel('incoming')), side: 1 }).range(c.end.to));
   }
   return Decoration.set(ranges, true);
 }
@@ -141,10 +151,13 @@ const el = (tag, cls, text) => {
   return e;
 };
 
-/** Whether the open file is one of the merge's conflicted files (set by main.js when it opens). */
-export const mergeInfo = { path: null, inMerge: false };
+/** Whether the open file is one of the conflicted files, and what's being done (from the app's
+ * libgit2: "merge", "rebase", "cherry-pick", "revert" or "stash", and the two sides' names).
+ * Set by main.js when a file opens. */
+export const mergeInfo = { path: null, inMerge: false, operation: '', oursLabel: '', theirsLabel: '' };
 
-export function mergeConflicts(native, getPath, onResolvedFile) {
+/** `openDiff({ path, original, modified, title })` shows two versions side by side. */
+export function mergeConflicts(native, getPath, onResolvedFile, openDiff) {
   const bar = el('div', 'merge-bar');
   bar.hidden = true;
   const count = el('span', 'merge-count');
@@ -214,21 +227,46 @@ export function mergeConflicts(native, getPath, onResolvedFile) {
   more.onclick = () => {
     if (!menu.hidden) { menu.hidden = true; return; }
     menu.replaceChildren();
-    for (const [label, choice] of [['Accept All Current', 'current'], ['Accept All Incoming', 'incoming'], ['Accept All Both', 'both']]) {
+    const add = (label, action) => {
       const item = el('button', 'merge-menu-item', label);
       keepFocusOff(item);
-      item.onclick = () => {
-        menu.hidden = true;
-        // Last first, so earlier positions stay valid.
-        for (const c of [...view.state.field(conflictField)].reverse()) resolveConflict(view, c, choice);
-      };
+      item.onclick = () => { menu.hidden = true; action(); };
       menu.append(item);
+    };
+    for (const [label, choice] of [['Accept All Current', 'current'], ['Accept All Incoming', 'incoming'], ['Accept All Both', 'both']]) {
+      // Last first, so earlier positions stay valid.
+      add(label, () => { for (const c of [...view.state.field(conflictField)].reverse()) resolveConflict(view, c, choice); });
+    }
+    if (mergeInfo.inMerge && mergeInfo.path === getPath()) {
+      menu.append(el('div', 'merge-menu-sep'));
+      add('Compare Current and Incoming', () => withVersions((v, name) => openDiff({
+        path: getPath(), original: v.ours ?? '', modified: v.theirs ?? '', title: `${name} (Current ↔ Incoming)`,
+      })));
+      add('Compare with Common Ancestor', () => withVersions((v, name) => openDiff({
+        path: getPath(), original: v.base ?? '', modified: v.ours ?? '', title: `${name} (Ancestor ↔ Current)`,
+      })));
+      add('Take Current File', () => withVersions((v) => replaceAll(v.ours, 'current')));
+      add('Take Incoming File', () => withVersions((v) => replaceAll(v.theirs, 'incoming')));
     }
     const r = more.getBoundingClientRect();
     menu.style.right = `${Math.max(8, window.innerWidth - r.right)}px`;
     menu.style.bottom = `${window.innerHeight - r.top + 4}px`;
     menu.hidden = false;
   };
+  /** git's three versions of the file (the index's), for whole-file choices. */
+  async function withVersions(use) {
+    const path = getPath();
+    const v = await native({ cmd: 'conflictVersions', path }).catch(() => null);
+    if (!v) { flash('Git has no versions of this file to compare.'); return; }
+    use(v, path.split('/').pop());
+  }
+
+  function replaceAll(text, side) {
+    if (text == null) { flash(`The ${side} side deleted this file.`); return; }
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text }, userEvent: 'input.merge' });
+    flash(`The ${side} version of the whole file. Mark as Resolved when it's right.`);
+  }
+
   done.onclick = async () => {
     const path = getPath();
     if (!path) return;
@@ -244,8 +282,9 @@ export function mergeConflicts(native, getPath, onResolvedFile) {
     bar.hidden = !show;
     if (!show) return;
     const resolved = list.length === 0;
-    count.textContent = resolved ? 'No conflicts left'
-      : `${Math.min(currentIndex(v.state) + 1, list.length)} of ${list.length} conflict${list.length === 1 ? '' : 's'}`;
+    const what = { merge: 'Merge', rebase: 'Rebase', 'cherry-pick': 'Cherry-pick', revert: 'Revert', stash: 'Stash' }[mergeInfo.operation];
+    count.textContent = (what && mergeInfo.inMerge ? `${what}: ` : '') + (resolved ? 'No conflicts left'
+      : `${Math.min(currentIndex(v.state) + 1, list.length)} of ${list.length} conflict${list.length === 1 ? '' : 's'}`);
     prev.hidden = next.hidden = more.hidden = ai.hidden = resolved;
     ai.classList.toggle('off', !settings.aiMerge);
     done.hidden = !(resolved && mergeInfo.inMerge && mergeInfo.path === getPath());
@@ -397,7 +436,13 @@ export function mergeConflicts(native, getPath, onResolvedFile) {
   return {
     extensions: [conflictField, conflictDecorations, plugin],
     /** Re-evaluates the bar after a file opens, a setting changes or the merge state is known. */
-    refresh() { if (view) update(view); },
+    refresh() {
+      if (!view) return;
+      update(view);
+      // Not during another update (a file opening).
+      const v = view;
+      Promise.resolve().then(() => { try { v.dispatch({ effects: labelsChanged.of(null) }); } catch (e) { /* closed */ } });
+    },
     closeReview: close,
   };
 }

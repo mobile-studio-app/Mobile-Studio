@@ -11,6 +11,9 @@ enum GitCommandLine {
     private static let red = "\u{1B}[31m", green = "\u{1B}[32m", yellow = "\u{1B}[33m", cyan = "\u{1B}[36m",
                         bold = "\u{1B}[1m", off = "\u{1B}[0m"
 
+    /// git rebase -i: opens the steps sheet in Source Control (InteractiveRebaseViewController); userInfo "base".
+    static let interactiveRebaseRequest = Notification.Name("MobileStudioInteractiveRebaseRequest")
+
     struct Failure: LocalizedError {
         let message: String
         var errorDescription: String? { message }
@@ -601,6 +604,20 @@ enum GitCommandLine {
     private static func rebased(_ args: [String], git: GitRepository) -> Output {
         do {
             let result: GitRebaseResult
+            // The interactive rebase's own sequencer.
+            if git.interactiveRebase != nil {
+                if args.contains("--abort") { try git.abortInteractiveRebase(); return Output() }
+                let step: GitInteractiveResult
+                if args.contains("--continue") { step = try git.continueInteractiveRebase() }
+                else if args.contains("--skip") { step = try git.skipInteractiveStep() }
+                else { return Output(text: "An interactive rebase is in progress: git rebase --continue, --skip or --abort.\n", code: 1) }
+                switch step {
+                case .done(let count): return Output(text: "Successfully rebased and updated refs/heads/\(git.currentBranchName ?? "HEAD") (\(count) commits).\n")
+                case .stoppedToEdit(let s): return Output(text: "Stopped at \(s.shortId)... \(s.summary)\nYou can amend the commit now (git commit --amend), then git rebase --continue.\n")
+                case .conflicts(let paths):
+                    return Output(text: paths.map { "CONFLICT (content): Merge conflict in \($0)\n" }.joined() + "Resolve them, git add them, then git rebase --continue.\n", code: 1)
+                }
+            }
             if args.contains("--abort") { try git.abortRebase(); return Output() }
             if args.contains("--continue") { result = try git.continueRebase() }
             else if args.contains("--skip") { result = try git.skipRebaseStep() }
@@ -610,7 +627,12 @@ enum GitCommandLine {
                 let upstream = words.first { $0 != onto } ?? git.status().upstream
                 guard let upstream else { return Output(text: "There is no tracking information for the current branch: git rebase <branch>\n", code: 1) }
                 if args.contains("-i") || args.contains("--interactive") {
-                    return Output(text: "error: interactive rebase isn't available; rebase without -i, then use reset, revert or cherry-pick to edit history.\n", code: 1)
+                    // The todo list is a sheet in Source Control.
+                    _ = try git.rebasePlan(onto: upstream)
+                    DispatchQueue.main.async {
+                        NotificationCenter.default.post(name: GitCommandLine.interactiveRebaseRequest, object: nil, userInfo: ["base": upstream])
+                    }
+                    return Output(text: "Opened the rebase steps in Source Control: choose what to do with each commit, then tap Rebase.\n")
                 }
                 result = try git.rebase(onto: upstream, newBase: onto)
             }

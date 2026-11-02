@@ -93,7 +93,7 @@ let crumbTimer = 0;
 const merge = mergeConflicts(native, () => current, async (path) => {
   await save();
   await native({ cmd: 'markResolved', path });
-});
+}, (request) => openDiff(request));
 
 // Asks the app whether the open file is one of the merge's unresolved files.
 function checkMergeState(path) {
@@ -103,6 +103,9 @@ function checkMergeState(path) {
   native({ cmd: 'conflictInfo', path }).then((info) => {
     if (current !== path) return;
     mergeInfo.inMerge = !!(info && info.inMerge);
+    mergeInfo.operation = (info && info.operation) || '';
+    mergeInfo.oursLabel = (info && info.oursLabel) || '';
+    mergeInfo.theirsLabel = (info && info.theirsLabel) || '';
     merge.refresh();
   }, () => {});
 }

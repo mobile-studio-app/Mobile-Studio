@@ -54,6 +54,8 @@ for (const name of scenarios) {
   await tab.setViewport({ width: 1000, height: 700 });
   const errors = [];
   tab.on('pageerror', (e) => errors.push(e.message));
+  // CodeMirror reports a crashed extension on the console rather than throwing.
+  tab.on('console', (m) => { if (m.type() === 'error' && /CodeMirror|TypeError|ReferenceError/.test(m.text())) errors.push(m.text().slice(0, 300)); });
   const started = Date.now();
   let results;
   try {

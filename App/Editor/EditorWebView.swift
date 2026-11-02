@@ -244,8 +244,19 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 replyHandler(true, nil)
             case "conflictInfo":
                 // Whether the file is one of the merge's unresolved files (it gets "Mark as Resolved").
+                // With what's being done and the two sides' names, for the merge bar.
                 let path = body["path"] as? String ?? ""
-                replyHandler(["inMerge": (try? GitRepository.open(store.currentProject))?.conflicts().contains(path) ?? false], nil)
+                guard let repo = try? GitRepository.open(store.currentProject), repo.conflicts().contains(path) else {
+                    replyHandler(["inMerge": false], nil); return
+                }
+                let (operation, ours, theirs) = repo.conflictLabels()
+                replyHandler(["inMerge": true, "operation": operation, "oursLabel": ours, "theirsLabel": theirs], nil)
+            case "conflictVersions":
+                // A conflicted file's base, current and incoming versions, from the index.
+                let path = body["path"] as? String ?? ""
+                guard let conflict = (try? GitRepository.open(store.currentProject))?.conflict(path) else { replyHandler(NSNull(), nil); return }
+                replyHandler(["base": (conflict.base as Any?) ?? NSNull(), "ours": (conflict.ours as Any?) ?? NSNull(),
+                              "theirs": (conflict.theirs as Any?) ?? NSNull()], nil)
             case "markResolved":
                 try GitRepository.open(store.currentProject).stage([body["path"] as? String ?? ""])
                 NotificationCenter.default.post(name: ProjectStore.filesDidChange, object: store)

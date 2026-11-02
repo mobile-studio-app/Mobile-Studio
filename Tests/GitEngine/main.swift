@@ -579,6 +579,94 @@ do {
     check(out.text.hasPrefix("## main"), "status -sb: \(out.text)")
 }
 
+section("conflicts for the merge editor")
+do {
+    let repo = newRepo()
+    write(repo, "a.txt", "one\ntwo\nthree\n")
+    attempt("base") { try repo.commit(message: "Base", stageAll: true) }
+    attempt("branch") { try repo.createBranch("feature") }
+    write(repo, "a.txt", "one\nTWO (feature)\nthree\n")
+    attempt("feature") { try repo.commit(message: "Feature", stageAll: true) }
+    attempt("main") { try repo.checkout("main") }
+    write(repo, "a.txt", "one\nTWO (main)\nthree\n")
+    attempt("main's") { try repo.commit(message: "Main", stageAll: true) }
+    _ = try? repo.merge("feature")
+    let text = read(repo, "a.txt") ?? ""
+    check(text.contains("|||||||") && text.contains("\ntwo\n"), "the markers include the common ancestor (diff3): \(text)")
+    let conflict = repo.conflict("a.txt")
+    check(conflict?.base == "one\ntwo\nthree\n" && conflict?.ours == "one\nTWO (main)\nthree\n" && conflict?.theirs == "one\nTWO (feature)\nthree\n",
+          "the index's three versions: \(String(describing: conflict))")
+    check(conflict?.operation == "merge" && conflict?.oursLabel == "main" && conflict?.theirsLabel == "feature",
+          "named: \(String(describing: conflict?.oursLabel)) / \(String(describing: conflict?.theirsLabel))")
+    attempt("abort") { try repo.abortMerge() }
+}
+
+section("interactive rebase")
+do {
+    let repo = newRepo()
+    write(repo, "a.txt", "base\n")
+    attempt("base") { try repo.commit(message: "Base", stageAll: true) }
+    let base = repo.status().head!
+    for (file, message) in [("one.txt", "One"), ("two.txt", "Two"), ("three.txt", "Three"), ("four.txt", "Four")] {
+        write(repo, file, message + "\n")
+        attempt(message) { try repo.commit(message: message, stageAll: true) }
+    }
+    var steps: [GitRebaseStep] = []
+    attempt("plan") { steps = try repo.rebasePlan(onto: base) }
+    check(steps.map(\.summary) == ["One", "Two", "Three", "Four"] && steps.allSatisfy { $0.action == .pick }, "the plan, oldest first: \(steps.map(\.summary))")
+    // Reword One, fold Two into it, drop Three, and move Four first.
+    steps[0].action = .reword
+    steps[0].message = "One (reworded)\n"
+    steps[1].action = .fixup
+    steps[2].action = .drop
+    let four = steps.removeLast()
+    steps.insert(four, at: 0)
+    var result: GitInteractiveResult?
+    attempt("rebase") { result = try repo.interactiveRebase(steps, onto: base) }
+    if case .done = result {} else { check(false, "interactive rebase: \(String(describing: result))") }
+    check(repo.log().map(\.summary) == ["One (reworded)", "Four", "Base"], "the new history: \(repo.log().map(\.summary))")
+    check(read(repo, "two.txt") == "Two\n" && read(repo, "three.txt") == nil, "fixup kept Two's change; Three was dropped")
+    check(repo.status().branch == "main" && repo.status().state == .none && repo.interactiveRebase == nil, "back on main, finished")
+    checkClean(repo, "after the interactive rebase")
+
+    // Edit: stop, amend, continue.
+    attempt("plan 2") { steps = try repo.rebasePlan(onto: base) }
+    steps[0].action = .edit
+    attempt("edit") { result = try repo.interactiveRebase(steps, onto: base) }
+    if case .stoppedToEdit(let step) = result { check(step.summary == "Four", "stopped after Four") } else { check(false, "edit: \(String(describing: result))") }
+    check(repo.status().state == .rebasing, "rebasing while stopped")
+    write(repo, "four.txt", "Four, amended\n")
+    attempt("amend") { try repo.commit(message: "Four (amended)", stageAll: true, amend: true) }
+    attempt("continue") { result = try repo.continueInteractiveRebase() }
+    check(repo.log().map(\.summary) == ["One (reworded)", "Four (amended)", "Base"] && read(repo, "four.txt") == "Four, amended\n", "amended in place: \(repo.log().map(\.summary))")
+
+    // A conflict from reordering: fix, stage, continue.
+    write(repo, "a.txt", "base\nfirst\n")
+    attempt("first") { try repo.commit(message: "First edit", stageAll: true) }
+    write(repo, "a.txt", "base\nfirst\nsecond\n")
+    attempt("second") { try repo.commit(message: "Second edit", stageAll: true) }
+    attempt("plan 3") { steps = try repo.rebasePlan(onto: base) }
+    steps.swapAt(steps.count - 1, steps.count - 2)
+    attempt("conflicting") { result = try repo.interactiveRebase(steps, onto: base) }
+    guard case .conflicts(let paths) = result else { check(false, "expected conflicts: \(String(describing: result))"); exit(1) }
+    check(paths == ["a.txt"] && repo.status().state == .rebasing && repo.conflict("a.txt")?.operation == "rebase", "stopped at the conflict")
+    write(repo, "a.txt", "base\nfirst\nsecond\n")
+    attempt("resolve") { try repo.stage(["a.txt"]) }
+    attempt("continue 2") { result = try repo.continueInteractiveRebase() }
+    if case .conflicts = result { write(repo, "a.txt", "base\nfirst\nsecond\n"); attempt("resolve 2") { try repo.stage(["a.txt"]) }; attempt("continue 3") { result = try repo.continueInteractiveRebase() } }
+    if case .done = result {} else { check(false, "finished: \(String(describing: result))") }
+    check(repo.log().first.map { ["First edit", "Second edit"].contains($0.summary) } == true && repo.status().state == .none, "reordered: \(repo.log().map(\.summary))")
+
+    // Abort goes back.
+    let tip = repo.status().head
+    attempt("plan 4") { steps = try repo.rebasePlan(onto: base) }
+    steps[0].action = .edit
+    attempt("start") { result = try repo.interactiveRebase(steps, onto: base) }
+    attempt("abort") { try repo.abortInteractiveRebase() }
+    check(repo.status().head == tip && repo.status().branch == "main" && repo.interactiveRebase == nil, "aborting restores the branch")
+    checkClean(repo, "after aborting")
+}
+
 // MARK: - AI merge answers
 
 section("cleaning AI conflict resolutions")

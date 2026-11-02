@@ -77,6 +77,11 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
         NotificationCenter.default.addObserver(forName: FileIconTheme.didChange, object: nil, queue: .main) { [weak self] _ in
             self?.tableView.reloadData()
         }
+        // git rebase -i in the Terminal.
+        NotificationCenter.default.addObserver(forName: InteractiveRebaseViewController.request, object: nil, queue: .main) { [weak self] note in
+            guard let base = note.userInfo?["base"] as? String else { return }
+            self?.startInteractiveRebase(onto: base)
+        }
         NotificationCenter.default.addObserver(forName: PullRequestsViewController.checkoutRequest, object: nil, queue: .main) { [weak self] note in
             guard let branch = note.userInfo?["branch"] as? String else { return }
             self?.checkoutRemote(branch)
@@ -223,10 +228,16 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
         var mergeItems: [UIMenuElement] = []
         if status.state == .rebasing {
             mergeItems.append(UIMenu(title: "Rebase in Progress", options: .displayInline, children: [
-                UIAction(title: "Continue Rebase", image: Codicon.debugContinue.image()) { [weak self] _ in self?.rebaseStep { try $0.continueRebase() } },
-                UIAction(title: "Skip This Commit") { [weak self] _ in self?.rebaseStep { try $0.skipRebaseStep() } },
+                UIAction(title: "Continue Rebase", image: Codicon.debugContinue.image()) { [weak self] _ in
+                    self?.interactiveStep(or: { try $0.continueRebase() }) { try $0.continueInteractiveRebase() }
+                },
+                UIAction(title: "Skip This Commit") { [weak self] _ in
+                    self?.interactiveStep(or: { try $0.skipRebaseStep() }) { try $0.skipInteractiveStep() }
+                },
                 UIAction(title: "Abort Rebase", image: Codicon.discard.image(), attributes: .destructive) { [weak self] _ in
-                    self?.perform { try $0.abortRebase() }
+                    self?.perform { repo in
+                        if repo.interactiveRebase != nil { try repo.abortInteractiveRebase() } else { try repo.abortRebase() }
+                    }
                     self?.onFilesChangedOnDisk?()
                 },
             ]))
@@ -731,6 +742,9 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
             UIMenu(title: "Rebase Branch onto...", image: Codicon.gitCommit.image(), children: (others + remote).map { name in
                 UIAction(title: name) { [weak self] _ in self?.rebase(onto: name) }
             }),
+            UIMenu(title: "Interactive Rebase onto...", image: Codicon.listFlat.image(), children: (others + remote).map { name in
+                UIAction(title: name) { [weak self] _ in self?.startInteractiveRebase(onto: name) }
+            }),
             UIAction(title: "Rename Branch...", image: Codicon.edit.image()) { [weak self] _ in self?.promptRenameBranch() },
             UIMenu(title: "Delete Branch...", image: Codicon.trash.image(), children: others.map { name in
                 UIAction(title: name, attributes: .destructive) { [weak self] _ in self?.confirmDeleteBranch(name) }
@@ -1175,6 +1189,53 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
         }
     }
 
+    /// Continue or skip: the interactive sequencer's, or libgit2's rebase.
+    private func interactiveStep(or plain: @escaping (GitRepository) throws -> GitRebaseResult,
+                                 _ interactive: @escaping (GitRepository) throws -> GitInteractiveResult) {
+        guard let repo else { return }
+        if repo.interactiveRebase != nil { interactiveRebaseStep(interactive) } else { rebaseStep(plain) }
+    }
+
+    /// The commits since `base` in the interactive rebase sheet, then the rebase.
+    func startInteractiveRebase(onto base: String) {
+        guard let repo else { return }
+        do {
+            let steps = try repo.rebasePlan(onto: base)
+            guard !steps.isEmpty else { return toast("There are no commits since \(base) to rebase.") }
+            let label = repo.commit(base).map { base.count >= 40 ? $0.shortId : base } ?? base
+            let sheet = InteractiveRebaseViewController(base: label, steps: steps)
+            sheet.onStart = { [weak self] steps in self?.interactiveRebaseStep { try $0.interactiveRebase(steps, onto: base) } }
+            let nav = UINavigationController(rootViewController: sheet)
+            nav.modalPresentationStyle = .formSheet
+            presenter?.present(nav, animated: true)
+        } catch {
+            showAlert(error.localizedDescription)
+        }
+    }
+
+    private func interactiveRebaseStep(_ work: @escaping (GitRepository) throws -> GitInteractiveResult) {
+        saveEdits { [weak self] in
+            guard let self else { return }
+            do {
+                guard let repo = self.repo else { return }
+                switch try work(repo) {
+                case .done(let count):
+                    self.didSwitchBranch()
+                    self.toast("Rebased \(count) commit\(count == 1 ? "" : "s").")
+                case .stoppedToEdit(let step):
+                    self.didSwitchBranch()
+                    self.showAlert("Stopped after \(step.shortId) \(step.summary). Change files and use Commit (Amend), or commit more, then Continue Rebase from the ... menu.")
+                case .conflicts(let paths):
+                    self.didSwitchBranch()
+                    self.showAlert("Applying a commit conflicts in \(paths.joined(separator: ", ")). Fix each file, stage it, then Continue Rebase from the ... menu (or Skip This Commit, or Abort Rebase).")
+                }
+            } catch {
+                self.showAlert(error.localizedDescription)
+                self.refresh()
+            }
+        }
+    }
+
     private func pullRebase() {
         guard status.remoteURL != nil else { return promptRemote { [weak self] in self?.pullRebase() } }
         saveEdits { [weak self] in
@@ -1283,6 +1344,9 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
                 self?.mergeLike("Cherry-picking \(commit.shortId)") { try $0.cherryPick(commit.id) }
             })
         }
+        change.append(UIAction(title: "Interactive Rebase from Here...", image: Codicon.listFlat.image(), attributes: isHead || status.branch == nil ? [.disabled] : []) { [weak self] _ in
+            self?.startInteractiveRebase(onto: commit.id)
+        })
         change.append(UIAction(title: "Revert", image: Codicon.discard.image()) { [weak self] _ in
             self?.mergeLike("Reverting \(commit.shortId)") { try $0.revert(commit.id) }
         })
