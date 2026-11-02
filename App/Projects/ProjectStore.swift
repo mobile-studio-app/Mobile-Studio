@@ -214,6 +214,89 @@ final class ProjectStore {
     /// Creates a new LÖVE 12 project from the starter template. Does not open it.
     /// Creates a project for `runtime` (an interpreter id such as "love-12.0", "lua-5.4" or
     /// "python-3.13") from its starter template, and records the interpreter in its settings.
+    /// A small LÖVE game to try things on (Welcome → Open Sample Game): touch, the mouse or the arrow
+    /// keys move a ball that collects stars. Written for LÖVE 11.5 and 12.
+    func createSampleGame() throws -> URL {
+        var name = "Sample Game"
+        var n = 2
+        while FileManager.default.fileExists(atPath: projectsRoot.appendingPathComponent(name).path) {
+            name = "Sample Game \(n)"
+            n += 1
+        }
+        let url = try createProject(named: name)
+        let main = """
+        -- A sample game: touch (or click, or use the arrow keys) to steer the ball onto the stars.
+        -- Change things and press Run to see them: try the speed, the colours or the star count.
+
+        local ball = { x = 200, y = 200, r = 18, speed = 260 }
+        local stars = {}
+        local score = 0
+        local target
+
+        local function addStar()
+          local w, h = love.graphics.getDimensions()
+          table.insert(stars, { x = love.math.random(30, w - 30), y = love.math.random(60, h - 30), spin = love.math.random() * 6 })
+        end
+
+        function love.load()
+          love.graphics.setBackgroundColor(0.08, 0.09, 0.14)
+          for _ = 1, 5 do addStar() end
+        end
+
+        function love.update(dt)
+          -- Steer towards a touch or click, or with the arrow keys.
+          local dx, dy = 0, 0
+          if love.keyboard.isDown("left") then dx = dx - 1 end
+          if love.keyboard.isDown("right") then dx = dx + 1 end
+          if love.keyboard.isDown("up") then dy = dy - 1 end
+          if love.keyboard.isDown("down") then dy = dy + 1 end
+          if dx == 0 and dy == 0 and target then
+            dx, dy = target.x - ball.x, target.y - ball.y
+            if dx * dx + dy * dy < 16 then dx, dy = 0, 0 end
+          end
+          local length = math.sqrt(dx * dx + dy * dy)
+          if length > 0 then
+            ball.x = ball.x + dx / length * ball.speed * dt
+            ball.y = ball.y + dy / length * ball.speed * dt
+          end
+
+          for i = #stars, 1, -1 do
+            local s = stars[i]
+            s.spin = s.spin + dt * 2
+            if (s.x - ball.x) ^ 2 + (s.y - ball.y) ^ 2 < (ball.r + 12) ^ 2 then
+              table.remove(stars, i)
+              score = score + 1
+              print("Star! Score: " .. score)
+              addStar()
+            end
+          end
+        end
+
+        function love.draw()
+          for _, s in ipairs(stars) do
+            love.graphics.setColor(1, 0.85, 0.3)
+            love.graphics.push()
+            love.graphics.translate(s.x, s.y)
+            love.graphics.rotate(s.spin)
+            love.graphics.polygon("fill", 0, -12, 4, -4, 12, -4, 6, 2, 8, 11, 0, 6, -8, 11, -6, 2, -12, -4, -4, -4)
+            love.graphics.pop()
+          end
+          love.graphics.setColor(0.35, 0.75, 1)
+          love.graphics.circle("fill", ball.x, ball.y, ball.r)
+          love.graphics.setColor(1, 1, 1)
+          love.graphics.print("Stars: " .. score, 16, 16)
+        end
+
+        function love.mousepressed(x, y) target = { x = x, y = y } end
+        function love.mousemoved(x, y) if love.mouse.isDown(1) then target = { x = x, y = y } end end
+        function love.touchpressed(_, x, y) target = { x = x, y = y } end
+        function love.touchmoved(_, x, y) target = { x = x, y = y } end
+
+        """
+        try main.write(to: url.appendingPathComponent("main.lua"), atomically: true, encoding: .utf8)
+        return url
+    }
+
     func createProject(named rawName: String, runtime: String = "love-12.0") throws -> URL {
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: " -_"))

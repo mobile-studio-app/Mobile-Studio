@@ -83,6 +83,24 @@ final class WelcomeViewController: UIViewController, UIDocumentPickerDelegate {
         columns.alignment = .top
         content.addArrangedSubview(columns)
 
+        // For a first look: a game to play with, and the AI agent.
+        let started = UIStackView(arrangedSubviews: [
+            sectionTitle("Get Started"),
+            linkRow(symbol: "gamecontroller", title: "Open Sample Game", action: #selector(sampleTapped)),
+            linkRow(symbol: "sparkles", title: "Set Up AI Chat…", action: #selector(aiTapped)),
+        ])
+        let tip = UILabel()
+        tip.text = "In the editor, the chat button at the top right (or ⌃⌘I) opens the AI agent: it reads and edits your project, runs it and fixes what it finds. It runs on this device with Apple Intelligence or a model you download."
+        tip.font = .preferredFont(forTextStyle: .footnote)
+        tip.adjustsFontForContentSizeCategory = true
+        tip.textColor = Self.secondaryText
+        tip.numberOfLines = 0
+        started.addArrangedSubview(tip)
+        started.axis = .vertical
+        started.spacing = 6
+        started.alignment = .leading
+        content.addArrangedSubview(started)
+
         setupBusyOverlay()
 
         let readable = content.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor, constant: -48)
@@ -298,6 +316,21 @@ final class WelcomeViewController: UIViewController, UIDocumentPickerDelegate {
 
     @objc private func closeTapped() {
         dismiss(animated: true)
+    }
+
+    @objc private func sampleTapped() {
+        do {
+            open(try ProjectStore.shared.createSampleGame())
+        } catch {
+            showError(title: "Couldn’t Create the Sample Game", error)
+        }
+    }
+
+    /// Settings → AI, over the Welcome screen: Apple Intelligence, a model to download, or a cloud model.
+    @objc private func aiTapped() {
+        let nav = UINavigationController(rootViewController: SettingsViewController(page: .ai))
+        nav.modalPresentationStyle = .formSheet
+        present(nav, animated: true)
     }
 
     @objc private func newProjectTapped() {
