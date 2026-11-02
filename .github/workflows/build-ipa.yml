@@ -236,15 +236,27 @@ jobs:
           name: MobileStudio-ipa
           path: dist/MobileStudio.ipa
 
-      # A version tag (v0.1.0) publishes a release with the app, the README's download.
+      # A version tag (v0.1.0) publishes a release with the app, the README's download. Its notes are
+      # the version's section of CHANGELOG.md.
+      - name: Release notes (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          VERSION: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          {
+            echo "Download \`MobileStudio.ipa\` below and install it with a sideloading tool. The [README](https://github.com/$REPO#installing) explains how, step by step."
+            echo
+            awk -v v="## ${VERSION#v}" '$0 == v { on = 1; next } on && /^## / { exit } on' CHANGELOG.md
+          } > dist/release-notes.md
+          cat dist/release-notes.md
       - name: Publish release (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           name: Mobile Studio ${{ github.ref_name }}
           files: dist/MobileStudio.ipa
-          body: |
-            Download `MobileStudio.ipa` below and install it with a sideloading tool. The [README](https://github.com/${{ github.repository }}#installing) explains how, step by step.
+          body_path: dist/release-notes.md
 
   # Builds run on Intel Macs, which GitHub has more of free; the build only takes a few minutes, so
   # starting soon matters more than a faster Mac. When they're all busy too, a job that waits too
