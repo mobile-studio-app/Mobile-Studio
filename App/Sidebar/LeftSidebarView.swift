@@ -190,6 +190,8 @@ final class LeftSidebarView: UIView, UITableViewDataSource, UITableViewDelegate 
 
     func setTab(_ tab: SidebarTab) {
         let changed = tab != currentTab
+        // A hidden panel's text field (the Extensions search, say) mustn't keep the keyboard.
+        if changed { endEditing(true) }
         currentTab = tab
         explorerView.isHidden = tab != .files
         searchPanel.isHidden = tab != .search

@@ -92,7 +92,8 @@
   .tab-icon img { width: 14px; height: 14px; vertical-align: -2px; }
   /* chat.js: the Chat panel, docked on the right (over the editor on narrow screens). */
   :root { --chat-w: 380px; }
-  .chat-pane { position: absolute; top: 0; right: 0; bottom: 0; width: var(--chat-w); max-width: 100%; z-index: 7; display: flex; flex-direction: column; background: var(--chrome); border-left: 1px solid var(--border-strong); color: var(--text); font: 13px -apple-system, system-ui, sans-serif; }
+  /* Its own layer, above extensions' webview iframes (which iOS WebKit can otherwise draw on top). */
+  .chat-pane { position: absolute; top: 0; right: 0; bottom: 0; width: var(--chat-w); max-width: 100%; z-index: 8; transform: translateZ(0); display: flex; flex-direction: column; background: var(--chrome); border-left: 1px solid var(--border-strong); color: var(--text); font: 13px -apple-system, system-ui, sans-serif; }
   .chat-pane[hidden] { display: none; }
   @media (min-width: 760px) { #editor-container.chat-open > .cm-editor { width: calc(100% - var(--chat-w)); } #editor-container.chat-open > .diff-side, #editor-container.chat-open > .md-preview { right: var(--chat-w); } }
   @media (max-width: 759px) { .chat-pane { width: 100%; border-left: 0; } }

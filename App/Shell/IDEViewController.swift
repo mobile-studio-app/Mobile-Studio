@@ -620,6 +620,7 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
     private func toggleSidebar(tab: SidebarTab) {
         if isSidebarOpen && sidebarView.currentTab == tab {
             isSidebarOpen = false
+            sidebarView.endEditing(true)
             activityRail.setActiveTab(nil)
         } else {
             isSidebarOpen = true
@@ -632,6 +633,8 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
     @objc private func closeOverlaySidebar() {
         guard isSidebarDocked == false, isSidebarOpen else { return }
         isSidebarOpen = false
+        // Its search field would otherwise keep the keyboard, and the shortcuts (⌃⌘I and the rest).
+        sidebarView.endEditing(true)
         activityRail.setActiveTab(nil)
         animateLayout(duration: 0.3)
     }

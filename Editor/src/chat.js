@@ -749,7 +749,8 @@ function updateContextLabel() {
   $('chat-include').disabled = !path;
 }
 
-export const chatOpen = () => !!pane && !pane.hidden;
+/** Open and showing: a pane left open where it has no size counts as closed, so the toggle opens it again. */
+export const chatOpen = () => !!pane && !pane.hidden && pane.getClientRects().length > 0 && pane.offsetWidth > 0;
 
 /** Opens the panel (Chat: Open Chat, ⌃⌘I); `prompt` fills the box. */
 export function openChat(prompt) {
