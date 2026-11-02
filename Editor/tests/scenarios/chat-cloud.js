@@ -4,7 +4,7 @@ scenario(async () => {
   mockNative((m) => {
     if (m.cmd === 'aiChatModels') return { selected: 'cloud:anthropic', mode: 'edit', contextSize: 4096,
       models: [{ id: 'apple', name: 'Apple Intelligence', detail: '', ready: true, contexts: [{ tokens: 4096, bytes: 0, fits: true }] },
-        { id: 'cloud:anthropic', name: 'claude-sonnet-5-5 (Anthropic)', detail: 'Cloud · sends your code to Anthropic', ready: true, cloud: true,
+        { id: 'cloud:anthropic', name: 'claude-sonnet-5-5 (Anthropic)', detail: 'Cloud · sends your code to Anthropic', ready: true, cloud: true, agent: true, reasoning: 'optional',
           contexts: [{ tokens: 200000, bytes: 0, fits: true }] }] };
     return undefined;
   });

@@ -2,10 +2,20 @@ import Foundation
 import os
 import llama
 
-/// One turn of a chat: "system", "user" or "assistant".
+/// One turn of a chat: "system", "user" or "assistant". `keep`: never dropped to make room (the
+/// question being worked on, a summary of the conversation).
 struct ChatMessage {
     let role: String
     let content: String
+    var keep = false
+}
+
+/// An answer, with how much of the context its prompt took and how many old turns had to be left
+/// out to fit (so Chat compacts before more are).
+struct ChatReply {
+    let text: String
+    var promptTokens: Int? = nil
+    var dropped = 0
 }
 
 /// The Chat panel's conversations and its agent's subagents, with Apple Intelligence or a model
@@ -37,6 +47,9 @@ final class AIChatService {
         var suggested = false
         /// A cloud model: the conversation is sent to its provider.
         var cloud = false
+        /// Can be the Chat agent (tools, editing); others only answer questions.
+        var agent = false
+        var reasoning: LocalModel.Reasoning = .none
     }
 
     struct ContextSize {
@@ -49,33 +62,35 @@ final class AIChatService {
     static let appleContextSize = 4096
     static let contextSizes = [2048, 4096, 8192, 16384, 32768, 65536, 131072]
 
-    /// A context's memory: the model, its KV cache at 8 bits (about 53% of the 16-bit size, with
-    /// the scales) and room for the computation.
-    static func memory(of model: LocalModel, context: Int) -> Int64 {
-        model.bytes + Int64(Double(model.kvBytesPerToken) * Double(context) * 0.53) + 300_000_000
+    /// A context's memory: the model, its KV cache (8 bits: about 53% of the 16-bit size with the
+    /// scales; 4 bits: about 28%) and room for the computation.
+    static func memory(of model: LocalModel, context: Int, kvBits: Int = AppSettings.shared.chatKVBits) -> Int64 {
+        let share = kvBits == 4 ? 0.28 : 0.53
+        return model.bytes + Int64(model.kvBytes(context: context) * share) + 300_000_000
     }
 
     /// Memory the app can still use, plus what loaded chat models already take (they'd be replaced).
     private var memoryForChat: Int64 {
         let free = Int64(os_proc_available_memory())
-        let loaded = engines.values.reduce(Int64(0)) { $0 + Self.memory(of: $1.model, context: $1.contextSize) }
+        let loaded = engines.values.reduce(Int64(0)) { $0 + Self.memory(of: $1.model, context: $1.contextSize, kvBits: $1.kvBits) }
         return free + loaded
     }
 
-    /// The sizes a model offers: up to its trained length, each marked whether it fits now.
+    /// The sizes a model offers: up to its longest (with YaRN, past its trained length), each
+    /// marked whether it fits now.
     func contexts(for model: LocalModel) -> [ContextSize] {
         let budget = memoryForChat
-        return Self.contextSizes.filter { $0 <= model.trainedContext }.map { size in
+        return Self.contextSizes.filter { $0 <= model.maxContext }.map { size in
             let bytes = Self.memory(of: model, context: size)
             return ContextSize(tokens: size, bytes: bytes, fits: Double(bytes) < Double(budget) * 0.9)
         }
     }
 
-    /// The context a request gets: the setting, but no more than the model was trained for or
-    /// than fits in memory (at least 2K).
+    /// The context a request gets: the setting, but no more than the model supports or than fits
+    /// in memory (at least 2K).
     func effectiveContext(for model: LocalModel, wanted: Int) -> Int {
         let usable = contexts(for: model).filter { $0.fits }.map(\.tokens)
-        return min(wanted, usable.max() ?? 2048, model.trainedContext)
+        return min(wanted, usable.max() ?? 2048, model.maxContext)
     }
 
     /// The models the Chat panel offers: Apple Intelligence, the downloaded chat models, and the
@@ -87,7 +102,7 @@ final class AIChatService {
         for model in AIModelCatalog.all where model.isDownloaded && (model.chats || model.completes) {
             let detail = model.isSupported ? (model.chats ? model.detail : "\(model.detail) · a code model, chats less well") : model.requirementText
             list.append(Option(choice: model.choice, name: model.chats ? model.name : "\(model.name) (\(model.detail))", detail: detail,
-                               ready: model.isSupported, contexts: contexts(for: model)))
+                               ready: model.isSupported, contexts: contexts(for: model), agent: model.agent, reasoning: model.reasoning))
         }
         for model in AIModelCatalog.chatModels where !model.isDownloaded && model.isSupported {
             list.append(Option(choice: model.choice, name: model.name,
@@ -96,7 +111,8 @@ final class AIChatService {
         }
         for provider in CloudProvider.allCases where provider.isConfigured {
             list.append(Option(choice: provider.choice, name: provider.displayName, detail: "Cloud · sends your code to \(provider.name)",
-                               ready: true, contexts: [ContextSize(tokens: provider.contextSize, bytes: 0, fits: true)], cloud: true))
+                               ready: true, contexts: [ContextSize(tokens: provider.contextSize, bytes: 0, fits: true)], cloud: true,
+                               agent: true, reasoning: .optional))
         }
         return list
     }
@@ -124,8 +140,9 @@ final class AIChatService {
     /// Answers `messages` (the last is the user's) with `choice` (the Chat model when nil). `onText`
     /// gets the answer so far; both callbacks run on the main queue. Stopping keeps what was written.
     /// `contextSize`: the tokens wanted (Chat's or the subagents' setting); the model gets as many as fit.
+    /// `thinking`: Think is on (a reasoning model samples as its makers suggest for that).
     func respond(id: String, choice: AIModelChoice? = nil, contextSize: Int? = nil, _ messages: [ChatMessage], maxTokens: Int = 1536,
-                 onText: @escaping (String) -> Void, completion: @escaping (Result<String, Error>) -> Void) {
+                 thinking: Bool = false, onText: @escaping (String) -> Void, completion: @escaping (Result<ChatReply, Error>) -> Void) {
         cancel(id)
         let choice = choice ?? AppSettings.shared.chatModel
         if let provider = CloudProvider.from(choice) {
@@ -135,10 +152,10 @@ final class AIChatService {
                         DispatchQueue.main.async { if self?.tasks[id] != nil { onText(text) } }
                     }
                     self?.tasks[id] = nil
-                    completion(.success(text))
+                    completion(.success(ChatReply(text: text)))
                 } catch {
                     self?.tasks[id] = nil
-                    completion(Task.isCancelled || error is CancellationError ? .success("") : .failure(error))
+                    completion(Task.isCancelled || error is CancellationError ? .success(ChatReply(text: "")) : .failure(error))
                 }
             }
             return
@@ -149,10 +166,10 @@ final class AIChatService {
                 do {
                     let text = try await AppleIntelligenceEngine.chat(messages)
                     self?.tasks[id] = nil
-                    completion(.success(text))
+                    completion(.success(ChatReply(text: text)))
                 } catch {
                     self?.tasks[id] = nil
-                    completion(Task.isCancelled ? .success("") : .failure(error))
+                    completion(Task.isCancelled ? .success(ChatReply(text: "")) : .failure(error))
                 }
             }
             return
@@ -163,15 +180,18 @@ final class AIChatService {
         guard model.isSupported else { return completion(.failure(Self.error("\(model.name): \(model.requirementText)"))) }
         // The suggestions model makes way while chatting.
         AICompletionService.shared.unload()
-        // One engine per model: a smaller request uses a bigger loaded context; a bigger one reloads it.
+        // One engine per model: a smaller request uses a bigger loaded context; a bigger one (or a
+        // new cache precision) reloads it.
         let size = effectiveContext(for: model, wanted: contextSize ?? AppSettings.shared.chatContextSize)
-        if (engines[model.id]?.contextSize ?? 0) < size {
-            engines[model.id] = LlamaChatEngine(model: model, contextSize: size)
+        let bits = AppSettings.shared.chatKVBits
+        if (engines[model.id]?.contextSize ?? 0) < size || engines[model.id]?.kvBits != bits {
+            engines[model.id] = nil
+            engines[model.id] = LlamaChatEngine(model: model, contextSize: size, kvBits: bits)
         }
         guard let engine = engines[model.id] else { return }
         let cancel = CompletionCancel()
         cancels[id] = cancel
-        engine.respond(messages, maxTokens: maxTokens, cancel: cancel, onText: { text in
+        engine.respond(messages, maxTokens: maxTokens, thinking: thinking, cancel: cancel, onText: { text in
             DispatchQueue.main.async { if !cancel.isCancelled { onText(text) } }
         }, completion: { [weak self] result in
             DispatchQueue.main.async {
@@ -194,6 +214,8 @@ final class LlamaChatEngine {
     let model: LocalModel
     /// Tokens the model reads at once (Chat's context size setting).
     let contextSize: Int
+    /// The KV cache's precision: 8 or 4 bits.
+    let kvBits: Int
 
     private let queue = DispatchQueue(label: "app.mobilestudio.ai.chat", qos: .userInitiated)
     private var llamaModel: OpaquePointer?
@@ -202,9 +224,10 @@ final class LlamaChatEngine {
     private var template: String?
     private var cached: [llama_token] = []
 
-    init(model: LocalModel, contextSize: Int) {
+    init(model: LocalModel, contextSize: Int, kvBits: Int = 8) {
         self.model = model
         self.contextSize = contextSize
+        self.kvBits = kvBits
     }
 
     deinit {
@@ -212,10 +235,10 @@ final class LlamaChatEngine {
         if let llamaModel { llama_model_free(llamaModel) }
     }
 
-    func respond(_ messages: [ChatMessage], maxTokens: Int, cancel: CompletionCancel,
-                 onText: @escaping (String) -> Void, completion: @escaping (Result<String, Error>) -> Void) {
+    func respond(_ messages: [ChatMessage], maxTokens: Int, thinking: Bool = false, cancel: CompletionCancel,
+                 onText: @escaping (String) -> Void, completion: @escaping (Result<ChatReply, Error>) -> Void) {
         queue.async {
-            completion(Result { try self.generate(messages, maxTokens: maxTokens, cancel: cancel, onText: onText) })
+            completion(Result { try self.generate(messages, maxTokens: maxTokens, thinking: thinking, cancel: cancel, onText: onText) })
         }
     }
 
@@ -236,13 +259,24 @@ final class LlamaChatEngine {
 
         let threads = Int32(max(2, min(4, ProcessInfo.processInfo.activeProcessorCount - 2)))
         var contextParams = llama_context_default_params()
-        // No more than the model was trained for. The KV cache is kept at 8 bits, half the memory of
-        // 16, which needs flash attention for the V half.
+        // No more than the model was trained for, or past that with YaRN where its makers support
+        // it (Qwen's 128K: the RoPE stretched by the ratio, only when it's needed, since it costs a
+        // little quality on short texts). The KV cache is kept at 8 bits, half the memory of 16, or
+        // 4; either needs flash attention for the V half. Sliding-window layers (Gemma 3) keep only
+        // their window, not the whole context.
         let trained = Int(llama_model_n_ctx_train(loaded))
-        contextParams.n_ctx = UInt32(max(1024, trained > 0 ? min(contextSize, trained) : contextSize))
+        let longest = max(trained, model.yarnContext ?? 0)
+        let n = max(1024, longest > 0 ? min(contextSize, longest) : contextSize)
+        contextParams.n_ctx = UInt32(n)
+        if trained > 0, n > trained, model.yarnContext != nil {
+            contextParams.rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_YARN
+            contextParams.rope_freq_scale = Float(trained) / Float(n)
+            contextParams.yarn_orig_ctx = UInt32(trained)
+        }
         contextParams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED
-        contextParams.type_k = GGML_TYPE_Q8_0
-        contextParams.type_v = GGML_TYPE_Q8_0
+        contextParams.type_k = kvBits == 4 ? GGML_TYPE_Q4_0 : GGML_TYPE_Q8_0
+        contextParams.type_v = kvBits == 4 ? GGML_TYPE_Q4_0 : GGML_TYPE_Q8_0
+        contextParams.swa_full = false
         contextParams.n_batch = 512
         contextParams.n_ubatch = 512
         contextParams.n_threads = threads
@@ -294,20 +328,25 @@ final class LlamaChatEngine {
 
     // MARK: - Generation
 
-    private func generate(_ messages: [ChatMessage], maxTokens: Int, cancel: CompletionCancel, onText: (String) -> Void) throws -> String {
+    private func generate(_ messages: [ChatMessage], maxTokens: Int, thinking: Bool, cancel: CompletionCancel,
+                          onText: (String) -> Void) throws -> ChatReply {
         try loadIfNeeded()
         guard let ctx = context, let vocab else { throw Self.error("\(model.name) isn't loaded.") }
-        if cancel.isCancelled { return "" }
+        if cancel.isCancelled { return ChatReply(text: "") }
 
-        // Fit the conversation: drop the oldest turns (keeping the instructions) until it fits.
+        // Fit the conversation: drop the oldest turns until it fits, but never the instructions or
+        // a turn marked keep (the question being worked on), so the model doesn't lose its task.
         let budget = Int(llama_n_ctx(ctx)) - maxTokens - 8
         var turns = messages
         var prompt = tokenize(format(turns))
-        while prompt.count > budget && turns.count > 2 {
-            turns.remove(at: turns.first?.role == "system" ? 1 : 0)
+        var dropped = 0
+        while prompt.count > budget, let oldest = turns.indices.dropLast().first(where: { turns[$0].role != "system" && !turns[$0].keep }) {
+            turns.remove(at: oldest)
+            dropped += 1
             prompt = tokenize(format(turns))
         }
         if prompt.count > budget { prompt = Array(prompt.suffix(budget)) }
+        let promptTokens = prompt.count
 
         let box = Unmanaged.passRetained(cancel)
         defer { box.release() }
@@ -336,18 +375,25 @@ final class LlamaChatEngine {
             guard rc == 0 else {
                 llama_memory_clear(memory, true)
                 cached = []
-                if cancel.isCancelled { return "" }
+                if cancel.isCancelled { return ChatReply(text: "") }
                 throw Self.error("\(model.name) failed (\(rc)).")
             }
             cached += chunk
             index += count
         }
 
+        // Reasoning models sample as their makers suggest (Qwen3: top-k 20; top-p 0.95 and
+        // temperature 0.6 when thinking, 0.8 and 0.7 when not), with a presence penalty against
+        // the endless repeats they can fall into; others as before.
+        let reasons = model.reasoning != .none
         let sampler = llama_sampler_chain_init(llama_sampler_chain_default_params())
-        llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40))
-        llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.95, 1))
-        llama_sampler_chain_add(sampler, llama_sampler_init_min_p(0.05, 1))
-        llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.7))
+        llama_sampler_chain_add(sampler, llama_sampler_init_top_k(reasons ? 20 : 40))
+        if reasons {
+            llama_sampler_chain_add(sampler, llama_sampler_init_penalties(llama_vocab_n_tokens(vocab), 256, 1.0, 0, 1.0))
+        }
+        llama_sampler_chain_add(sampler, llama_sampler_init_top_p(reasons && !thinking ? 0.8 : 0.95, 1))
+        llama_sampler_chain_add(sampler, llama_sampler_init_min_p(reasons ? 0 : 0.05, 1))
+        llama_sampler_chain_add(sampler, llama_sampler_init_temp(reasons && thinking ? 0.6 : 0.7))
         llama_sampler_chain_add(sampler, llama_sampler_init_dist(UInt32.random(in: 0...UInt32.max - 1)))
         defer { llama_sampler_free(sampler) }
 
@@ -365,7 +411,7 @@ final class LlamaChatEngine {
             }
             cached.append(token)
         }
-        return Self.text(output)
+        return ChatReply(text: Self.text(output), promptTokens: promptTokens, dropped: dropped)
     }
 
     /// The answer so far; a character split across tokens shows once it's complete.

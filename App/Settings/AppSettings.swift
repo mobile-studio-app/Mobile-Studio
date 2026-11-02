@@ -54,6 +54,7 @@ final class AppSettings {
             Key.subagentContextSize: 4096,
             Key.chatMode: "edit",
             Key.chatThinking: false,
+            Key.chatKVBits: 8,
             Key.useJIT: true,
             Key.downloadOverCellular: false,
             Key.smartCommit: false,
@@ -79,6 +80,7 @@ final class AppSettings {
         static let subagentContextSize = "settings.ai.subagentContextSize"
         static let chatMode = "settings.ai.chatMode"
         static let chatThinking = "settings.ai.chatThinking"
+        static let chatKVBits = "settings.ai.chatKVBits"
         static let useJIT = "settings.run.jit"
         static let downloadOverCellular = "settings.ai.cellular"
         static let smartCommit = "settings.git.smartCommit"
@@ -171,6 +173,13 @@ final class AppSettings {
     var chatMode: String {
         get { defaults.string(forKey: Key.chatMode) ?? "edit" }
         set { set(newValue, Key.chatMode) }
+    }
+
+    /// The local chat models' KV cache precision: 8 bits, or 4 for about twice the context in the
+    /// same memory (a little less accurate).
+    var chatKVBits: Int {
+        get { defaults.integer(forKey: Key.chatKVBits) == 4 ? 4 : 8 }
+        set { set(newValue == 4 ? 4 : 8, Key.chatKVBits) }
     }
 
     /// Whether the Chat agent reasons before it answers.

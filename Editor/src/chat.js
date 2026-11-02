@@ -18,17 +18,20 @@ let api = null;
 const $ = (id) => document.getElementById(id);
 let pane = null;
 
-let messages = [];        // { role: 'user' | 'assistant', content (the model's), shown?, kind?: 'tool' | 'summary' }
+// { role: 'user' | 'assistant', content (the model's), shown?, kind?: 'tool' | 'summary', keep?, thinking? }
+let messages = [];
 let busy = false;
 let stopped = false;
-let settings = { models: [], selected: 'apple', contextSize: 4096, subagentModel: '', subagentParallel: 2, subagentContextSize: 4096, mode: 'edit', thinking: false };
+let settings = { models: [], selected: 'apple', contextSize: 4096, subagentModel: '', subagentParallel: 2, subagentContextSize: 4096, mode: 'edit', thinking: false, kvBits: 8 };
 const allowedThisChat = new Set();   // tools "Always" was picked for
 const requests = new Map();          // request id → { resolve, onText }
 let nextId = 1;
 let frame = 0;
 let liveText = null;                 // the answer being written, for the pending bubble
 
-const MAX_STEPS = 16;
+const MAX_STEPS = 24;
+const MAX_REPEATS = 3;           // the same tool call again this many times: the agent is going in circles
+const KEPT_TOOL_RESULTS = 2;     // the latest tool results go in full; older ones are cut short
 const MAX_TOOL_OUTPUT = 4000;
 const MODES = [
   ['manual', 'Manual', 'Asks before every edit and command'],
@@ -48,8 +51,11 @@ export function setupChat(options) { api = options; }
 
 // MARK: - The model
 
-/** About how many tokens a text is (code runs about 3.5 characters a token). */
-const tokens = (text) => Math.ceil(String(text || '').length / 3.5);
+/** About how many tokens a text is: code runs about 3.5 characters a token, corrected by what the
+ * model last counted (local models say how long their prompt really was). */
+let tokenRatio = 1;
+const rawTokens = (text) => String(text || '').length / 3.5;
+const tokens = (text) => Math.ceil(rawTokens(text) * tokenRatio);
 
 const modelInfo = (id) => settings.models.find((m) => m.id === id) || {};
 
@@ -64,7 +70,16 @@ function effectiveContext(modelId, wanted) {
 }
 
 const contextLimit = () => effectiveContext(settings.selected, settings.contextSize);
-const subagentModel = () => settings.subagentModel || settings.selected;
+
+/** Whether a model can be the agent: small ones loop and call tools wrongly, so they only chat. */
+const canAgent = (id = settings.selected) => !!modelInfo(id).agent;
+/** 'none', 'optional' (Think turns it on) or 'always'. */
+const reasoning = (id = settings.selected) => modelInfo(id).reasoning || 'none';
+const thinkingOn = () => reasoning() === 'always' || (settings.thinking && reasoning() !== 'none');
+const subagentModel = () => (settings.subagentModel && canAgent(settings.subagentModel) ? settings.subagentModel : settings.selected);
+const subagentsOn = () => settings.subagentParallel > 0 && canAgent(subagentModel());
+/** Room kept for the answer. */
+const answerTokens = () => (thinkingOn() ? 3072 : 1536);
 
 function toolHelp(subagents) {
   return [
@@ -86,7 +101,7 @@ function toolHelp(subagents) {
       '- get_problems {}: the errors and warnings in the project.',
       '- run_program {seconds?, keep_running?}: runs the project as the Run button does and returns what it printed and how it ended. Games keep running: their output is collected for seconds (8 unless given), then they stop unless keep_running is true.',
     ]),
-    ...(subagents || settings.subagentParallel < 1 ? [] : [
+    ...(subagents || !subagentsOn() ? [] : [
       '- delegate {tasks: ["...", ...]}: gives self-contained research questions to subagents, which read and search (they can\'t edit) and answer each one. Use it to look into several things at once.',
     ]),
     'Look before you change anything. When you\'re finished, answer normally, with no tool block.',
@@ -96,6 +111,11 @@ function toolHelp(subagents) {
 let projectList = [];   // the project's files, refreshed before each question
 
 function systemPrompt() {
+  if (!canAgent()) {
+    return 'You are the coding assistant built into Mobile Studio, a code editor on iPhone and iPad. Answer questions about the user\'s '
+      + 'code: the open file comes with each question. You can\'t read other files or change anything yourself, so show changes as code '
+      + 'for the user to apply. Be brief and precise. Use Markdown; put code in fenced blocks tagged with the language.' + thinkingNote();
+  }
   const files = projectList.length
     ? `\n\nThe project's files (${projectList.length}):\n${projectList.slice(0, 150).join('\n')}${projectList.length > 150 ? '\n… (list_files or find_files for the rest)' : ''}`
     : '';
@@ -110,12 +130,20 @@ function systemPrompt() {
 const REASONS_ITSELF = /^(qwen3|deepseek-r1)/;
 
 function thinkingNote() {
-  if (settings.thinking) {
+  if (thinkingOn()) {
     return REASONS_ITSELF.test(settings.selected) ? ''
       : '\n\nThink before you answer: first reason step by step inside <think></think> tags (what is asked, what to look at, the plan), '
         + 'then write your answer and any tool blocks after </think>.';
   }
   return /^qwen3/.test(settings.selected) ? '\n\n/no_think' : '';
+}
+
+/** A reply's reasoning, if it has any. */
+function thinkingOf(text) {
+  const close = text.indexOf('</think>');
+  const open = text.lastIndexOf('<think>', close >= 0 ? close : text.length);
+  if (close >= 0) return text.slice(open >= 0 ? open + 7 : 0, close).trim();
+  return open >= 0 ? text.slice(open + 7).trim() : '';
 }
 
 /** A reply without its reasoning (a <think> block, or everything before </think> when the template opened it). */
@@ -125,12 +153,13 @@ function withoutThinking(text) {
   return text.replace(/<think>[\s\S]*?(<\/think>|$)/g, '').trim();
 }
 
-/** Asks the model; `onText` gets the answer as it's written. Resolves with { text, error, stopped }. */
-function ask(chat, { model, maxTokens, onText, contextSize } = {}) {
+/** Asks the model; `onText` gets the answer as it's written. Resolves with { text, error, stopped,
+ * promptTokens, dropped }: how long the prompt really was, and how many old turns didn't fit. */
+function ask(chat, { model, maxTokens, onText, contextSize, thinking = false } = {}) {
   const id = 'c' + nextId++;
   return new Promise((resolve) => {
     requests.set(id, { resolve, onText });
-    api.native({ cmd: 'aiChat', id, messages: chat, model: model || undefined, maxTokens: maxTokens || 1536, contextSize: contextSize || settings.contextSize })
+    api.native({ cmd: 'aiChat', id, messages: chat, model: model || undefined, maxTokens: maxTokens || 1536, contextSize: contextSize || settings.contextSize, thinking })
       .catch((e) => { requests.delete(id); resolve({ error: String(e && e.message ? e.message : e) }); });
   });
 }
@@ -142,7 +171,7 @@ export function chatEvent(name, payload) {
   if (name === 'aiChatText') { if (request.onText) request.onText(payload.text || ''); return; }
   if (name === 'aiChatDone') {
     requests.delete(payload.id);
-    request.resolve({ text: payload.text || '', error: payload.error });
+    request.resolve({ text: payload.text || '', error: payload.error, promptTokens: payload.promptTokens, dropped: payload.dropped || 0 });
   }
 }
 
@@ -168,6 +197,7 @@ function withoutToolBlocks(text) {
 
 const READ_ONLY = new Set(['read_file', 'read_files', 'list_files', 'find_files', 'search', 'get_problems', 'delegate',
   'read_console', 'read_terminal', 'read_output']);
+const CHANGES_FILES = new Set(['edit_file', 'write_file', 'run_command']);
 const RISKY = /(^|[\s;&|])(rm|rmdir|mv|chmod|kill|curl|wget|dd)\b|git\s+(push|reset|clean|checkout|rebase|branch\s+-D)|npm\s+(publish|uninstall)|>\s*\S/;
 
 /** Whether a call runs without asking, in the current mode. */
@@ -338,7 +368,7 @@ async function runTool(call, { subagent = false } = {}) {
     if (t === 'delegate') {
       const tasks = (Array.isArray(call.tasks) ? call.tasks : [call.task]).filter(Boolean).map(String).slice(0, 8);
       if (!tasks.length) return { summary: 'Delegate', output: 'Error: no tasks.' };
-      if (settings.subagentParallel < 1) return { summary: 'Delegate', output: 'Error: subagents are turned off; do the research yourself.' };
+      if (!subagentsOn()) return { summary: 'Delegate', output: 'Error: subagents are turned off; do the research yourself.' };
       const answers = await runSubagents(tasks);
       return { summary: `${tasks.length} subagent${tasks.length === 1 ? '' : 's'}`, output: answers.map((a, i) => `Task ${i + 1}: ${tasks[i]}\nAnswer: ${a}`).join('\n\n') };
     }
@@ -386,7 +416,7 @@ async function subagent(task, model) {
     { role: 'user', content: task },
   ];
   for (let step = 0; step < 6 && !stopped; step++) {
-    const reply = await ask(chat, { model, maxTokens: 768, contextSize: settings.subagentContextSize });
+    const reply = await ask(chat, { model, maxTokens: reasoning(model) === 'always' ? 2048 : 768, contextSize: settings.subagentContextSize });
     if (reply.error) return `(failed: ${reply.error})`;
     const answer = withoutThinking(reply.text);
     const calls = toolCalls(answer);
@@ -401,25 +431,46 @@ async function subagent(task, model) {
 
 // MARK: - The agent
 
+let requestStart = 0;   // where the question being worked on starts in messages
+
+/** The conversation for the model. The question being worked on and summaries are marked keep, so
+ * they're never dropped to make room; old tool results are cut short (the latest are in full); and
+ * this question's reasoning goes back in between its tool steps, so the agent keeps its plan
+ * (earlier questions' reasoning is left out, as reasoning models expect). */
 function forModel() {
-  return [{ role: 'system', content: systemPrompt() }, ...messages.map((m) => ({ role: m.role, content: m.content }))];
+  const toolTurns = messages.map((m, i) => (m.kind === 'tool' ? i : -1)).filter((i) => i >= 0);
+  const fullFrom = toolTurns.length > KEPT_TOOL_RESULTS ? toolTurns[toolTurns.length - KEPT_TOOL_RESULTS] : 0;
+  return [{ role: 'system', content: systemPrompt() }, ...messages.map((m, i) => {
+    let content = m.content;
+    if (m.kind === 'tool' && i < fullFrom && content.length > 1200) {
+      content = content.slice(0, 1200) + `\n… (cut short to save room: ${content.length - 1200} more characters)`;
+    }
+    if (m.role === 'assistant' && m.thinking && i >= requestStart) content = `<think>\n${m.thinking.slice(-2000)}\n</think>\n\n${content}`;
+    return { role: m.role, content, keep: !!m.keep };
+  })];
 }
 
-const usedTokens = () => tokens(systemPrompt()) + messages.reduce((n, m) => n + tokens(m.content), 0);
+const usedTokens = () => forModel().reduce((n, m) => n + tokens(m.content), 0);
 
 /** Summarises the conversation into one message, to free the context. */
 async function compact(reason) {
   if (messages.length < 2) return;
+  // While the agent works, its question stays word for word after the summary.
+  const question = reason === 'auto' && messages[requestStart] && messages[requestStart].role === 'user' && !messages[requestStart].kind ? messages[requestStart] : null;
   const note = element('div', 'chat-note', 'Compacting the conversation…');
   $('chat-log').append(note);
   const reply = await ask([
     { role: 'system', content: 'You summarise conversations between a user and a coding agent, for the agent to carry on from.' },
     { role: 'user', content: messages.map((m) => `${m.role === 'user' ? (m.kind === 'tool' ? 'Tool results' : 'User') : 'Agent'}: ${m.content.slice(0, 3000)}`).join('\n\n')
-      + '\n\nSummarise this for the agent: what the user wants, decisions made, files read and changed (with what changed), and what is left to do. Be concise.' },
+      + '\n\nSummarise this for the agent: what the user wants, decisions made, files read and changed (with what changed), what has been tried '
+      + 'and what it showed, and what is left to do. Be concise.' },
   ], { maxTokens: 700 });
   note.remove();
-  if (reply.error || !reply.text.trim()) { notice('Couldn\'t compact: ' + (reply.error || 'no summary')); return; }
-  messages = [{ role: 'user', kind: 'summary', content: 'Summary of the conversation so far:\n' + reply.text.trim(), shown: reply.text.trim(), reason }];
+  if (reply.error || !withoutThinking(reply.text)) { notice('Couldn\'t compact: ' + (reply.error || 'no summary')); return; }
+  const summary = withoutThinking(reply.text);
+  messages = [{ role: 'user', kind: 'summary', content: 'Summary of the conversation so far:\n' + summary, shown: summary, reason, keep: true }];
+  if (question) messages.push({ ...question, content: 'Carry on with this (the summary above says what has been done):\n' + question.content });
+  requestStart = question ? 1 : messages.length;
   render();
 }
 
@@ -432,34 +483,61 @@ async function send() {
   if (text === '/compact') { busy = true; updateControls(); await compact('asked'); busy = false; updateControls(); return; }
   if (text === '/clear' || text === '/new') { newChat(); return; }
   const context = fileContext();
-  projectList = await projectFiles();
-  messages.push({ role: 'user', content: context ? `${context}\n${text}` : text, shown: text });
+  projectList = canAgent() ? await projectFiles() : [];
+  // Only the new question is kept whatever happens; earlier ones may make way.
+  for (const m of messages) if (m.kind !== 'summary') m.keep = false;
+  requestStart = messages.length;
+  messages.push({ role: 'user', content: context ? `${context}\n${text}` : text, shown: text, keep: true });
   render();
   busy = true;
   stopped = false;
   updateControls();
+  const seen = new Map();   // this question's tool calls, to catch the agent going in circles
+  let repeats = 0;
+  let overflowed = false;
   try {
     for (let step = 0; step < MAX_STEPS && !stopped; step++) {
-      // Near the context's end, the conversation so far is summarised first.
-      if (usedTokens() > contextLimit() * 0.8 && messages.length > 2) await compact('auto');
+      // Before the context runs out (with room for the answer), the conversation so far is summarised.
+      if ((overflowed || usedTokens() + answerTokens() > contextLimit() * 0.9) && messages.length > 2) await compact('auto');
       liveText = '';
       render();
-      const reply = await ask(forModel(), { maxTokens: settings.thinking ? 3072 : 1536, onText: (t) => { liveText = t; scheduleLive(); } });
+      const chat = forModel();
+      const reply = await ask(chat, { maxTokens: answerTokens(), thinking: thinkingOn(), onText: (t) => { liveText = t; scheduleLive(); } });
       liveText = null;
       if (reply.error) { messages.push({ role: 'assistant', content: '', shown: reply.error, kind: 'error' }); break; }
-      // The reasoning is shown but not kept for the model (it would fill the context), and tool blocks in it don't run.
+      if (reply.promptTokens) {
+        const estimate = chat.reduce((n, m) => n + rawTokens(m.content), 0);
+        if (estimate > 200) tokenRatio = Math.min(3, Math.max(0.5, reply.promptTokens / estimate));
+      }
+      overflowed = reply.dropped > 0;
+      // The reasoning shows folded; it goes back to the model only while this question is worked on,
+      // and tool blocks in it don't run.
       const answer = withoutThinking(reply.text);
-      const calls = toolCalls(answer);
-      messages.push({ role: 'assistant', content: answer, shown: reply.text, calls: calls.map((c) => c.tool + (c.path ? ' ' + c.path : '')) });
+      const calls = canAgent() ? toolCalls(answer) : [];
+      messages.push({ role: 'assistant', content: answer, shown: reply.text, thinking: thinkingOf(reply.text), calls: calls.map((c) => c.tool + (c.path ? ' ' + c.path : '')) });
       render();
       if (!calls.length || stopped) break;
       const results = [];
       for (const call of calls) {
         if (stopped) break;
+        const key = JSON.stringify(call);
+        if (seen.has(key)) {
+          repeats++;
+          results.push(`${call.tool}: You already made this exact call (step ${seen.get(key)}); its result is above. Don't repeat it: `
+            + 'use what it returned, try something different, or give your answer.');
+          continue;
+        }
+        seen.set(key, step + 1);
         results.push(await perform(call));
+        // A change makes earlier reads worth repeating.
+        if (CHANGES_FILES.has(call.tool)) seen.clear();
       }
       messages.push({ role: 'user', kind: 'tool', content: 'Tool results:\n' + results.join('\n\n'), shown: results.length + ' tool result' + (results.length === 1 ? '' : 's') });
       render();
+      if (repeats >= MAX_REPEATS) {
+        messages.push({ role: 'assistant', content: '', kind: 'error', shown: 'The agent kept repeating the same steps, so it was stopped. Try asking more specifically, or with a bigger model.' });
+        break;
+      }
     }
   } finally {
     busy = false;
@@ -507,6 +585,12 @@ function fileContext() {
   const sel = state.selection.main;
   const lang = path.includes('.') ? path.split('.').pop() : '';
   let out = `(The open file is ${path}, at line ${state.doc.lineAt(sel.head).number}.)`;
+  if (!canAgent() && sel.empty) {
+    // A model that can't read files gets the file itself, as much as fits in a third of its context.
+    const room = Math.max(2000, Math.floor(contextLimit() / 3 * 3.5));
+    const doc = state.doc.toString();
+    out += `\n\`\`\`${lang}\n${doc.length > room ? doc.slice(0, room) + '\n… (the rest of the file is left out)' : doc}\n\`\`\``;
+  }
   if (!sel.empty) out += `\nSelected (lines ${state.doc.lineAt(sel.from).number}-${state.doc.lineAt(sel.to).number}):\n\`\`\`${lang}\n${state.sliceDoc(sel.from, sel.to).slice(0, 3000)}\n\`\`\``;
   return out;
 }
@@ -531,8 +615,10 @@ function build() {
       return;
     }
     settings.selected = model.value;
+    tokenRatio = 1;   // each model counts differently
     api.native({ cmd: 'aiChatSelect', id: model.value }).catch(() => {});
     renderSettings();
+    updateControls();
     updateMeter();
     if (!messages.length) render();
   });
@@ -620,7 +706,7 @@ function build() {
 function saveSetting(change) {
   Object.assign(settings, change);
   api.native({ cmd: 'aiChatSettings', ...change }).catch(() => {});
-  if ('contextSize' in change) loadSettings();
+  if ('contextSize' in change || 'kvBits' in change) loadSettings();
   updateControls();
   updateMeter();
   renderSettings();
@@ -733,12 +819,25 @@ function renderSettings() {
   };
   row('Context size', contextSelect(settings.selected, settings.contextSize, (v) => saveSetting({ contextSize: v })),
     'Tokens the model reads at once: the conversation, files and answer. Bigger remembers more but needs more memory and takes longer to read. Each size shows its estimated memory; ones that won\'t fit this device are greyed out.');
-  row('Subagent model', select([['', 'Same as Chat'], ...settings.models.filter((m) => m.ready).map((m) => [m.id, m.name])], settings.subagentModel,
-    (v) => saveSetting({ subagentModel: v })), 'The model subagents use: a small one is quicker, a big one better.');
-  row('Subagent context', contextSelect(subagentModel(), settings.subagentContextSize, (v) => saveSetting({ subagentContextSize: v })),
-    'Tokens a subagent reads at once. A small subagent model can have a big context.');
-  row('Subagents at once', select([[0, 'Off'], [1, '1'], [2, '2'], [3, '3'], [4, '4'], [6, '6'], [8, '8']], settings.subagentParallel,
-    (v) => saveSetting({ subagentParallel: Number(v) })), 'How many subagents run side by side. Each local model is loaded once; Apple Intelligence runs several freely.');
+  const info = modelInfo(settings.selected);
+  if (!info.cloud && settings.selected !== 'apple') {
+    row('Cache precision', select([[8, '8-bit (best)'], [4, '4-bit (twice the context)']], settings.kvBits,
+      (v) => saveSetting({ kvBits: Number(v) })),
+      'How precisely the model remembers what it has read. 4-bit fits about twice the context in the same memory, a little less accurately.');
+  }
+  // Subagents only where the agent is: they use tools too.
+  if (!canAgent()) {
+    panel.append(element('div', 'chat-setting-note', `${info.name || 'This model'} only answers questions: it's too small to use the agent's `
+      + 'tools reliably. For the agent (and subagents and Think), pick Qwen3 4B, Qwen2.5-Coder 3B or 7B Instruct, Phi-4 mini, or a cloud model.'));
+  } else {
+    const agents = settings.models.filter((m) => m.ready && m.agent);
+    row('Subagent model', select([['', 'Same as Chat'], ...agents.map((m) => [m.id, m.name])], canAgent(settings.subagentModel) ? settings.subagentModel : '',
+      (v) => saveSetting({ subagentModel: v })), 'The model subagents use: a small one is quicker, a big one better.');
+    row('Subagent context', contextSelect(subagentModel(), settings.subagentContextSize, (v) => saveSetting({ subagentContextSize: v })),
+      'Tokens a subagent reads at once. A small subagent model can have a big context.');
+    row('Subagents at once', select([[0, 'Off'], [1, '1'], [2, '2'], [3, '3'], [4, '4'], [6, '6'], [8, '8']], settings.subagentParallel,
+      (v) => saveSetting({ subagentParallel: Number(v) })), 'How many subagents run side by side. Each local model is loaded once; cloud models run several freely.');
+  }
   const actions = element('div', 'chat-setting-actions');
   const compactButton = element('button', 'chat-small', 'Compact Now');
   compactButton.addEventListener('click', async () => { if (busy) return; busy = true; updateControls(); await compact('asked'); busy = false; updateControls(); });
@@ -762,9 +861,31 @@ function updateMeter() {
 function updateControls() {
   if (!pane) return;
   $('chat-send').textContent = busy ? 'Stop' : 'Send';
+  const name = modelInfo(settings.selected).name || 'This model';
+  // Think: only for models that reason well; DeepSeek-R1 always does.
   const think = $('chat-think');
-  think.classList.toggle('on', !!settings.thinking);
-  think.setAttribute('aria-pressed', String(!!settings.thinking));
+  const r = reasoning();
+  think.classList.toggle('on', thinkingOn());
+  think.setAttribute('aria-pressed', String(thinkingOn()));
+  think.disabled = r !== 'optional';
+  think.title = r === 'always' ? `${name} always reasons before it answers`
+    : r === 'none' ? `${name} doesn't reason well, so Think is off. Qwen3, DeepSeek-R1 and cloud models can think.`
+      : 'Thinking: the agent reasons before it answers (slower, better at harder tasks)';
+  // The agent's modes: only for models that can be the agent; the others just chat.
+  const mode = $('chat-mode');
+  const agent = canAgent();
+  let chatOnly = mode.querySelector('option[value="chat"]');
+  if (!agent && !chatOnly) {
+    chatOnly = element('option', null, 'Chat only');
+    chatOnly.value = 'chat';
+    mode.prepend(chatOnly);
+  } else if (agent && chatOnly) {
+    chatOnly.remove();
+  }
+  mode.disabled = !agent;
+  mode.value = agent ? (settings.mode || 'edit') : 'chat';
+  mode.title = agent ? 'What the agent may do without asking'
+    : `${name} only answers questions: it's too small to use tools reliably. Pick a bigger model for the agent.`;
 }
 
 function updateContextLabel() {
@@ -946,8 +1067,11 @@ function render() {
   if (!messages.length && liveText == null) {
     cards.length = 0;
     log.replaceChildren(element('div', 'chat-empty',
-      'Ask about your code, or tell the agent what to change: it reads, searches and edits the project, runs commands and sends research to subagents. '
-      + 'The mode below says what it may do without asking. '
+      (canAgent()
+        ? 'Ask about your code, or tell the agent what to change: it reads, searches and edits the project, runs commands and sends research to subagents. '
+          + 'The mode below says what it may do without asking. '
+        : `Ask about your code: the open file goes with each question. ${modelInfo(settings.selected).name || 'This model'} only answers; for the agent, `
+          + 'which reads, edits and runs your project, pick a bigger model (Qwen3 4B, Qwen2.5-Coder 3B or 7B Instruct, Phi-4 mini, or a cloud model). ')
       + (modelInfo(settings.selected).cloud
         ? 'This is a cloud model: your messages and the files the agent reads are sent to its provider.'
         : 'Everything runs on this device.')));

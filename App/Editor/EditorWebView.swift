@@ -398,11 +398,12 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 replyHandler(["selected": s.chatModel.rawValue,
                               "models": AIChatService.shared.options.map {
                                   ["id": $0.choice.rawValue, "name": $0.name, "detail": $0.detail, "ready": $0.ready, "suggested": $0.suggested, "cloud": $0.cloud,
+                                   "agent": $0.agent, "reasoning": $0.reasoning.rawValue,
                                    "contexts": $0.contexts.map { ["tokens": $0.tokens, "bytes": $0.bytes, "fits": $0.fits] }]
                               },
                               "subagentContextSize": s.subagentContextSize,
                               "contextSize": s.chatContextSize, "subagentModel": s.subagentModel?.rawValue ?? "",
-                              "subagentParallel": s.subagentParallel, "mode": s.chatMode, "thinking": s.chatThinking], nil)
+                              "subagentParallel": s.subagentParallel, "mode": s.chatMode, "thinking": s.chatThinking, "kvBits": s.chatKVBits], nil)
             case "aiChatSelect":
                 if let raw = body["id"] as? String, let choice = AIModelChoice(rawValue: raw) { AppSettings.shared.chatModel = choice }
                 replyHandler(true, nil)
@@ -416,6 +417,8 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 if body["contextSize"] != nil || body["subagentContextSize"] != nil { AIChatService.shared.releaseIdleEngine() }
                 if let mode = body["mode"] as? String { s.chatMode = mode }
                 if let thinking = body["thinking"] as? Bool { s.chatThinking = thinking }
+                // A new precision takes effect when the model next loads.
+                if let bits = body["kvBits"] as? Int { s.chatKVBits = bits; AIChatService.shared.releaseIdleEngine() }
                 replyHandler(true, nil)
             case "aiChatCancel":
                 AIChatService.shared.cancel(body["id"] as? String)
@@ -425,17 +428,21 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 let id = body["id"] as? String ?? ""
                 let messages = (body["messages"] as? [[String: Any]] ?? []).compactMap { m -> ChatMessage? in
                     guard let role = m["role"] as? String, let content = m["content"] as? String else { return nil }
-                    return ChatMessage(role: role, content: content)
+                    return ChatMessage(role: role, content: content, keep: m["keep"] as? Bool ?? false)
                 }
                 // A subagent names its own model; the conversation uses the Chat model.
                 let choice = (body["model"] as? String).flatMap(AIModelChoice.init(rawValue:))
                 let maxTokens = body["maxTokens"] as? Int ?? 1536
                 let contextSize = body["contextSize"] as? Int
-                AIChatService.shared.respond(id: id, choice: choice, contextSize: contextSize, messages, maxTokens: maxTokens, onText: { [weak self] text in
+                AIChatService.shared.respond(id: id, choice: choice, contextSize: contextSize, messages, maxTokens: maxTokens,
+                                             thinking: body["thinking"] as? Bool ?? false, onText: { [weak self] text in
                     self?.emit("aiChatText", ["id": id, "text": text])
                 }, completion: { [weak self] result in
                     switch result {
-                    case .success(let text): self?.emit("aiChatDone", ["id": id, "text": text])
+                    case .success(let reply):
+                        var payload: [String: Any] = ["id": id, "text": reply.text, "dropped": reply.dropped]
+                        if let tokens = reply.promptTokens { payload["promptTokens"] = tokens }
+                        self?.emit("aiChatDone", payload)
                     case .failure(let error): self?.emit("aiChatDone", ["id": id, "error": error.localizedDescription])
                     }
                 })
