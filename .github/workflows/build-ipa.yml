@@ -99,8 +99,32 @@ jobs:
           path: third_party/nodejs-mobile
           key: nodejs-mobile-icu-${{ hashFiles('scripts/compile-nodejs.sh', 'scripts/build-nodejs.sh', 'scripts/patch-nodejs-host-tools.py', 'scripts/patch-zerofill-offsets.py') }}
 
+  # The editor's browser tests (Editor/tests): the real editor page in headless Chrome with the
+  # app faked. A failing test stops the build. Also warns when the committed bundle is out of date.
+  editor-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: Editor/package-lock.json
+      - name: Install
+        working-directory: Editor
+        run: npm ci
+      - name: Build the editor
+        working-directory: Editor
+        run: |
+          npm run build
+          git diff --quiet -- ../App/Resources/Editor || echo "::warning::App/Resources/Editor differs from a fresh build of Editor/src: run npm run build and commit it."
+      - name: Browser tests
+        working-directory: Editor
+        run: npm test
+
   build:
-    needs: node
+    needs: [node, editor-tests]
     runs-on: ${{ inputs.runner || 'macos-15-intel' }}
     timeout-minutes: 60
     permissions:
@@ -262,7 +286,7 @@ jobs:
   # starting soon matters more than a faster Mac. When they're all busy too, a job that waits too
   # long is cancelled ("not acquired by Runner"), and the same commit is built again on Apple silicon.
   fallback:
-    needs: [node, build]
+    needs: [node, editor-tests, build]
     # A job that never got a runner shows to the jobs after it as failed, not cancelled; the step
     # below checks it was the runner shortage (a failed build has nothing to retry).
     if: always() && github.event_name != 'pull_request' && (inputs.runner || 'macos-15-intel') == 'macos-15-intel' && needs.build.result != 'success'

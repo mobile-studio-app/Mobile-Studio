@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "docs": "node scripts/build-love-docs.mjs",
-    "build": "esbuild src/ext/node-host.js --bundle --minify --platform=node --format=cjs --target=node18 --outfile=../App/Resources/Editor/node-host.js && esbuild src/ext/worker.js --bundle --minify --format=iife --target=safari16 --outfile=build/ext-worker.txt && esbuild src/main.js --bundle --minify --format=iife --target=safari16 --loader:.wasm=binary --loader:.txt=text --loader:.css=text --outfile=../App/Resources/Editor/editor.bundle.js"
+    "build": "esbuild src/ext/node-host.js --bundle --minify --platform=node --format=cjs --target=node18 --outfile=../App/Resources/Editor/node-host.js && esbuild src/ext/worker.js --bundle --minify --format=iife --target=safari16 --outfile=build/ext-worker.txt && esbuild src/main.js --bundle --minify --format=iife --target=safari16 --loader:.wasm=binary --loader:.txt=text --loader:.css=text --outfile=../App/Resources/Editor/editor.bundle.js",
+    "test": "node tests/run.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "6.20.4",
@@ -32,6 +33,7 @@
     "vscode-textmate": "9.3.2"
   },
   "devDependencies": {
-    "esbuild": "0.28.2"
+    "esbuild": "0.28.2",
+    "puppeteer-core": "23.11.1"
   }
 }
