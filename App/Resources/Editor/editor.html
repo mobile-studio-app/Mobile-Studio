@@ -138,6 +138,8 @@
   .chat-small { background: color-mix(in srgb, var(--fg) 10%, transparent); color: var(--text); border: 0; border-radius: 4px; padding: 5px 10px; font: 12px -apple-system, system-ui, sans-serif; }
   .chat-small:active { background: color-mix(in srgb, var(--fg) 20%, transparent); }
   .chat-mode { flex: none; max-width: none; }
+  .chat-think { flex: none; background: var(--bg); color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 3px 8px; font: 12px -apple-system, system-ui, sans-serif; }
+  .chat-think.on { color: var(--text); border-color: var(--accent, #0a84ff); background: color-mix(in srgb, var(--accent, #0a84ff) 18%, transparent); }
   .chat-chip { display: inline-block; margin: 2px 4px 2px 0; padding: 1px 6px; border-radius: 9px; font-size: 11px; color: var(--muted); background: color-mix(in srgb, var(--fg) 8%, transparent); }
   .chat-tool, .chat-approval { margin: 0 0 10px; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--bg); font-size: 12px; }
   .chat-tool.denied { opacity: .6; }

@@ -53,6 +53,7 @@ final class AppSettings {
             Key.subagentParallel: 2,
             Key.subagentContextSize: 4096,
             Key.chatMode: "edit",
+            Key.chatThinking: false,
             Key.useJIT: true,
             Key.downloadOverCellular: false,
             Key.smartCommit: false,
@@ -77,6 +78,7 @@ final class AppSettings {
         static let subagentParallel = "settings.ai.subagentParallel"
         static let subagentContextSize = "settings.ai.subagentContextSize"
         static let chatMode = "settings.ai.chatMode"
+        static let chatThinking = "settings.ai.chatThinking"
         static let useJIT = "settings.run.jit"
         static let downloadOverCellular = "settings.ai.cellular"
         static let smartCommit = "settings.git.smartCommit"
@@ -169,6 +171,12 @@ final class AppSettings {
     var chatMode: String {
         get { defaults.string(forKey: Key.chatMode) ?? "edit" }
         set { set(newValue, Key.chatMode) }
+    }
+
+    /// Whether the Chat agent reasons before it answers.
+    var chatThinking: Bool {
+        get { defaults.bool(forKey: Key.chatThinking) }
+        set { set(newValue, Key.chatThinking) }
     }
 
     var useJIT: Bool {

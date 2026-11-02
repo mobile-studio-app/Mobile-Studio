@@ -10,6 +10,8 @@
 // conversation into one message.
 import { renderMarkdown } from './markdown.js';
 import { forEachDiagnostic } from '@codemirror/lint';
+import { terminalText } from './terminal.js';
+import { channelText, outputChannels } from './ext/output.js';
 
 // { native, view, current, openURL, appCommand, openFile, runCommand(command, onOutput) → exit code, problems() }
 let api = null;
@@ -19,7 +21,7 @@ let pane = null;
 let messages = [];        // { role: 'user' | 'assistant', content (the model's), shown?, kind?: 'tool' | 'summary' }
 let busy = false;
 let stopped = false;
-let settings = { models: [], selected: 'apple', contextSize: 4096, subagentModel: '', subagentParallel: 2, subagentContextSize: 4096, mode: 'edit' };
+let settings = { models: [], selected: 'apple', contextSize: 4096, subagentModel: '', subagentParallel: 2, subagentContextSize: 4096, mode: 'edit', thinking: false };
 const allowedThisChat = new Set();   // tools "Always" was picked for
 const requests = new Map();          // request id → { resolve, onText }
 let nextId = 1;
@@ -68,13 +70,19 @@ function toolHelp(subagents) {
     '```tool\n{"tool": "read_file", "path": "src/main.lua"}\n```',
     'You can write several tool blocks in one reply. Their results come back in the next message.',
     '- read_file {path, start_line?, end_line?}: a file, with line numbers.',
+    '- read_files {paths: [...]}: several files at once.',
     '- list_files {path?}: the project\'s files (or a folder\'s).',
+    '- find_files {pattern}: files whose path matches a glob, like **/*.lua or src/*.js.',
     '- search {query, path?}: lines containing the text (any case), as path:line: text.',
+    '- read_console {lines?}: the program console\'s last lines (what the program printed when it last ran).',
+    '- read_terminal {lines?}: what the Terminal panel shows.',
+    '- read_output {channel?}: an Output panel channel (without one, the list of channels).',
     ...(subagents ? [] : [
       '- edit_file {path, old, new}: replaces the exact text old, which must appear once, with new. Read the file first; copy old exactly, with enough lines to be unique.',
       '- write_file {path, content}: creates or replaces a whole file.',
       '- run_command {command}: runs a shell command in the project folder (ls, cat, grep, git, node, npm, python, lua); returns its output.',
       '- get_problems {}: the errors and warnings in the project.',
+      '- run_program {seconds?, keep_running?}: runs the project as the Run button does and returns what it printed and how it ended. Games keep running: their output is collected for seconds (8 unless given), then they stop unless keep_running is true.',
     ]),
     ...(subagents || settings.subagentParallel < 1 ? [] : [
       '- delegate {tasks: ["...", ...]}: gives self-contained research questions to subagents, which read and search (they can\'t edit) and answer each one. Use it to look into several things at once.',
@@ -83,10 +91,36 @@ function toolHelp(subagents) {
   ].join('\n');
 }
 
+let projectList = [];   // the project's files, refreshed before each question
+
 function systemPrompt() {
+  const files = projectList.length
+    ? `\n\nThe project's files (${projectList.length}):\n${projectList.slice(0, 150).join('\n')}${projectList.length > 150 ? '\n… (list_files or find_files for the rest)' : ''}`
+    : '';
   return 'You are the coding agent built into Mobile Studio, a code editor on iPhone and iPad. You work in the user\'s project: '
-    + 'you read and change its files and run commands with the tools below. Be brief and precise. Use Markdown; put code in fenced '
-    + 'blocks tagged with the language.\n\n' + toolHelp(false);
+    + 'you read and change its files, run commands and run the program with the tools below. Look at the files that matter, not '
+    + 'just the open one. Be brief and precise. Use Markdown; put code in fenced blocks tagged with the language.\n\n'
+    + toolHelp(false) + files + thinkingNote();
+}
+
+// Qwen3 and DeepSeek-R1 reason by themselves, in <think> tags; Qwen3 stops when told /no_think (DeepSeek-R1
+// always reasons). Other models are asked to reason the same way when thinking is on.
+const REASONS_ITSELF = /^(qwen3|deepseek-r1)/;
+
+function thinkingNote() {
+  if (settings.thinking) {
+    return REASONS_ITSELF.test(settings.selected) ? ''
+      : '\n\nThink before you answer: first reason step by step inside <think></think> tags (what is asked, what to look at, the plan), '
+        + 'then write your answer and any tool blocks after </think>.';
+  }
+  return /^qwen3/.test(settings.selected) ? '\n\n/no_think' : '';
+}
+
+/** A reply without its reasoning (a <think> block, or everything before </think> when the template opened it). */
+function withoutThinking(text) {
+  const close = text.indexOf('</think>');
+  if (close >= 0 && text.lastIndexOf('<think>', close) < 0) return text.slice(close + 8).trim();
+  return text.replace(/<think>[\s\S]*?(<\/think>|$)/g, '').trim();
 }
 
 /** Asks the model; `onText` gets the answer as it's written. Resolves with { text, error, stopped }. */
@@ -130,7 +164,8 @@ function withoutToolBlocks(text) {
   return text.replace(/```(?:tool|json)?\s*\n[\s\S]*?(```|$)/g, (block) => (/"tool"\s*:/.test(block) ? '' : block)).trim();
 }
 
-const READ_ONLY = new Set(['read_file', 'list_files', 'search', 'get_problems', 'delegate']);
+const READ_ONLY = new Set(['read_file', 'read_files', 'list_files', 'find_files', 'search', 'get_problems', 'delegate',
+  'read_console', 'read_terminal', 'read_output']);
 const RISKY = /(^|[\s;&|])(rm|rmdir|mv|chmod|kill|curl|wget|dd)\b|git\s+(push|reset|clean|checkout|rebase|branch\s+-D)|npm\s+(publish|uninstall)|>\s*\S/;
 
 /** Whether a call runs without asking, in the current mode. */
@@ -140,6 +175,7 @@ function allowedWithoutAsking(call) {
   if (mode === 'turbo') return true;
   if (call.tool === 'edit_file' || call.tool === 'write_file') return mode !== 'manual';
   if (call.tool === 'run_command') return mode === 'auto' && !RISKY.test(String(call.command || ''));
+  if (call.tool === 'run_program') return mode === 'auto';
   return false;
 }
 
@@ -196,6 +232,34 @@ async function runTool(call, { subagent = false } = {}) {
       const to = Math.min(lines.length, Number(call.end_line) || lines.length);
       const numbered = lines.slice(from - 1, to).map((l, i) => `${from + i}\t${l}`).join('\n');
       return { summary: `Read ${cleanPath(call.path)} (${to - from + 1} lines)`, output: clip(numbered, 8000) };
+    }
+    if (t === 'read_files') {
+      const paths = (Array.isArray(call.paths) ? call.paths : []).slice(0, 8);
+      const parts = [];
+      for (const path of paths) {
+        try { parts.push(`== ${cleanPath(path)} ==\n${clip(await readText(path), 4000)}`); } catch (e) { parts.push(`== ${cleanPath(path)} ==\n(couldn't read it)`); }
+      }
+      return { summary: `Read ${paths.length} file${paths.length === 1 ? '' : 's'}`, output: parts.join('\n\n') || 'Error: give paths.' };
+    }
+    if (t === 'find_files') {
+      const pattern = String(call.pattern || '*');
+      const re = globToRegExp(pattern.includes('/') ? pattern : '**/' + pattern);
+      const files = (await projectFiles()).filter((f) => re.test(f));
+      return { summary: `Found ${files.length} file${files.length === 1 ? '' : 's'} for ${pattern}`, output: clip(files.slice(0, 300).join('\n') || 'No files match.') };
+    }
+    if (t === 'read_console') {
+      const text = await api.native({ cmd: 'programConsole', lines: Math.min(500, Number(call.lines) || 200) });
+      return { summary: 'Read the program console', output: clip(text || '(the console is empty)') };
+    }
+    if (t === 'read_terminal') {
+      const text = terminalText(Math.min(1000, Number(call.lines) || 200));
+      return { summary: 'Read the Terminal', output: text == null ? 'No terminal is open.' : clip(text || '(empty)') };
+    }
+    if (t === 'read_output') {
+      const names = outputChannels();
+      if (!call.channel) return { summary: 'Listed Output channels', output: names.join('\n') || 'No Output channels.' };
+      const text = channelText(String(call.channel));
+      return { summary: `Read Output: ${call.channel}`, output: text == null ? `No channel called ${call.channel}. Channels: ${names.join(', ')}` : clip(text.slice(-12000)) };
     }
     if (t === 'list_files') {
       const dir = cleanPath(call.path);
@@ -256,6 +320,19 @@ async function runTool(call, { subagent = false } = {}) {
         },
       };
     }
+    if (t === 'run_program') {
+      const seconds = Math.min(60, Math.max(1, Number(call.seconds) || 8));
+      return {
+        summary: 'Ran the program', program: true,
+        apply: async () => {
+          const r = await api.native({ cmd: 'runProgram', seconds, keepRunning: !!call.keep_running });
+          const ending = r.exitCode != null ? `It ended with exit code ${r.exitCode}.`
+            : r.stillRunning ? (call.keep_running ? `It's still running after ${seconds} s.` : `It was still running after ${seconds} s, so it was stopped.`)
+              : 'It stopped.';
+          return `${ending}\nConsole output:\n${r.output || '(nothing)'}`;
+        },
+      };
+    }
     if (t === 'delegate') {
       const tasks = (Array.isArray(call.tasks) ? call.tasks : [call.task]).filter(Boolean).map(String).slice(0, 8);
       if (!tasks.length) return { summary: 'Delegate', output: 'Error: no tasks.' };
@@ -267,6 +344,18 @@ async function runTool(call, { subagent = false } = {}) {
   } catch (e) {
     return { summary: `${t} (failed)`, output: `Error: ${e && e.message ? e.message : e}` };
   }
+}
+
+function globToRegExp(glob) {
+  let re = '';
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === '*' && glob[i + 1] === '*') { re += '.*'; i++; if (glob[i + 1] === '/') i++; }
+    else if (c === '*') re += '[^/]*';
+    else if (c === '?') re += '[^/]';
+    else re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  }
+  return new RegExp('^' + re + '$', 'i');
 }
 
 // MARK: - Subagents
@@ -291,15 +380,16 @@ async function runSubagents(tasks) {
 
 async function subagent(task, model) {
   const chat = [
-    { role: 'system', content: 'You are a research subagent of a coding agent. Answer the task by reading and searching the project; you can\'t change anything. Answer briefly with what you found, naming files and lines.\n\n' + toolHelp(true) },
+    { role: 'system', content: 'You are a research subagent of a coding agent. Answer the task by reading and searching the project; you can\'t change anything. Answer briefly with what you found, naming files and lines.\n\n' + toolHelp(true) + (/^qwen3/.test(model) ? '\n\n/no_think' : '') },
     { role: 'user', content: task },
   ];
   for (let step = 0; step < 6 && !stopped; step++) {
     const reply = await ask(chat, { model, maxTokens: 768, contextSize: settings.subagentContextSize });
     if (reply.error) return `(failed: ${reply.error})`;
-    const calls = toolCalls(reply.text);
-    chat.push({ role: 'assistant', content: reply.text });
-    if (!calls.length) return withoutToolBlocks(reply.text) || '(no answer)';
+    const answer = withoutThinking(reply.text);
+    const calls = toolCalls(answer);
+    chat.push({ role: 'assistant', content: answer });
+    if (!calls.length) return withoutToolBlocks(answer) || '(no answer)';
     const results = [];
     for (const call of calls.slice(0, 4)) results.push(`${call.tool}: ${(await runTool(call, { subagent: true })).output}`);
     chat.push({ role: 'user', content: 'Tool results:\n' + clip(results.join('\n\n'), 3000) });
@@ -340,6 +430,7 @@ async function send() {
   if (text === '/compact') { busy = true; updateControls(); await compact('asked'); busy = false; updateControls(); return; }
   if (text === '/clear' || text === '/new') { newChat(); return; }
   const context = fileContext();
+  projectList = await projectFiles();
   messages.push({ role: 'user', content: context ? `${context}\n${text}` : text, shown: text });
   render();
   busy = true;
@@ -351,11 +442,13 @@ async function send() {
       if (usedTokens() > contextLimit() * 0.8 && messages.length > 2) await compact('auto');
       liveText = '';
       render();
-      const reply = await ask(forModel(), { onText: (t) => { liveText = t; scheduleLive(); } });
+      const reply = await ask(forModel(), { maxTokens: settings.thinking ? 3072 : 1536, onText: (t) => { liveText = t; scheduleLive(); } });
       liveText = null;
       if (reply.error) { messages.push({ role: 'assistant', content: '', shown: reply.error, kind: 'error' }); break; }
-      const calls = toolCalls(reply.text);
-      messages.push({ role: 'assistant', content: reply.text, shown: reply.text, calls: calls.map((c) => c.tool + (c.path ? ' ' + c.path : '')) });
+      // The reasoning is shown but not kept for the model (it would fill the context), and tool blocks in it don't run.
+      const answer = withoutThinking(reply.text);
+      const calls = toolCalls(answer);
+      messages.push({ role: 'assistant', content: answer, shown: reply.text, calls: calls.map((c) => c.tool + (c.path ? ' ' + c.path : '')) });
       render();
       if (!calls.length || stopped) break;
       const results = [];
@@ -495,11 +588,15 @@ function build() {
   const contextName = element('span');
   contextName.id = 'chat-include-name';
   context.append(box, contextName);
+  const think = element('button', 'chat-think', 'Think');
+  think.id = 'chat-think';
+  think.title = 'Thinking: the agent reasons before it answers (slower, better at harder tasks)';
+  think.addEventListener('click', () => saveSetting({ thinking: !settings.thinking }));
   const sendButton = element('button', 'chat-send', 'Send');
   sendButton.id = 'chat-send';
   sendButton.addEventListener('click', () => (busy ? stop() : send()));
   const row = element('div', 'chat-row');
-  row.append(mode, context, sendButton);
+  row.append(mode, think, context, sendButton);
   form.append(text, row);
 
   pane.append(header, meter, panel, log, form);
@@ -511,6 +608,7 @@ function saveSetting(change) {
   Object.assign(settings, change);
   api.native({ cmd: 'aiChatSettings', ...change }).catch(() => {});
   if ('contextSize' in change) loadSettings();
+  updateControls();
   updateMeter();
   renderSettings();
 }
@@ -532,6 +630,7 @@ async function loadSettings() {
   more.value = '__more__';
   select.append(more);
   $('chat-mode').value = settings.mode || 'edit';
+  updateControls();
   renderSettings();
   updateMeter();
 }
@@ -543,7 +642,7 @@ function contextSelect(modelId, current, onChange) {
   const k = (n) => (n >= 1024 ? n / 1024 + 'K' : String(n));
   const gb = (b) => (b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : Math.round(b / 1e6) + ' MB');
   if (modelId === 'apple' || !contexts.some((c) => c.bytes > 0)) {
-    const o = element('option', null, `${k((contexts[0] || {}).tokens || 4096)} (fixed)`);
+    const o = element('option', null, `${k((contexts[0] || {}).tokens || 4096)}, fixed for Apple Intelligence`);
     s.append(o);
     s.disabled = true;
     return s;
@@ -612,6 +711,9 @@ function updateMeter() {
 function updateControls() {
   if (!pane) return;
   $('chat-send').textContent = busy ? 'Stop' : 'Send';
+  const think = $('chat-think');
+  think.classList.toggle('on', !!settings.thinking);
+  think.setAttribute('aria-pressed', String(!!settings.thinking));
 }
 
 function updateContextLabel() {
@@ -655,6 +757,8 @@ export function chatSelectionChanged() { if (chatOpen()) updateContextLabel(); }
 function renderAnswer(text) {
   const html = [];
   let rest = withoutToolBlocks(text);
+  // A template that opens <think> itself leaves only the closing tag in the reply.
+  if (rest.includes('</think>') && rest.lastIndexOf('<think>', rest.indexOf('</think>')) < 0) rest = '<think>' + rest;
   const open = rest.indexOf('<think>');
   if (open >= 0) {
     const close = rest.indexOf('</think>', open);
@@ -737,7 +841,7 @@ function toolCard(result, state, output) {
 function approval(call, result) {
   return new Promise((resolve) => {
     const card = element('div', 'chat-approval');
-    const title = call.tool === 'run_command' ? `Run \`${result.command}\`?` : `${result.summary.replace(/^(Edited|Created|Rewrote)/, (w) => ({ Edited: 'Edit', Created: 'Create', Rewrote: 'Rewrite' })[w])}?`;
+    const title = call.tool === 'run_command' ? `Run \`${result.command}\`?` : call.tool === 'run_program' ? 'Run the program?' : `${result.summary.replace(/^(Edited|Created|Rewrote)/, (w) => ({ Edited: 'Edit', Created: 'Create', Rewrote: 'Rewrite' })[w])}?`;
     card.append(element('div', 'chat-tool-title', title));
     if (result.preview) card.append(element('pre', 'chat-diff', result.preview.text));
     const buttons = element('div', 'chat-approval-buttons');

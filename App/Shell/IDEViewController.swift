@@ -269,6 +269,10 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
             self.editor.call(body, arguments, completion: completion)
         }
         // The file icon theme's icons are drawn by the editor page (they're SVG or font characters).
+        // The Chat agent runs the project and reads its console (run_program).
+        ProgramRunCapture.shared.startRun = { [weak self] in self?.run() }
+        ProgramRunCapture.shared.stopRun = { [weak self] in self?.stopGame() }
+        ProgramRunCapture.shared.isRunning = { [weak self] in self?.runtimeHost.isRunning ?? false }
         FileIconTheme.shared.callEditor = { [weak self] body, arguments, completion in
             guard let self else { return completion(nil) }
             self.editor.call(body, arguments, completion: completion)
@@ -946,6 +950,7 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
 
     private func appendLog(_ line: String) {
         gameStage.appendLog(line)
+        ProgramRunCapture.shared.log(line)
     }
 
     private func setupInterpreterButton() {
@@ -1140,6 +1145,7 @@ extension IDEViewController: RuntimeHostDelegate {
 
     func runtimeHost(_ host: RuntimeHost, didExitWithCode code: Int32) {
         endDebugSession()
+        ProgramRunCapture.shared.exited(code: code)
         let failed = code != 0 || runHadError
         if failed && !stopRequested {
             // Keep the stage (and its console) open so the failure can be read.

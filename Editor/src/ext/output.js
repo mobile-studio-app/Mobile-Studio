@@ -84,3 +84,6 @@ export const outputChannels = () => [...channels.keys()];
 
 /** Makes the Output tab ready before anything is written to it. */
 export function setupOutput() { build(); }
+
+/** An Output channel's text, for the Chat agent's read_output. */
+export const channelText = (name) => channels.get(name) ?? null;

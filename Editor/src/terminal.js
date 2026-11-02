@@ -265,3 +265,17 @@ async function complete(t) {
   t.term.write(t.prompt);
   redraw(t);
 }
+
+/** The active terminal's last lines (scrollback included), for the Chat agent's read_terminal. */
+export function terminalText(maxLines = 200) {
+  const t = active || terminals[terminals.length - 1];
+  if (!t) return null;
+  const buffer = t.term.buffer.active;
+  const lines = [];
+  for (let i = Math.max(0, buffer.length - maxLines); i < buffer.length; i++) {
+    const line = buffer.getLine(i);
+    if (line) lines.push(line.translateToString(true));
+  }
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+  return lines.join('\n');
+}

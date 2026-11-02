@@ -383,6 +383,15 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 let url = FileManager.default.temporaryDirectory.appendingPathComponent("mobile-studio-node-host.log")
                 let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
                 replyHandler(String(text.suffix(6000)), nil)
+            case "runProgram":
+                // The Chat agent's run_program: run, then the console's output and how it ended.
+                let seconds = min(60, max(1, body["seconds"] as? Double ?? 8))
+                ProgramRunCapture.shared.run(seconds: seconds, keepRunning: body["keepRunning"] as? Bool ?? false) { result in
+                    replyHandler(result, nil)
+                }
+            case "programConsole":
+                let count = body["lines"] as? Int ?? 200
+                replyHandler(ProgramRunCapture.shared.recent.suffix(count).joined(separator: "\n"), nil)
             case "aiChatModels":
                 // The Chat panel's models and settings (chat.js).
                 let s = AppSettings.shared
@@ -393,7 +402,7 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                               },
                               "subagentContextSize": s.subagentContextSize,
                               "contextSize": s.chatContextSize, "subagentModel": s.subagentModel?.rawValue ?? "",
-                              "subagentParallel": s.subagentParallel, "mode": s.chatMode], nil)
+                              "subagentParallel": s.subagentParallel, "mode": s.chatMode, "thinking": s.chatThinking], nil)
             case "aiChatSelect":
                 if let raw = body["id"] as? String, let choice = AIModelChoice(rawValue: raw) { AppSettings.shared.chatModel = choice }
                 replyHandler(true, nil)
@@ -406,6 +415,7 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 // A new size takes effect when the model next loads.
                 if body["contextSize"] != nil || body["subagentContextSize"] != nil { AIChatService.shared.releaseIdleEngine() }
                 if let mode = body["mode"] as? String { s.chatMode = mode }
+                if let thinking = body["thinking"] as? Bool { s.chatThinking = thinking }
                 replyHandler(true, nil)
             case "aiChatCancel":
                 AIChatService.shared.cancel(body["id"] as? String)
