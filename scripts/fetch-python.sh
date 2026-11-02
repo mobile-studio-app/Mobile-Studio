@@ -28,5 +28,11 @@ mkdir -p "$OUT"
 cp -R "$WORK/x/Python.xcframework" "$OUT/"
 rm -rf "$OUT/Python.xcframework/ios-arm64_x86_64-simulator"
 /usr/libexec/PlistBuddy -c "Delete :AvailableLibraries:1" "$OUT/Python.xcframework/Info.plist" 2>/dev/null || true
+# pip, as a wheel: Python imports it from the zip (pip install in the Terminal).
+PIP_VERSION=26.3
+PIP_SHA256=f3b60b20ffaadd4415ed7957212a38ac63fa4c5fa375bd0f4a797777940fad13
+curl -fsSL -o "$OUT/pip.whl" \
+  "https://files.pythonhosted.org/packages/07/25/ee8c38ae72d66b844ce8eb9711ba905dba21ca1a8a0c960057c41cd23337/pip-$PIP_VERSION-py3-none-any.whl"
+echo "$PIP_SHA256  $OUT/pip.whl" | shasum -a 256 -c -
 echo "$TAG" > "$OUT/PYTHON_TAG"
 echo "Python $TAG -> $OUT/Python.xcframework"

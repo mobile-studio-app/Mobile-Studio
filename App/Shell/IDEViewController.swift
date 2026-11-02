@@ -278,6 +278,7 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
         ProgramRunCapture.shared.startRun = { [weak self] in self?.run() }
         ProgramRunCapture.shared.stopRun = { [weak self] in self?.stopGame() }
         ProgramRunCapture.shared.isRunning = { [weak self] in self?.runtimeHost.isRunning ?? false }
+        PythonPackages.shared.startPython = { [weak self] arguments in try self?.startPip(arguments) }
         FileIconTheme.shared.callEditor = { [weak self] body, arguments, completion in
             guard let self else { return completion(nil) }
             self.editor.call(body, arguments, completion: completion)
@@ -770,6 +771,27 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
         } catch {
             appendLog(error.localizedDescription)
         }
+    }
+
+    /// pip (the Terminal's, PythonPackages): Python in its pip mode, in the console.
+    private func startPip(_ arguments: [String]) throws {
+        guard let runtime = RuntimeManager.shared.runtimes.first(where: { $0.manifest.id.hasPrefix("python") }), runtime.isAvailable else {
+            throw NSError(domain: "pip", code: 1, userInfo: [NSLocalizedDescriptionKey: "Python isn't in this build."])
+        }
+        guard !runtimeHost.isRunning else {
+            throw NSError(domain: "pip", code: 2, userInfo: [NSLocalizedDescriptionKey: "Stop the running program first."])
+        }
+        gameStage.showsGamePane = false
+        runHadError = false
+        stopRequested = false
+        appendLog("▶ pip " + arguments.joined(separator: " ").replacingOccurrences(of: "--pip=", with: ""))
+        try runtimeHost.start(runtime: runtime, project: ProjectStore.shared.currentProject, arguments: arguments)
+        runningRuntimeName = "pip"
+        gameStage.controlBar.setTitle("pip")
+        gameStage.controlBar.setStopped(false)
+        activityRail.setRunning(true)
+        if !gameStage.isConsoleVisible { gameStage.isConsoleVisible = true }
+        setGameVisible(true)
     }
 
     /// JavaScript runs in the app's Node.js, started on first use; the runtime needs its port.

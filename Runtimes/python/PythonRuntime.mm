@@ -10,6 +10,10 @@
 #include "DebugChannel.h"
 
 static std::string g_project;
+// pip's packages (Application Support/python3.14/site-packages, on every run's path) and pip
+// itself (its wheel in the bundle, imported from the zip).
+static std::string g_sitePackages;
+static std::string g_pipWheel;
 static int g_exitCode = 0;
 static std::atomic<bool> g_pythonRunning{false};
 
@@ -77,6 +81,21 @@ static PyObject *duo_debug_receive(PyObject *, PyObject *args) {
     return text;
 }
 
+/// The pip command line (JSON) when this run is pip's, else None.
+static PyObject *duo_pip_args(PyObject *, PyObject *) {
+    const char *args = dc_console_option("--pip=");
+    if (!args) Py_RETURN_NONE;
+    return PyUnicode_FromString(args);
+}
+
+static PyObject *duo_site_packages(PyObject *, PyObject *) {
+    return PyUnicode_FromString(g_sitePackages.c_str());
+}
+
+static PyObject *duo_pip_wheel(PyObject *, PyObject *) {
+    return PyUnicode_FromString(g_pipWheel.c_str());
+}
+
 static PyObject *duo_repl(PyObject *, PyObject *) {
     return PyBool_FromLong(dc_console_is_repl());
 }
@@ -95,6 +114,9 @@ static PyObject *duo_debugger_path(PyObject *, PyObject *) {
 
 static PyMethodDef kMethods[] = {
     {"repl", duo_repl, METH_NOARGS, NULL},
+    {"pip_args", duo_pip_args, METH_NOARGS, NULL},
+    {"site_packages", duo_site_packages, METH_NOARGS, NULL},
+    {"pip_wheel", duo_pip_wheel, METH_NOARGS, NULL},
     {"debug_send", duo_debug_send, METH_VARARGS, NULL},
     {"debug_receive", duo_debug_receive, METH_VARARGS, NULL},
     {"debug_config", duo_debug_config, METH_NOARGS, NULL},
@@ -160,10 +182,42 @@ sys.stdout = sys.__stdout__ = _Output(4)
 sys.stderr = sys.__stderr__ = _Output(3)
 sys.stdin = sys.__stdin__ = _Input()
 
+def _pip(command):
+    # pip, run in this process: iOS has no subprocesses, so only wheels (no builds), which pip
+    # installs itself. Packages go to the site-packages every run has on its path; iOS wheels come
+    # from PyPI and BeeWare's index. Certificates are pip's own (iOS has no /etc/ssl).
+    import json
+    args = json.loads(command)
+    sys.path.insert(0, _duocode.pip_wheel())
+    sys.argv = ['pip'] + args
+    os.environ.update(PIP_DISABLE_PIP_VERSION_CHECK='1', PIP_NO_INPUT='1', PIP_NO_COLOR='1',
+                      PIP_ROOT_USER_ACTION='ignore', PIP_PROGRESS_BAR='off')
+    site = _duocode.site_packages()
+    network = ['--use-deprecated=legacy-certs', '--extra-index-url', 'https://pypi.anaconda.org/beeware/simple']
+    if args and args[0] == 'install':
+        extra = ['--target', site, '--upgrade'] + network
+        if not any(a.startswith(('--no-binary', '--only-binary', '--prefer-binary')) for a in args):
+            extra += ['--only-binary', ':all:']
+        args = args[:1] + extra + args[1:]
+    elif args and args[0] in ('download', 'index', 'search'):
+        args = args[:1] + network + args[1:]
+    try:
+        from pip._internal.cli.main import main
+        code = main(args)
+    except SystemExit as exit:
+        code = exit.code
+    except KeyboardInterrupt:
+        _duocode.write(1, 'Stopped.\n')
+        return 1
+    return code if isinstance(code, int) else (0 if code is None else 1)
+
 def _run():
     project = _duocode.project()
     os.chdir(project)
     sys.path.insert(0, project)
+    command = _duocode.pip_args()
+    if command is not None:
+        return _pip(command)
     sys.argv = ['main.py']
     if _duocode.repl():
         import code
@@ -184,8 +238,7 @@ def _run():
             spec.loader.exec_module(module)
             debugger = module.create(project)
         except Exception as error:
-            _duocode.write(3, f"The debugger couldn't start: {error}
-")
+            _duocode.write(3, f"The debugger couldn't start: {error}\n")
     try:
         import runpy
         if debugger is not None:
@@ -260,6 +313,12 @@ static int run_program(const char *project_dir) {
         return 1;
     }
 
+    NSString *support = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject;
+    NSString *site = [support stringByAppendingPathComponent:@"python3.14/site-packages"];
+    [NSFileManager.defaultManager createDirectoryAtPath:site withIntermediateDirectories:YES attributes:nil error:nil];
+    g_sitePackages = site.fileSystemRepresentation;
+    g_pipWheel = [home stringByAppendingPathComponent:@"pip.whl"].fileSystemRepresentation;
+
     PyConfig config;
     PyConfig_InitIsolatedConfig(&config);
     config.install_signal_handlers = 0;
@@ -268,7 +327,8 @@ static int run_program(const char *project_dir) {
     config.site_import = 1;
     PyStatus status = PyConfig_SetBytesString(&config, &config.home, home.fileSystemRepresentation);
     config.module_search_paths_set = 1;
-    bool paths = append_path(&config, lib) && append_path(&config, [lib stringByAppendingPathComponent:@"lib-dynload"]);
+    bool paths = append_path(&config, lib) && append_path(&config, [lib stringByAppendingPathComponent:@"lib-dynload"])
+        && append_path(&config, site);
     if (!PyStatus_Exception(status) && paths) status = Py_InitializeFromConfig(&config);
     PyConfig_Clear(&config);
     if (PyStatus_Exception(status) || !paths) {

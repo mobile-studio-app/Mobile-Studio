@@ -50,6 +50,8 @@
 extern "C" int dc_prepare_program(const char *input, const char *output, const uint8_t *p12, size_t p12_length,
                                   const char *password, char *error, size_t error_capacity);
 extern "C" int dc_certificate_team(const uint8_t *p12, size_t length, const char *password, char *team, size_t capacity);
+extern "C" int dc_sign_library(const char *path, const char *identifier, const uint8_t *p12, size_t p12_length,
+                               const char *password, char *error, size_t error_capacity);
 
 namespace {
 
@@ -547,6 +549,21 @@ extern "C" void dc_native_tools_set_certificate(const void *p12, size_t length, 
     std::lock_guard<std::mutex> lock(g_certificateLock);
     g_certificate = p12 && length ? [NSData dataWithBytes:p12 length:length] : nil;
     g_password = password ? @(password) : @"";
+}
+
+extern "C" int dc_native_tools_sign_library(const char *path, const char *identifier, char *error, size_t capacity) {
+    NSData *certificate;
+    NSString *password;
+    {
+        std::lock_guard<std::mutex> lock(g_certificateLock);
+        certificate = g_certificate;
+        password = g_password;
+    }
+    if (!certificate.length) {
+        snprintf(error, capacity, "%s", "Compiled modules need your signing certificate: import it in Settings > Programs from Extensions.");
+        return 3;
+    }
+    return dc_sign_library(path, identifier, (const uint8_t *)certificate.bytes, certificate.length, password.UTF8String ?: "", error, capacity);
 }
 
 extern "C" int dc_native_tools_certificate_team(const void *p12, size_t length, const char *password, char *out, size_t capacity) {

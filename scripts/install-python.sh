@@ -36,4 +36,6 @@ find "$CODESIGNING_FOLDER_PATH/$DYNLOAD" -name "*.so" | while read -r FULL_EXT; 
   echo "$FRAMEWORK/$MODULE" > "${FULL_EXT%.so}.fwork"
   echo "${RELATIVE_EXT%.so}.fwork" > "$CODESIGNING_FOLDER_PATH/$FRAMEWORK/$MODULE.origin"
 done
+# pip (scripts/fetch-python.sh): imported from its wheel.
+[ -f "$PROJECT_DIR/third_party/python/pip.whl" ] && cp "$PROJECT_DIR/third_party/python/pip.whl" "$CODESIGNING_FOLDER_PATH/python/pip.whl"
 echo "Installed Python $PY_VER standard library into python/lib"

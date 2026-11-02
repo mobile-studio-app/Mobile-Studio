@@ -136,6 +136,8 @@ async function answer(t, call) {
   try {
     if (call.cmd === 'git') {
       result = await api.native({ cmd: 'gitCommand', args: call.args, cwd: call.cwd });
+    } else if (call.cmd === 'pip') {
+      result = await api.native({ cmd: 'pipCommand', args: call.args });
     } else if (call.cmd === 'open') {
       await api.openPath(call.path);
     } else if (call.cmd === 'filesChanged') {

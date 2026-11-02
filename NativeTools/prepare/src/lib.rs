@@ -66,6 +66,18 @@ pub fn prepare_file(input: &str, output: &str, p12: &[u8], password: &str) -> Re
     Ok(())
 }
 
+/// Signs an iOS library in place (a Python package's compiled module, say), so the app may load
+/// it: it's already iOS code, so only the signature changes. A fat file keeps its ARM64 part.
+pub fn sign_file(path: &str, identifier: &str, p12: &[u8], password: &str) -> Result<(), String> {
+    let data = std::fs::read(path).map_err(|e| format!("{path} couldn't be read: {e}"))?;
+    let slice = macho::arm64_slice(&data).map_err(|e| e.0)?;
+    let signed = sign(&slice, identifier, p12, password)?;
+    let temporary = format!("{path}.signing");
+    std::fs::write(&temporary, signed).map_err(|e| format!("Couldn't save: {e}"))?;
+    std::fs::rename(&temporary, path).map_err(|e| format!("Couldn't save: {e}"))?;
+    Ok(())
+}
+
 unsafe fn text(pointer: *const c_char) -> String {
     if pointer.is_null() { String::new() } else { CStr::from_ptr(pointer).to_string_lossy().into_owned() }
 }
@@ -97,6 +109,24 @@ pub unsafe extern "C" fn dc_prepare_program(input: *const c_char, output: *const
         Ok(Ok(())) => 0,
         Ok(Err(message)) => { report(&message, error, error_capacity); 1 }
         Err(_) => { report("Preparing the program failed unexpectedly.", error, error_capacity); 2 }
+    }
+}
+
+/// C entry point: signs the library at `path` in place; 0 on success, otherwise the reason is in `error`.
+///
+/// # Safety
+/// As for dc_prepare_program.
+#[no_mangle]
+pub unsafe extern "C" fn dc_sign_library(path: *const c_char, identifier: *const c_char, p12: *const u8, p12_length: usize,
+                                         password: *const c_char, error: *mut c_char, error_capacity: usize) -> i32 {
+    let path = text(path);
+    let identifier = text(identifier);
+    let password = text(password);
+    let p12 = if p12.is_null() { &[][..] } else { std::slice::from_raw_parts(p12, p12_length) };
+    match std::panic::catch_unwind(|| sign_file(&path, &identifier, p12, &password)) {
+        Ok(Ok(())) => 0,
+        Ok(Err(message)) => { report(&message, error, error_capacity); 1 }
+        Err(_) => { report("Signing failed unexpectedly.", error, error_capacity); 2 }
     }
 }
 

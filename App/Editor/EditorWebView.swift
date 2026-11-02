@@ -352,6 +352,11 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 // npm or a task changed the project's files.
                 NotificationCenter.default.post(name: ProjectStore.filesDidChange, object: store)
                 replyHandler(true, nil)
+            case "pipCommand":
+                // pip in the Terminal (PythonPackages): runs in the Python runtime, output when it's done.
+                PythonPackages.shared.pip(body["args"] as? [String] ?? []) { output, code in
+                    replyHandler(["out": output, "code": Int(code)], nil)
+                }
             case "gitCommand":
                 // `git` in the Terminal (GitCommandLine).
                 let root = store.currentProject

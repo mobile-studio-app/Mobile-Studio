@@ -46,6 +46,20 @@ final class ProgramRunCapture {
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 
+    /// Collects the console of a run someone else starts (pip), until it ends.
+    func capture(_ completion: @escaping (String, Int32) -> Void) {
+        finish(code: nil, running: false)
+        lines = []
+        self.completion = { result in
+            completion(result["output"] as? String ?? "", Int32(result["exitCode"] as? Int ?? 1))
+        }
+    }
+
+    func cancelCapture() {
+        completion = nil
+        lines = []
+    }
+
     private func finish(code: Int?, running: Bool) {
         timeout?.cancel()
         timeout = nil

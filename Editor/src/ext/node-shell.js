@@ -302,7 +302,16 @@ class Session {
       for (const file of args.filter((a) => !a.startsWith('-'))) await this.call('open', { path: this.resolve(file) });
       return 0;
     }
-    if (['python', 'python3', 'lua', 'love', 'pip', 'pip3'].includes(name)) {
+    // pip, and python -m pip: run by the app's Python (PythonPackages.swift).
+    const pipArgs = name === 'pip' || name === 'pip3' ? args
+      : (name === 'python' || name === 'python3') && args[0] === '-m' && args[1] === 'pip' ? args.slice(2) : null;
+    if (pipArgs) {
+      io.write(`Running pip in Mobile Studio's Python (its output shows when it's done)...\n`);
+      const result = await this.call('pip', { args: pipArgs });
+      io.write(result.out || '');
+      return result.code ?? 0;
+    }
+    if (['python', 'python3', 'lua', 'love'].includes(name)) {
       io.write(`${name} runs in the app, not the terminal: use Run (▶) for a project's main file, or Terminal: Start REPL for an interactive session.\n`);
       return 127;
     }
