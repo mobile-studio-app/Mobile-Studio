@@ -27,12 +27,18 @@ func temporary(_ name: String) -> URL {
 
 func newRepo() -> GitRepository { try! GitRepository.create(at: temporary("repo")) }
 
-/// A bare repository, as a server has.
+/// A bare repository, as a server has, whose HEAD is main (as GitHub's is).
 func newRemote() -> URL {
     _ = Git.ready
     let url = temporary("remote")
+    var options = git_repository_init_options()
+    git_repository_init_options_init(&options, UInt32(GIT_REPOSITORY_INIT_OPTIONS_VERSION))
+    options.flags = GIT_REPOSITORY_INIT_BARE.rawValue | GIT_REPOSITORY_INIT_MKPATH.rawValue
     var repo: OpaquePointer?
-    precondition(git_repository_init(&repo, url.path, 1) == 0)
+    "main".withCString { name in
+        options.initial_head = name
+        precondition(git_repository_init_ext(&repo, url.path, &options) == 0)
+    }
     git_repository_free(repo)
     return url
 }

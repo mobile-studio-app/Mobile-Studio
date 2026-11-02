@@ -390,7 +390,7 @@ final class GitRepository {
         guard !paths.isEmpty else { return }
         if let head = headCommit() {
             defer { git_object_free(head) }
-            try Git.withStrings(paths) { try Git.check(git_reset_default(pointer, head, $0)) }
+            _ = try Git.withStrings(paths) { try Git.check(git_reset_default(pointer, head, $0)) }
         } else {
             // Before the first commit, unstaging takes files out of the index.
             let index = try index()
@@ -464,7 +464,7 @@ final class GitRepository {
             }
             for other in mergeHeads() { parents.append(try lookupCommit(other)) }
             defer { parents.dropFirst(head == nil ? 0 : 1).forEach { git_object_free($0) } }
-            try parents.withUnsafeMutableBufferPointer { buffer in
+            _ = try parents.withUnsafeMutableBufferPointer { buffer in
                 try Git.check(git_commit_create(&id, pointer, "HEAD", sig, sig, nil, text, tree, buffer.count, buffer.baseAddress), "Couldn't commit")
             }
             if state != .none { git_repository_state_cleanup(pointer) }
@@ -886,10 +886,18 @@ final class GitRepository {
 
     /// Merges a branch ("feature" or "origin/main") into the current one.
     func merge(_ branch: String) throws -> GitMergeResult {
-        let target = try lookupCommit(branchSpec(branch))
+        let spec = branchSpec(branch)
+        let target = try lookupCommit(spec)
         defer { git_object_free(target) }
+        // From the branch's reference when it is one, so the merge message names it.
         var annotated: OpaquePointer?
-        try Git.check(git_annotated_commit_lookup(&annotated, pointer, git_commit_id(target)))
+        var ref: OpaquePointer?
+        if spec.hasPrefix("refs/"), git_reference_lookup(&ref, pointer, spec) == 0, let ref {
+            defer { git_reference_free(ref) }
+            try Git.check(git_annotated_commit_from_ref(&annotated, pointer, ref))
+        } else {
+            try Git.check(git_annotated_commit_lookup(&annotated, pointer, git_commit_id(target)))
+        }
         defer { git_annotated_commit_free(annotated) }
         var analysis = GIT_MERGE_ANALYSIS_NONE
         var preference = GIT_MERGE_PREFERENCE_NONE
@@ -1137,7 +1145,8 @@ final class GitRepository {
         git_push_options_init(&options, UInt32(GIT_PUSH_OPTIONS_VERSION))
         transfer.install(&options.callbacks)
         var specs = ["\(force ? "+" : "")refs/heads/\(branch):refs/heads/\(branch)"]
-        if tags { specs.append("refs/tags/*:refs/tags/*") }
+        // Pushes name each ref: libgit2 takes no wildcards here.
+        if tags { specs += self.tags().map { "refs/tags/\($0.name):refs/tags/\($0.name)" } }
         let rc = Git.withStrings(specs) { git_remote_push(remote, $0, &options) }
         guard rc == 0 else { throw transfer.error(rc, "Couldn't push to \(remoteName)") }
         if !transfer.rejections.isEmpty {
@@ -1155,7 +1164,9 @@ final class GitRepository {
         var options = git_push_options()
         git_push_options_init(&options, UInt32(GIT_PUSH_OPTIONS_VERSION))
         transfer.install(&options.callbacks)
-        let rc = Git.withStrings(["refs/tags/*:refs/tags/*"]) { git_remote_push(remote, $0, &options) }
+        let specs = tags().map { "refs/tags/\($0.name):refs/tags/\($0.name)" }
+        guard !specs.isEmpty else { return }
+        let rc = Git.withStrings(specs) { git_remote_push(remote, $0, &options) }
         guard rc == 0 else { throw transfer.error(rc, "Couldn't push the tags") }
     }
 
