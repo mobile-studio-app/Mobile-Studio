@@ -185,6 +185,11 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
         if !didShowWelcome {
             didShowWelcome = true
             showWelcome(animated: false)
+            // What's new after an update, or a newer release (once a day), over the Welcome screen.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                guard let self else { return }
+                UpdateChecker.shared.launched(presentingFrom: self)
+            }
         }
     }
 

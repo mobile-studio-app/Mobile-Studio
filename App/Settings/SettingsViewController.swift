@@ -48,7 +48,7 @@ final class SettingsViewController: UITableViewController {
             case .running: return ["LuaJIT JIT Compiler", "Running Games", "Programs from Extensions", "Signing Certificate"]
             case .sourceControl: return ["GitHub", "Sign in", "Smart Commit"]
             case .advanced: return ["AI Models", "Download Models", "Ollama", "Llama", "Gemma", "Qwen", "Phi", "DeepSeek", "settings.json", "keybindings.json", "Keyboard Shortcuts", "Test Automation", "Pairing Code", "Developer"]
-            case .about: return ["Version", "Runtimes", "Device Memory", "Licences"]
+            case .about: return ["Version", "Check for Updates", "What's New", "Runtimes", "Device Memory", "Licences"]
             }
         }
     }
@@ -160,7 +160,7 @@ final class SettingsViewController: UITableViewController {
         case .account: return 2
         case .files: return 3
         case .developer: return settings.testAutomation ? 3 : 1
-        case .about: return 3
+        case .about: return 5
         }
     }
 
@@ -368,6 +368,15 @@ final class SettingsViewController: UITableViewController {
                 content.text = "Mobile Studio"
                 content.secondaryText = "\(info?["CFBundleShortVersionString"] as? String ?? "?") (\(info?["CFBundleVersion"] as? String ?? "?"))"
             case 1:
+                content.text = "Check for Updates"
+                content.textProperties.color = .tintColor
+                content.secondaryText = updateStatus
+                cell.selectionStyle = .default
+            case 2:
+                content.text = "What's New in \(UpdateChecker.currentVersion)"
+                content.textProperties.color = .tintColor
+                cell.selectionStyle = .default
+            case 3:
                 content = UIListContentConfiguration.subtitleCell()
                 content.secondaryTextProperties.color = .secondaryLabel
                 content.text = "Runtimes"
@@ -521,6 +530,19 @@ final class SettingsViewController: UITableViewController {
             accountTapped()
         case .developer where indexPath.row == 2:
             AutomationServer.shared.resetToken()
+        case .about where indexPath.row == 1:
+            checkForUpdates(at: indexPath)
+        case .about where indexPath.row == 2:
+            updateStatus = "Loading…"
+            UpdateChecker.shared.fetch(tag: "v" + UpdateChecker.currentVersion) { [weak self] release in
+                guard let self else { return }
+                self.updateStatus = nil
+                if let release {
+                    self.present(WhatsNewViewController(release: release, isUpdate: false), animated: true)
+                } else {
+                    self.showMessage("What's New", "The release notes couldn't be loaded. They're at github.com/\(UpdateChecker.repository)/releases.")
+                }
+            }
         default:
             break
         }
@@ -575,6 +597,35 @@ final class SettingsViewController: UITableViewController {
             alert.addAction(UIAlertAction(title: "OK", style: .default))
             present(alert, animated: true)
         }
+    }
+
+    // MARK: - Updates
+
+    /// Under Check for Updates: what the last check found.
+    private var updateStatus: String? {
+        didSet {
+            if let section = index(.about) { tableView.reconfigureRows(at: [IndexPath(row: 1, section: section)]) }
+        }
+    }
+
+    private func checkForUpdates(at indexPath: IndexPath) {
+        updateStatus = "Checking…"
+        UpdateChecker.shared.fetch(tag: nil) { [weak self] release in
+            guard let self else { return }
+            guard let release else { self.updateStatus = "Couldn't reach GitHub"; return }
+            if UpdateChecker.isNewer(release.version, than: UpdateChecker.currentVersion) {
+                self.updateStatus = "\(release.version) is available"
+                UpdateChecker.shared.offer(release, from: self)
+            } else {
+                self.updateStatus = "Mobile Studio is up to date"
+            }
+        }
+    }
+
+    private func showMessage(_ title: String, _ message: String) {
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
     }
 
     private func reloadCertificateRow() {
