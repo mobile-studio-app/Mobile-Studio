@@ -217,6 +217,8 @@ final class VSIconButton: UIButton {
     override var isEnabled: Bool { didSet { alpha = isEnabled ? 1 : 0.4 } }
 
     private func updateLook() {
+        // VoiceOver says whether an option (Match Case and the like) is on.
+        if style == .option { accessibilityTraits = isChecked ? [.button, .selected] : .button }
         if style == .option && isChecked {
             backgroundColor = VS.optionActiveBackground
             layer.borderColor = VS.optionActiveBorder.cgColor

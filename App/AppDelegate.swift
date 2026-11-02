@@ -5,6 +5,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         dc_install_crash_handlers()
+        Diagnostics.shared.start()
         ProjectStore.shared.bootstrap()
         RuntimeManager.shared.discover()
         ModelDownloadManager.shared.reconnect()

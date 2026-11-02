@@ -35,7 +35,7 @@ final class SettingsViewController: UITableViewController {
             case .ai: return [.ai, .aiMerge, .chat, .cloud]
             case .running: return [.run, .programs]
             case .sourceControl: return [.account]
-            case .advanced: return [.models, .files, .developer]
+            case .advanced: return [.models, .files, .diagnostics, .developer]
             case .about: return [.about]
             }
         }
@@ -47,14 +47,14 @@ final class SettingsViewController: UITableViewController {
             case .ai: return ["AI Suggestions", "Apple Intelligence", "Fast AI", "Regular AI", "Download over Mobile Data", "AI Merge Conflicts", "Chat", "Models", "Cloud Models", "API Key", "Anthropic", "Claude", "OpenAI", "OpenRouter", "Ollama", "LM Studio"]
             case .running: return ["LuaJIT JIT Compiler", "Running Games", "Programs from Extensions", "Signing Certificate"]
             case .sourceControl: return ["GitHub", "Sign in", "Smart Commit"]
-            case .advanced: return ["AI Models", "Download Models", "Ollama", "Llama", "Gemma", "Qwen", "Phi", "DeepSeek", "settings.json", "keybindings.json", "Keyboard Shortcuts", "Test Automation", "Pairing Code", "Developer"]
+            case .advanced: return ["AI Models", "Download Models", "Ollama", "Llama", "Gemma", "Qwen", "Phi", "DeepSeek", "settings.json", "keybindings.json", "Keyboard Shortcuts", "Diagnostics", "Crash Reports", "Logs", "Test Automation", "Pairing Code", "Developer"]
             case .about: return ["Version", "Check for Updates", "What's New", "Runtimes", "Device Memory", "Licences"]
             }
         }
     }
 
     fileprivate enum Section: Int, CaseIterable {
-        case editor, suggestions, ai, aiMerge, chat, cloud, run, programs, account, models, files, developer, about
+        case editor, suggestions, ai, aiMerge, chat, cloud, run, programs, account, models, files, diagnostics, developer, about
     }
 
     /// Posted to open a settings file (userInfo "path") in the editor.
@@ -159,6 +159,7 @@ final class SettingsViewController: UITableViewController {
         case .programs: return 1
         case .account: return 2
         case .files: return 3
+        case .diagnostics: return 1
         case .developer: return settings.testAutomation ? 3 : 1
         case .about: return 5
         }
@@ -177,6 +178,7 @@ final class SettingsViewController: UITableViewController {
         case .programs: return "Programs from Extensions"
         case .account: return "Source Control"
         case .files: return "Settings Files"
+        case .diagnostics: return "Diagnostics"
         case .developer: return "Developer"
         case .about: return "About"
         }
@@ -239,6 +241,12 @@ final class SettingsViewController: UITableViewController {
             return "VS Code's settings files. settings.json has these settings and extensions' under VS Code's names; a project's .vscode/settings.json overrides them for that project."
         case .account:
             return "Smart Commit commits all your changes when nothing is staged, instead of asking first."
+        case .diagnostics:
+            return """
+                A text file to attach to a bug report: the app and device, a few settings, your extensions, \
+                recent crash reports, the program console and the extension host's log. It has no keys, \
+                tokens or project files, and goes only where you share it.
+                """
         case .developer:
             let state = settings.testAutomation && !AutomationServer.shared.isRunning ? " It's starting, or Wi-Fi is off." : ""
             return """
@@ -343,6 +351,9 @@ final class SettingsViewController: UITableViewController {
                 content.text = "Sign in to GitHub"
                 content.textProperties.color = .tintColor
             }
+        case .diagnostics:
+            content.text = "Export Diagnostics…"
+            content.textProperties.color = .tintColor
         case .developer:
             cell.selectionStyle = .none
             switch indexPath.row {
@@ -530,6 +541,13 @@ final class SettingsViewController: UITableViewController {
             accountTapped()
         case .developer where indexPath.row == 2:
             AutomationServer.shared.resetToken()
+        case .diagnostics:
+            let share = UIActivityViewController(activityItems: [Diagnostics.shared.report()], applicationActivities: nil)
+            if let cell = tableView.cellForRow(at: indexPath) {
+                share.popoverPresentationController?.sourceView = cell
+                share.popoverPresentationController?.sourceRect = cell.bounds
+            }
+            present(share, animated: true)
         case .about where indexPath.row == 1:
             checkForUpdates(at: indexPath)
         case .about where indexPath.row == 2:

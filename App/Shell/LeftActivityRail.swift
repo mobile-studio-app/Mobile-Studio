@@ -222,10 +222,12 @@ final class LeftActivityRail: UIView, UIScrollViewDelegate {
         activeTab = tab
         for t in [SidebarTab.files, .search, .git, .debug, .extensions] {
             button(for: t)?.tintColor = (t == tab) ? .white : VS.activityBarInactive
+            button(for: t)?.accessibilityTraits = (t == tab) ? [.button, .selected] : .button
         }
         let views = tab == .views ? button(for: .views) : nil
         for button in [viewsBtn] + containerButtons.map(\.button) {
             button.tintColor = button === views ? .white : VS.activityBarInactive
+            button.accessibilityTraits = button === views ? [.button, .selected] : .button
         }
         activeStrip.isHidden = (tab == nil)
         setNeedsLayout()

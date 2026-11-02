@@ -545,12 +545,16 @@ function build() {
   const close = element('button', 'chat-icon codicon', '');
   close.title = 'Close Chat';
   close.addEventListener('click', () => closeChat());
+  // The icons are font glyphs: VoiceOver reads these names instead.
+  for (const button of [options, fresh, close]) button.setAttribute('aria-label', button.title);
+  model.setAttribute('aria-label', 'Chat model');
   header.append(model, options, fresh, close);
 
   // How full the model's context is.
   const meter = element('div', 'chat-meter');
   meter.id = 'chat-meter';
   meter.title = 'Context used. /compact summarises the conversation to free it.';
+  meter.setAttribute('role', 'status');
   meter.append(element('div', 'chat-meter-bar'), element('span', 'chat-meter-text'));
 
   const panel = element('div', 'chat-settings');
@@ -572,6 +576,7 @@ function build() {
   text.id = 'chat-text';
   text.rows = 3;
   text.placeholder = 'Ask, or tell the agent what to change. /compact, /clear';
+  text.setAttribute('aria-label', 'Message to the agent');
   text.setAttribute('autocapitalize', 'sentences');
   text.addEventListener('keydown', (e) => {
     e.stopPropagation();
@@ -580,6 +585,7 @@ function build() {
   const mode = element('select', 'chat-mode');
   mode.id = 'chat-mode';
   mode.title = 'What the agent may do without asking';
+  mode.setAttribute('aria-label', 'Mode: what the agent may do without asking');
   for (const [value, label, help] of MODES) {
     const option = element('option', null, label);
     option.value = value;

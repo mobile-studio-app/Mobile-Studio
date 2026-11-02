@@ -22,6 +22,11 @@ final class WelcomeViewController: UIViewController, UIDocumentPickerDelegate {
     private static let linkColor = UIColor(red: 0.22, green: 0.58, blue: 1.0, alpha: 1)
     private static let secondaryText = UIColor(white: 0.6, alpha: 1)
 
+    /// The system font at `size`, grown or shrunk with the reader's text size (Dynamic Type).
+    private static func scaled(_ size: CGFloat, _ weight: UIFont.Weight = .regular) -> UIFont {
+        UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: size, weight: weight))
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = UIColor(red: 0.12, green: 0.12, blue: 0.12, alpha: 1)
@@ -45,11 +50,13 @@ final class WelcomeViewController: UIViewController, UIDocumentPickerDelegate {
 
         let title = UILabel()
         title.text = "Mobile Studio"
-        title.font = .systemFont(ofSize: 34, weight: .light)
+        title.font = Self.scaled(34, .light)
+        title.adjustsFontForContentSizeCategory = true
         title.textColor = UIColor(white: 0.92, alpha: 1)
         let subtitle = UILabel()
         subtitle.text = "Write, run and debug code on your phone"
-        subtitle.font = .systemFont(ofSize: 17, weight: .regular)
+        subtitle.font = Self.scaled(17, .regular)
+        subtitle.adjustsFontForContentSizeCategory = true
         subtitle.textColor = Self.secondaryText
         let header = UIStackView(arrangedSubviews: [title, subtitle])
         header.axis = .vertical
@@ -141,7 +148,8 @@ final class WelcomeViewController: UIViewController, UIDocumentPickerDelegate {
     private func sectionTitle(_ text: String) -> UILabel {
         let label = UILabel()
         label.text = text
-        label.font = .systemFont(ofSize: 19, weight: .regular)
+        label.font = Self.scaled(19, .regular)
+        label.adjustsFontForContentSizeCategory = true
         label.textColor = UIColor(white: 0.85, alpha: 1)
         return label
     }
@@ -155,7 +163,7 @@ final class WelcomeViewController: UIViewController, UIDocumentPickerDelegate {
         cfg.contentInsets = NSDirectionalEdgeInsets(top: 10, leading: 0, bottom: 10, trailing: 12)
         cfg.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attrs in
             var a = attrs
-            a.font = .systemFont(ofSize: 15)
+            a.font = WelcomeViewController.scaled(15)
             return a
         }
         let button = UIButton(configuration: cfg)
@@ -171,7 +179,8 @@ final class WelcomeViewController: UIViewController, UIDocumentPickerDelegate {
         if projects.isEmpty {
             let empty = UILabel()
             empty.text = "No projects yet."
-            empty.font = .systemFont(ofSize: 14)
+            empty.font = Self.scaled(14)
+            empty.adjustsFontForContentSizeCategory = true
             empty.textColor = Self.secondaryText
             recentList.addArrangedSubview(empty)
             return
@@ -189,12 +198,12 @@ final class WelcomeViewController: UIViewController, UIDocumentPickerDelegate {
             cfg.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 8)
             cfg.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attrs in
                 var a = attrs
-                a.font = .systemFont(ofSize: 15)
+                a.font = WelcomeViewController.scaled(15)
                 return a
             }
             cfg.subtitleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attrs in
                 var a = attrs
-                a.font = .systemFont(ofSize: 12)
+                a.font = WelcomeViewController.scaled(12)
                 a.foregroundColor = Self.secondaryText
                 return a
             }
@@ -285,7 +294,8 @@ final class WelcomeViewController: UIViewController, UIDocumentPickerDelegate {
         spinner.color = .white
         spinner.startAnimating()
         busyLabel.textColor = .white
-        busyLabel.font = .systemFont(ofSize: 15, weight: .medium)
+        busyLabel.font = Self.scaled(15, .medium)
+        busyLabel.adjustsFontForContentSizeCategory = true
         let stack = UIStackView(arrangedSubviews: [spinner, busyLabel])
         stack.axis = .vertical
         stack.spacing = 12

@@ -14,6 +14,10 @@ scenario(async () => {
   check('suggested models are grouped', group && group.label === 'Suggested (download)');
   check('each suggestion says why', group && group.children.length === 2 && group.children[1].textContent.includes('Thinks before it answers'));
   check('the chosen model stays shown', select.selectedOptions[0].textContent === 'Apple Intelligence');
+  const unlabelled = [...document.querySelectorAll('#chat-pane button, #chat-pane select, #chat-pane textarea')]
+    .filter((el) => !el.getAttribute('aria-label') && !el.closest('label') && !el.textContent.trim().match(/^[\w ]+$/))
+    .map((el) => el.className || el.tagName);
+  check('VoiceOver has a name for every chat control', unlabelled.length === 0, unlabelled.join(', '));
   select.value = '__get__';
   select.dispatchEvent(new Event('change'));
   await wait(300);
