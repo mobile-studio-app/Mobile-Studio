@@ -31,6 +31,8 @@ final class AIChatService {
         let ready: Bool
         /// The context sizes it can have, each with its estimated memory and whether that fits.
         let contexts: [ContextSize]
+        /// A suggested model that isn't downloaded yet: picking it opens Settings → AI to get it.
+        var suggested = false
     }
 
     struct ContextSize {
@@ -82,6 +84,11 @@ final class AIChatService {
             let detail = model.isSupported ? (model.chats ? model.detail : "\(model.detail) · a code model, chats less well") : model.requirementText
             list.append(Option(choice: model.choice, name: model.chats ? model.name : "\(model.name) (\(model.detail))", detail: detail,
                                ready: model.isSupported, contexts: contexts(for: model)))
+        }
+        for model in AIModelCatalog.chatModels where !model.isDownloaded && model.isSupported {
+            list.append(Option(choice: model.choice, name: model.name,
+                               detail: "\(AIModelCatalog.suggestion(for: model) ?? model.detail) · \(model.sizeText)",
+                               ready: false, contexts: [], suggested: true))
         }
         return list
     }

@@ -159,8 +159,23 @@ enum AIModelCatalog {
     /// Models for AI Suggestions and merge conflicts: Fast and Regular AI, and code models downloaded from Advanced.
     static var completionModels: [LocalModel] { all.filter { $0.completes && ($0.isBuiltIn || $0.isDownloaded) } }
 
-    /// Downloaded chat models, for the Chat panel.
-    static var chatModels: [LocalModel] { all.filter { $0.chats && $0.isDownloaded } }
+    /// Chat models suggested before any are downloaded, best first, with why.
+    static let suggestedChat: [(id: String, why: String)] = [
+        ("qwen2.5-coder-3b-instruct", "Best for coding on most devices"),
+        ("qwen3-4b", "Thinks before it answers"),
+        ("qwen2.5-coder-1.5b-instruct", "Small and quick; good for subagents"),
+    ]
+
+    /// Why a model is suggested for Chat, if it is.
+    static func suggestion(for model: LocalModel) -> String? {
+        suggestedChat.first { $0.id == model.id }?.why
+    }
+
+    /// Chat's models: the suggested ones this device can run (downloaded or not), then other downloaded ones.
+    static var chatModels: [LocalModel] {
+        let suggested = suggestedChat.compactMap { s in all.first { $0.id == s.id } }.filter { $0.isSupported || $0.isDownloaded }
+        return suggested + all.filter { $0.chats && $0.isDownloaded && suggestion(for: $0) == nil }
+    }
 
     /// Application Support/Models: hidden from the Files app and excluded from iCloud backup.
     static let directory: URL = {

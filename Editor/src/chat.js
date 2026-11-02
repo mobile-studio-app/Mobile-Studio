@@ -523,7 +523,11 @@ function build() {
   model.id = 'chat-model';
   model.title = 'Model';
   model.addEventListener('change', () => {
-    if (model.value === '__more__') { api.appCommand('settings'); loadSettings(); return; }
+    if (model.value === '__more__' || model.value === '__get__') {
+      api.appCommand(model.value === '__get__' ? 'aiSettings' : 'settings');
+      loadSettings();
+      return;
+    }
     settings.selected = model.value;
     api.native({ cmd: 'aiChatSelect', id: model.value }).catch(() => {});
     renderSettings();
@@ -619,12 +623,33 @@ async function loadSettings() {
   settings = { ...settings, ...info, models: info.models || [] };
   const select = $('chat-model');
   select.replaceChildren();
-  for (const m of settings.models) {
+  for (const m of settings.models.filter((x) => !x.suggested)) {
     const option = element('option', null, m.ready ? m.name : `${m.name} (${m.detail})`);
     option.value = m.id;
     option.disabled = !m.ready;
     option.selected = m.id === settings.selected;
     select.append(option);
+  }
+  // Suggested models not downloaded yet: picking one opens Settings → AI, where it downloads.
+  const suggested = settings.models.filter((x) => x.suggested);
+  if (suggested.length) {
+    const group = element('optgroup');
+    group.label = 'Suggested (download)';
+    for (const m of suggested) {
+      const option = element('option', null, `${m.name}: ${m.detail}`);
+      option.value = '__get__';
+      group.append(option);
+    }
+    select.append(group);
+  }
+  // Picked in Settings but still downloading.
+  const waiting = suggested.find((m) => m.id === settings.selected);
+  if (waiting) {
+    const option = element('option', null, `${waiting.name} (downloading…)`);
+    option.value = waiting.id;
+    option.disabled = true;
+    select.prepend(option);
+    select.value = waiting.id;
   }
   const more = element('option', null, 'Download More Models…');
   more.value = '__more__';

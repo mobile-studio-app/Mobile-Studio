@@ -68,7 +68,7 @@ final class SettingsViewController: UITableViewController {
     private var aiChoices: [AIModelChoice] { [.off, .appleIntelligence] + AIModelCatalog.completionModels.map(\.choice) }
     /// The merge conflict model's rows; nil is "Same as AI Suggestions".
     private var mergeChoices: [AIModelChoice?] { [nil] + aiChoices.map { Optional($0) } }
-    /// Apple Intelligence and the downloaded chat models.
+    /// Apple Intelligence, the suggested chat models and the other downloaded ones.
     private var chatChoices: [AIModelChoice] { [.appleIntelligence] + AIModelCatalog.chatModels.map(\.choice) }
     private let settings = AppSettings.shared
     private let page: Page
@@ -201,8 +201,8 @@ final class SettingsViewController: UITableViewController {
                 """
         case .chat:
             return """
-                The model the Chat panel (⌃⌘I) answers with. Apple Intelligence is built into iOS; more chat models \
-                download in Settings → Advanced → AI Models. Chats stay on this device.
+                The model the Chat panel (⌃⌘I) answers with. Apple Intelligence is built into iOS; the suggested models \
+                download when you pick them, and more are in Settings → Advanced → AI Models. Chats stay on this device.
                 """
         case .models:
             return """
@@ -271,6 +271,10 @@ final class SettingsViewController: UITableViewController {
             let choice = chatChoices[indexPath.row]
             configureAIRow(choice, selected: settings.chatModel == choice, forMerge: false, cell: cell, content: &content,
                            previousAccessory: previousAccessory)
+            if let model = AIModelCatalog.model(for: choice), let why = AIModelCatalog.suggestion(for: model), !model.isDownloaded,
+               model.isSupported, let detail = content.secondaryText {
+                content.secondaryText = "Suggested · \(why) · " + detail.replacingOccurrences(of: "\(model.detail) · ", with: "")
+            }
         case .models:
             content = UIListContentConfiguration.subtitleCell()
             let model = AIModelCatalog.extras[indexPath.row]

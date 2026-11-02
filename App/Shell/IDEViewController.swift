@@ -694,6 +694,7 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
         case "repl": startREPL()
         case "toggleConsole": toggleConsole()
         case "settings": showSettings()
+        case "aiSettings": showSettings(page: .ai)
         case "showExtensions": showSidebar(.extensions)
         case "showDebug": showSidebar(.debug)
         case "extViewReveal": showSidebar(.views)
@@ -863,9 +864,11 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
         }
     }
 
-    private func showSettings() {
+    /// Settings, at one of its pages when given.
+    private func showSettings(page: SettingsViewController.Page? = nil) {
         guard presentedViewController == nil else { return }
         let nav = UINavigationController(rootViewController: SettingsRootViewController())
+        if let page { nav.pushViewController(SettingsViewController(page: page), animated: false) }
         nav.modalPresentationStyle = .formSheet
         present(nav, animated: true)
     }
