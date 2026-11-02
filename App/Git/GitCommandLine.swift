@@ -38,7 +38,10 @@ enum GitCommandLine {
         }
         do {
             switch command {
-            case "status": return Output(text: status(git.status(), short: rest.contains("-s") || rest.contains("--short")))
+            case "status":
+                let short = rest.contains("-s") || rest.contains("--short") || rest.contains("-sb") || rest.contains("--porcelain")
+                return Output(text: status(git.status(), short: short, branch: rest.contains("-b") || rest.contains("-sb") || rest.contains("--branch"),
+                                           submodules: git.submodules()))
             case "add": try add(rest, git: git, cwd: cwd)
             case "rm": try remove(rest, git: git, cwd: cwd)
             case "reset": return Output(text: try reset(rest, git: git, cwd: cwd))
@@ -51,8 +54,54 @@ enum GitCommandLine {
             case "checkout", "switch": return Output(text: try checkout(command, rest, git: git, cwd: cwd))
             case "merge":
                 if rest.contains("--abort") { try git.abortMerge(); return Output() }
+                if rest.contains("--continue") { return Output(text: try commit([], git: git)) }
                 guard let name = rest.first(where: { !$0.hasPrefix("-") }) else { return Output(text: "usage: git merge <branch>\n", code: 1) }
-                return merged(try git.merge(name))
+                let mode: GitMergeMode = rest.contains("--squash") ? .squash : rest.contains("--ff-only") ? .fastForwardOnly
+                    : rest.contains("--no-ff") ? .noFastForward : .normal
+                let result = try git.merge(name, mode: mode)
+                if mode == .squash, case .merged = result { return Output(text: "Squash commit -- not updating HEAD\nCommit the staged changes to finish.\n") }
+                return merged(result)
+            case "rebase": return rebased(rest, git: git)
+            case "submodule": return await submodule(rest, root: root)
+            case "mv":
+                let paths = rest.filter { !$0.hasPrefix("-") }
+                guard paths.count == 2 else { return Output(text: "usage: git mv <source> <destination>\n", code: 1) }
+                try git.move(relative(paths[0], git: git, cwd: cwd), to: relative(paths[1], git: git, cwd: cwd))
+            case "blame": return Output(text: try blame(rest, git: git, cwd: cwd))
+            case "shortlog":
+                var counts: [String: [String]] = [:]
+                for commit in git.log(all: rest.contains("--all"), limit: 5000) { counts[commit.author, default: []].append(commit.summary) }
+                let summary = rest.contains("-s") || rest.contains("-sn") || rest.contains("-ns")
+                return Output(text: counts.sorted { $0.value.count > $1.value.count }.map { author, subjects in
+                    summary ? String(format: "%6d\t%@\n", subjects.count, author)
+                        : "\(author) (\(subjects.count)):\n" + subjects.map { "      \($0)\n" }.joined() + "\n"
+                }.joined())
+            case "describe":
+                guard let text = git.describe() else { return Output(text: "fatal: No names found, cannot describe anything.\n", code: 128) }
+                return Output(text: text + "\n")
+            case "reflog":
+                return Output(text: git.reflog().enumerated().map { "\(yellow)\($1.id.prefix(7))\(off) HEAD@{\($0)}: \($1.message)\n" }.joined())
+            case "ls-files": return Output(text: git.trackedFiles().map { $0 + "\n" }.joined())
+            case "grep":
+                guard let pattern = rest.first(where: { !$0.hasPrefix("-") }) else { return Output(text: "usage: git grep <pattern>\n", code: 1) }
+                let hits = git.grep(pattern, ignoreCase: rest.contains("-i"))
+                if hits.isEmpty { return Output(code: 1) }
+                return Output(text: hits.map { "\(cyan)\($0.path)\(off)\(rest.contains("-n") ? ":\(green)\($0.line)\(off)" : ""):\($0.text)\n" }.joined())
+            case "clean":
+                let dryRun = rest.contains("-n") || rest.contains("--dry-run")
+                guard dryRun || rest.contains(where: { $0.hasPrefix("-") && $0.contains("f") }) else {
+                    return Output(text: "fatal: clean refuses to delete files without -f (or -n to see what it would delete)\n", code: 128)
+                }
+                let paths = git.clean(ignored: rest.contains("-x"), dryRun: dryRun)
+                return Output(text: paths.map { "\(dryRun ? "Would remove" : "Removing") \($0)\n" }.joined())
+            case "cat-file":
+                guard let spec = rest.first(where: { !$0.hasPrefix("-") }), let object = git.object(spec) else {
+                    return Output(text: "fatal: Not a valid object name\n", code: 128)
+                }
+                return Output(text: rest.contains("-t") ? object.type + "\n" : object.text)
+            case "rev-list":
+                let commits = git.log(from: rest.first { !$0.hasPrefix("-") }, all: rest.contains("--all"), limit: 100_000)
+                return Output(text: rest.contains("--count") ? "\(commits.count)\n" : commits.map { $0.id + "\n" }.joined())
             case "revert":
                 if rest.contains("--abort") { try git.abortMerge(); return Output() }
                 guard let id = rest.first(where: { !$0.hasPrefix("-") }) else { return Output(text: "usage: git revert <commit>\n", code: 1) }
@@ -65,6 +114,9 @@ enum GitCommandLine {
             case "tag": return Output(text: try tag(rest, git: git))
             case "remote": return Output(text: try remote(rest, git: git))
             case "fetch", "pull", "push": return await network(command, rest, root: root)
+            case "ls-remote":
+                return Output(text: git.branches(remote: true).map { "\($0.tip)\trefs/remotes/\($0.name)\n" }.joined()
+                    + git.tags().map { "\($0.target)\trefs/tags/\($0.name)\n" }.joined())
             case "rev-parse":
                 if rest.contains("--abbrev-ref") { return Output(text: git.status().currentBranch + "\n") }
                 if rest.contains("--show-toplevel") { return Output(text: root.path + "\n") }
@@ -85,16 +137,22 @@ enum GitCommandLine {
         usage: git <command> [<args>]
 
         Mobile Studio's git (libgit2; works with GitHub and any HTTPS Git server):
-           init [-b branch], clone <url> [folder]
-           status [-s], add <paths>|., rm [--cached] <paths>, restore [--staged] <paths>
-           reset [<paths>] | [--soft|--mixed|--hard] <commit>
-           commit -m <message> [-a] [--amend], log [--oneline] [--graph] [--all] [-n N] [path]
-           show [commit], diff [--staged] [commit [commit]] [paths]
-           branch [-a|-r] [-d|-D|-m] [name] [start], checkout|switch [-b|-c] <branch>|<commit>
-           merge|revert|cherry-pick <branch or commit> [--abort]
-           stash [push [-m msg]|list|pop|apply|drop|clear], tag [-a name -m msg] [-d name]
-           fetch [remote] [--prune], pull, push [-u] [-f] [--tags] [remote] [branch]
-           remote [-v] | add|set-url|remove|rename ..., config [--global] key [value], rev-parse
+           init [-b branch], clone [--no-recurse-submodules] <url> [folder]
+           status [-s] [-b], add <paths>|., rm [--cached] <paths>, mv <from> <to>
+           restore [--staged] [--source <commit>] <paths>, reset [<paths>] | [--soft|--mixed|--hard] <commit>
+           commit -m <message> [-a] [--amend], clean -n|-f [-x]
+           log [--oneline] [--graph] [--all] [-n N] [-p] [--stat] [--author a] [--grep t] [--format f] [path]
+           show [commit] [--stat], diff [--staged] [--stat|--name-only] [commit [commit]] [paths]
+           blame <file>, shortlog [-s], describe, reflog, grep [-i] [-n] <pattern>, ls-files
+           branch [-a|-r|-v] [--merged|--no-merged] [-d|-D|-m] [-u upstream] [name] [start]
+           checkout|switch [-b|-c] <branch>|<commit>|-, merge [--no-ff|--ff-only|--squash] <branch> [--abort]
+           rebase [--onto base] <upstream> | --continue | --skip | --abort
+           revert|cherry-pick <commit> [--abort], stash [push [-m msg]|list|show|pop|apply|drop|clear]
+           tag [-a name -m msg] [-d name], fetch [remote] [--all] [--prune]
+           pull [--rebase|--ff-only], push [-u] [-f] [--tags] [--delete branch] [remote] [branch]
+           submodule [status | init | update [--init] [--recursive] | add <url> [path] | sync]
+           remote [-v] | add|set-url|remove|rename ..., ls-remote, config [--global] key [value]
+           rev-parse [--short] [--abbrev-ref] [rev], rev-list [--count] [rev], cat-file -t|-p <object>
 
         """
 
@@ -108,9 +166,16 @@ enum GitCommandLine {
         return nil
     }
 
-    private static func status(_ status: GitStatus, short: Bool) -> String {
+    private static func status(_ status: GitStatus, short: Bool, branch: Bool = false, submodules: [GitSubmodule] = []) -> String {
         if short {
             var lines: [String] = []
+            if branch {
+                var line = "## \(status.branch ?? "HEAD (no branch)")"
+                if let upstream = status.upstream { line += "...\(upstream)" }
+                let counts = [status.aheadCount > 0 ? "ahead \(status.aheadCount)" : nil, status.behindCount > 0 ? "behind \(status.behindCount)" : nil].compactMap { $0 }
+                if !counts.isEmpty { line += " [\(counts.joined(separator: ", "))]" }
+                lines.append(line)
+            }
             for file in status.mergeConflicts { lines.append("\(red)UU\(off) \(file.path)") }
             for file in status.stagedFiles { lines.append("\(green)\(file.status.rawValue)\(off)  \(file.oldPath.map { "\($0) -> " } ?? "")\(file.path)") }
             for file in status.changedFiles {
@@ -122,6 +187,7 @@ enum GitCommandLine {
         if let merging = status.mergingBranch { text += "You have unmerged paths (merging \(merging)).\n" }
         if status.state == .reverting { text += "You are currently reverting a commit.\n" }
         if status.state == .cherryPicking { text += "You are currently cherry-picking a commit.\n" }
+        if status.state == .rebasing { text += "You are currently rebasing (fix conflicts, then git rebase --continue, or --skip, or --abort).\n" }
         if let upstream = status.upstream {
             if status.aheadCount > 0 && status.behindCount > 0 {
                 text += "Your branch and '\(upstream)' have diverged,\nand have \(status.aheadCount) and \(status.behindCount) different commits each, respectively.\n"
@@ -158,6 +224,8 @@ enum GitCommandLine {
         if !untracked.isEmpty {
             text += "\nUntracked files:\n" + untracked.map { "\t\(red)\($0.path)\(off)\n" }.joined()
         }
+        let uncloned = submodules.filter { !$0.isCloned }
+        if !uncloned.isEmpty { text += "\nSubmodules not cloned yet (git submodule update --init):\n" + uncloned.map { "\t\($0.path)\n" }.joined() }
         if status.isClean { text += "\nnothing to commit, working tree clean\n" }
         return text
     }
@@ -214,8 +282,18 @@ enum GitCommandLine {
     }
 
     private static func restore(_ args: [String], git: GitRepository, cwd: URL) throws {
-        let paths = args.filter { !$0.hasPrefix("-") }
+        let source = value(after: ["--source", "-s"], in: args)
+        let paths = args.filter { !$0.hasPrefix("-") && $0 != source }
         let status = git.status()
+        if let source {
+            // The files as they were in that commit.
+            for arg in paths {
+                let path = relative(arg, git: git, cwd: cwd)
+                guard let data = git.data(of: path, at: .commit(source)) else { throw Failure(message: "'\(path)' isn't in \(source)") }
+                try data.write(to: git.root.appendingPathComponent(path))
+            }
+            return
+        }
         if args.contains("--staged") || args.contains("-S") {
             try git.unstage(try matching(paths, candidates: status.stagedFiles.map(\.path), root: git.root, cwd: cwd))
         } else {
@@ -281,8 +359,30 @@ enum GitCommandLine {
         let all = args.contains("--all")
         let start = args.first { !$0.hasPrefix("-") && git.commit($0) != nil }
         let path = args.last { !$0.hasPrefix("-") && $0 != start && Int($0) == nil }
-        let history = git.log(from: start, all: all, path: path, limit: limit)
+        var history = git.log(from: start, all: all, path: path, limit: limit)
         if history.isEmpty { return "fatal: your current branch '\(git.status().currentBranch)' does not have any commits yet\n" }
+        if let author = value(after: ["--author"], in: args)?.lowercased() {
+            history = history.filter { $0.author.lowercased().contains(author) || $0.email.lowercased().contains(author) }
+        }
+        if let grep = value(after: ["--grep"], in: args)?.lowercased() { history = history.filter { $0.message.lowercased().contains(grep) } }
+        // --format / --pretty: oneline, short, or placeholders (%H %h %s %b %an %ae %ad %ar %d %n).
+        if let format = value(after: ["--format", "--pretty"], in: args) {
+            if format == "oneline" { return history.map { "\(yellow)\($0.id)\(off) \($0.summary)\n" }.joined() }
+            if format == "short" { return history.map { "\(yellow)commit \($0.id)\(off)\nAuthor: \($0.author) <\($0.email)>\n\n    \($0.summary)\n" }.joined(separator: "\n") }
+            let template = format.hasPrefix("format:") ? String(format.dropFirst(7)) : format.hasPrefix("tformat:") ? String(format.dropFirst(8)) : format
+            return history.map { formatted($0, template) + "\n" }.joined()
+        }
+        let detail = { (commit: GitCommit) -> String in
+            if args.contains("-p") || args.contains("--patch") { return "\n" + git.patch(.commit(commit.id), color: true) }
+            if args.contains("--stat") { return "\n" + stat(git.patch(.commit(commit.id))) }
+            if args.contains("--name-only") { return "\n" + git.changes(inCommit: commit.id).map { "\($0.path)\n" }.joined() }
+            if args.contains("--name-status") { return "\n" + git.changes(inCommit: commit.id).map { "\($0.status.rawValue)\t\($0.path)\n" }.joined() }
+            return ""
+        }
+        if args.contains("-p") || args.contains("--patch") || args.contains("--stat") || args.contains("--name-only") || args.contains("--name-status"),
+           !args.contains("--oneline"), !args.contains("--graph") {
+            return history.map { describe($0) + detail($0) }.joined(separator: "\n")
+        }
         if args.contains("--graph") {
             let rows = GitGraph.layout(history)
             return zip(history, rows).map { commit, row in
@@ -324,11 +424,82 @@ enum GitCommandLine {
         case 1: target = .between(revisions[revisions.startIndex], "HEAD")
         default: target = .between(revisions[revisions.startIndex], revisions[revisions.startIndex + 1])
         }
+        if args.contains("--stat") { return stat(git.patch(target, paths: paths)) }
+        if args.contains("--name-only") || args.contains("--name-status") {
+            let names = files(in: git.patch(target, paths: paths))
+            return names.map { args.contains("--name-status") ? "\($0.status)\t\($0.path)\n" : "\($0.path)\n" }.joined()
+        }
+        if args.contains("--shortstat") { return stat(git.patch(target, paths: paths)).components(separatedBy: "\n").filter { !$0.isEmpty }.last.map { $0 + "\n" } ?? "" }
         return git.patch(target, paths: paths, color: true)
+    }
+
+    /// The files in a patch, with M/A/D.
+    private static func files(in patch: String) -> [(path: String, status: String)] {
+        var out: [(String, String)] = []
+        for line in patch.components(separatedBy: "\n") {
+            if line.hasPrefix("diff --git a/"), let b = line.range(of: " b/") {
+                out.append((String(line[b.upperBound...]), "M"))
+            } else if line.hasPrefix("new file mode"), !out.isEmpty {
+                out[out.count - 1].1 = "A"
+            } else if line.hasPrefix("deleted file mode"), !out.isEmpty {
+                out[out.count - 1].1 = "D"
+            } else if line.hasPrefix("rename from"), !out.isEmpty {
+                out[out.count - 1].1 = "R"
+            }
+        }
+        return out
+    }
+
+    /// git's --stat: lines added and removed per file, from a patch.
+    private static func stat(_ patch: String) -> String {
+        var rows: [(path: String, added: Int, removed: Int)] = []
+        for line in patch.components(separatedBy: "\n") {
+            if line.hasPrefix("diff --git a/"), let b = line.range(of: " b/") {
+                rows.append((String(line[b.upperBound...]), 0, 0))
+            } else if !rows.isEmpty, line.hasPrefix("+"), !line.hasPrefix("+++") {
+                rows[rows.count - 1].added += 1
+            } else if !rows.isEmpty, line.hasPrefix("-"), !line.hasPrefix("---") {
+                rows[rows.count - 1].removed += 1
+            }
+        }
+        guard !rows.isEmpty else { return "" }
+        let width = rows.map(\.path.count).max() ?? 0
+        let most = max(1, rows.map { $0.added + $0.removed }.max() ?? 1)
+        var text = rows.map { row -> String in
+            let total = row.added + row.removed
+            let scale = most > 40 ? 40.0 / Double(most) : 1
+            let plus = Int((Double(row.added) * scale).rounded(.up)), minus = Int((Double(row.removed) * scale).rounded(.up))
+            return " \(row.path.padding(toLength: width, withPad: " ", startingAt: 0)) | \(String(format: "%3d", total)) "
+                + "\(green)\(String(repeating: "+", count: plus))\(off)\(red)\(String(repeating: "-", count: minus))\(off)\n"
+        }.joined()
+        let added = rows.map(\.added).reduce(0, +), removed = rows.map(\.removed).reduce(0, +)
+        text += " \(rows.count) file\(rows.count == 1 ? "" : "s") changed, \(added) insertion\(added == 1 ? "" : "s")(+), \(removed) deletion\(removed == 1 ? "" : "s")(-)\n"
+        return text
+    }
+
+    /// git log --format's placeholders.
+    private static func formatted(_ commit: GitCommit, _ template: String) -> String {
+        let iso = ISO8601DateFormatter()
+        let relative = RelativeDateTimeFormatter()
+        let body = commit.message.components(separatedBy: "\n").dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        let names = commit.refs.map { $0.kind == .head ? "HEAD -> \($0.name)" : $0.kind == .tag ? "tag: \($0.name)" : $0.name }
+        let values: [(String, String)] = [
+            ("%H", commit.id), ("%h", commit.shortId), ("%s", commit.summary), ("%b", body), ("%an", commit.author), ("%ae", commit.email),
+            ("%ad", iso.string(from: commit.date)), ("%ar", relative.localizedString(for: commit.date, relativeTo: Date())),
+            ("%P", commit.parents.joined(separator: " ")), ("%p", commit.parents.map { String($0.prefix(7)) }.joined(separator: " ")),
+            ("%d", names.isEmpty ? "" : " (\(names.joined(separator: ", ")))"), ("%n", "\n"), ("%%", "%"),
+        ]
+        var out = template
+        for (key, value) in values { out = out.replacingOccurrences(of: key, with: value) }
+        return out
     }
 
     private static func branch(_ args: [String], git: GitRepository) throws -> String {
         let names = args.filter { !$0.hasPrefix("-") }
+        if args.contains("--merged") || args.contains("--no-merged") {
+            return git.branches(merged: args.contains("--merged")).map { ($0.isHead ? "* \(green)" : "  ") + $0.name + ($0.isHead ? off : "") + "\n" }.joined()
+        }
+        if args.contains("--show-current") { return (git.currentBranchName ?? "") + "\n" }
         if args.contains("-d") || args.contains("-D") || args.contains("--delete") {
             let remote = args.contains("-r")
             for name in names { try git.deleteBranch(name, force: args.contains("-D"), remote: remote) }
@@ -383,7 +554,12 @@ enum GitCommandLine {
             return ""
         }
         let force = args.contains("-f") || args.contains("--force")
-        let names = args.filter { !$0.hasPrefix("-") }
+        var names = args.filter { !$0.hasPrefix("-") }
+        // git checkout -: the branch before this one.
+        if args.contains("-") {
+            guard let previous = previousBranch(git) else { throw Failure(message: "there's no previous branch") }
+            names.insert(previous, at: 0)
+        }
         guard let name = names.first else { return "usage: git \(command) <branch>\n" }
         if args.contains("-b") || args.contains("-c") || args.contains("-B") || args.contains("--create") {
             try git.createBranch(name, at: names.count > 1 ? names[1] : nil)
@@ -420,6 +596,111 @@ enum GitCommandLine {
             return Output(text: paths.map { "CONFLICT (content): Merge conflict in \($0)\n" }.joined()
                 + "Automatic merge failed; fix conflicts and then commit the result.\n", code: 1)
         }
+    }
+
+    private static func rebased(_ args: [String], git: GitRepository) -> Output {
+        do {
+            let result: GitRebaseResult
+            if args.contains("--abort") { try git.abortRebase(); return Output() }
+            if args.contains("--continue") { result = try git.continueRebase() }
+            else if args.contains("--skip") { result = try git.skipRebaseStep() }
+            else {
+                let words = args.filter { !$0.hasPrefix("-") }
+                let onto = value(after: ["--onto"], in: args)
+                let upstream = words.first { $0 != onto } ?? git.status().upstream
+                guard let upstream else { return Output(text: "There is no tracking information for the current branch: git rebase <branch>\n", code: 1) }
+                if args.contains("-i") || args.contains("--interactive") {
+                    return Output(text: "error: interactive rebase isn't available; rebase without -i, then use reset, revert or cherry-pick to edit history.\n", code: 1)
+                }
+                result = try git.rebase(onto: upstream, newBase: onto)
+            }
+            switch result {
+            case .upToDate: return Output(text: "Current branch \(git.status().currentBranch) is up to date.\n")
+            case .done(let count):
+                return Output(text: "Successfully rebased and updated refs/heads/\(git.currentBranchName ?? "HEAD") (\(count) commit\(count == 1 ? "" : "s")).\n")
+            case .conflicts(let paths):
+                return Output(text: paths.map { "CONFLICT (content): Merge conflict in \($0)\n" }.joined()
+                    + "error: could not apply the commit. Resolve all conflicts, stage them with \"git add\",\n"
+                    + "then run \"git rebase --continue\" (or \"git rebase --skip\" to drop it, \"git rebase --abort\" to stop).\n", code: 1)
+            }
+        } catch {
+            return Output(text: "fatal: \(error.localizedDescription)\n", code: 128)
+        }
+    }
+
+    @MainActor
+    private static func submodule(_ args: [String], root: URL) async -> Output {
+        let sub = args.first ?? "status"
+        let words = args.dropFirst().filter { !$0.hasPrefix("-") }
+        if sub == "status" || sub == "summary" || (args.first?.hasPrefix("-") ?? false) {
+            guard let git = try? GitRepository.open(root) else { return Output(code: 128) }
+            return Output(text: git.submodules().map { sm in
+                let marker = !sm.isCloned ? "-" : sm.isModified || sm.checkedOut != sm.recorded ? "+" : " "
+                return "\(marker)\(sm.checkedOut ?? sm.recorded ?? "") \(sm.path)\n"
+            }.joined())
+        }
+        if sub == "sync" || sub == "init" {
+            do {
+                let git = try GitRepository.open(root)
+                if sub == "sync" { try git.syncSubmodules() }
+                return Output(text: git.submodules().map { "Submodule '\($0.name)' (\($0.url)) registered for path '\($0.path)'\n" }.joined())
+            } catch { return Output(text: "fatal: \(error.localizedDescription)\n", code: 128) }
+        }
+        guard sub == "update" || sub == "add" else {
+            return Output(text: "usage: git submodule [status | init | update [--init] [--recursive] [paths] | add <url> [path] | sync]\n", code: 1)
+        }
+        let recursive = args.contains("--recursive") || sub == "add"
+        return await Task.detached(priority: .userInitiated) { () -> Output in
+            do {
+                let git = try GitRepository.open(root)
+                if sub == "add" {
+                    guard let url = words.first else { return Output(text: "usage: git submodule add <url> [path]\n", code: 1) }
+                    try git.addSubmodule(url, at: words.dropFirst().first)
+                    return Output(text: "Cloning into '\(words.dropFirst().first ?? url)'...\n")
+                }
+                let count = try git.updateSubmodules(Array(words), recursive: recursive)
+                return Output(text: count == 0 ? "" : "Updated \(count) submodule\(count == 1 ? "" : "s").\n")
+            } catch {
+                return Output(text: "fatal: \(error.localizedDescription)\n", code: 128)
+            }
+        }.value
+    }
+
+    private static func blame(_ args: [String], git: GitRepository, cwd: URL) throws -> String {
+        guard let arg = args.last(where: { !$0.hasPrefix("-") }) else { throw Failure(message: "usage: git blame <file>") }
+        let path = relative(arg, git: git, cwd: cwd)
+        guard let text = try? String(contentsOf: git.root.appendingPathComponent(path), encoding: .utf8) else {
+            throw Failure(message: "no such path '\(path)'")
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        let lines = text.components(separatedBy: "\n")
+        let owners = git.blame(path, contents: text)
+        let width = owners.compactMap { $0?.author.count }.max() ?? 10
+        return zip(owners, lines).enumerated().compactMap { i, pair -> String? in
+            let (owner, line) = pair
+            if i == lines.count - 1 && line.isEmpty { return nil }
+            let who = (owner?.author ?? "Not Committed Yet").padding(toLength: width, withPad: " ", startingAt: 0)
+            let id = owner?.shortId ?? "0000000"
+            let date = owner.map { formatter.string(from: $0.date) } ?? "          "
+            return "\(yellow)\(id)\(off) (\(who) \(date) \(String(format: "%4d", i + 1))) \(line)\n"
+        }.joined()
+    }
+
+    /// A path relative to the repository, from one relative to `cwd`.
+    private static func relative(_ arg: String, git: GitRepository, cwd: URL) -> String {
+        let rootPath = git.root.standardizedFileURL.resolvingSymlinksInPath().path
+        let full = (arg.hasPrefix("/") ? URL(fileURLWithPath: arg) : cwd.appendingPathComponent(arg)).standardizedFileURL.resolvingSymlinksInPath().path
+        return full.hasPrefix(rootPath + "/") ? String(full.dropFirst(rootPath.count + 1)) : arg
+    }
+
+    /// The branch checked out before this one (git checkout -), from the reflog.
+    private static func previousBranch(_ git: GitRepository) -> String? {
+        for entry in git.reflog(limit: 200) where entry.message.hasPrefix("checkout: moving from ") {
+            let rest = entry.message.dropFirst("checkout: moving from ".count)
+            if let range = rest.range(of: " to ") { return String(rest[..<range.lowerBound]) }
+        }
+        return nil
     }
 
     private static func stash(_ args: [String], git: GitRepository) throws -> String {
@@ -522,6 +803,18 @@ enum GitCommandLine {
                     let remotes = args.contains("--all") ? git.remotes().map(\.name) : [words.first ?? "origin"]
                     for remote in remotes { try git.fetch(remote, prune: args.contains("--prune") || args.contains("-p"), transfer: transfer) }
                     if text.isEmpty { text = "" }
+                case "pull" where args.contains("--rebase") || args.contains("-r") || git.config("pull.rebase") == "true":
+                    switch try git.pullRebase(transfer: transfer) {
+                    case .upToDate: text += "Current branch is up to date.\n"
+                    case .done(let count): text += "Successfully rebased (\(count) commit\(count == 1 ? "" : "s")).\n"
+                    case .conflicts(let paths):
+                        return Output(text: text + paths.map { "CONFLICT (content): Merge conflict in \($0)\n" }.joined()
+                            + "Resolve the conflicts, stage them, then git rebase --continue.\n", code: 1)
+                    }
+                case "pull" where args.contains("--ff-only"):
+                    let upstream = git.status().upstream ?? "origin/\(git.status().currentBranch)"
+                    try git.fetch(String(upstream.split(separator: "/").first ?? "origin"), transfer: transfer)
+                    if case .upToDate = try git.merge(upstream, mode: .fastForwardOnly) { text += "Already up to date.\n" } else { text += "Fast-forward\n" }
                 case "pull":
                     switch try git.pull(transfer: transfer) {
                     case .upToDate: text += "Already up to date.\n"
@@ -534,6 +827,11 @@ enum GitCommandLine {
                 default:
                     let remote = words.first.flatMap { name in git.remotes().contains { $0.name == name } ? name : nil }
                     let branch = words.dropFirst(remote == nil ? 0 : 1).first
+                    if args.contains("--delete") || args.contains("-d") {
+                        guard let branch else { return Output(text: "usage: git push [remote] --delete <branch>\n", code: 1) }
+                        try git.deleteRemoteBranch(branch, remote: remote ?? "origin", transfer: transfer)
+                        return Output(text: "To \(git.remoteURL(remote ?? "origin") ?? "origin")\n - [deleted]         \(branch)\n")
+                    }
                     if args.contains("--tags") && branch == nil && !args.contains("-u") {
                         try git.pushTags(remote: remote ?? "origin", transfer: transfer)
                     } else {
@@ -565,7 +863,7 @@ enum GitCommandLine {
                 if progress.done == progress.total && progress.total > 0 { text += "\(progress.phase): 100% (\(progress.done)/\(progress.total)), done.\n" }
             }
             do {
-                try GitRepository.clone(url, to: target, transfer: transfer)
+                try GitRepository.clone(url, to: target, submodules: !args.contains("--no-recurse-submodules"), transfer: transfer)
                 return Output(text: text)
             } catch {
                 try? FileManager.default.removeItem(at: target)

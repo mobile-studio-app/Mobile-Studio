@@ -419,6 +419,165 @@ do {
     check(out.code != 0, "unknown commands fail")
 }
 
+section("rebase")
+do {
+    let repo = newRepo()
+    write(repo, "a.txt", "one\ntwo\nthree\n")
+    attempt("base") { try repo.commit(message: "Base", stageAll: true) }
+    attempt("feature") { try repo.createBranch("feature") }
+    write(repo, "f1.txt", "f1\n")
+    attempt("f1") { try repo.commit(message: "F1", stageAll: true) }
+    write(repo, "f2.txt", "f2\n")
+    attempt("f2") { try repo.commit(message: "F2", stageAll: true) }
+    attempt("main") { try repo.checkout("main") }
+    write(repo, "m.txt", "m\n")
+    attempt("m") { try repo.commit(message: "M", stageAll: true) }
+    attempt("feature again") { try repo.checkout("feature") }
+    var result: GitRebaseResult?
+    attempt("rebase") { result = try repo.rebase(onto: "main") }
+    if case .done(let count) = result { check(count == 2, "two commits replayed: \(count)") } else { check(false, "rebase: \(String(describing: result))") }
+    check(repo.log().map(\.summary) == ["F2", "F1", "M", "Base"], "linear history on top of main: \(repo.log().map(\.summary))")
+    check(repo.status().branch == "feature" && repo.status().state == .none && read(repo, "m.txt") == "m\n", "still on feature, done")
+    checkClean(repo, "after the rebase")
+    attempt("again") { result = try repo.rebase(onto: "main") }
+    if case .upToDate = result {} else { check(false, "a second rebase has nothing to do") }
+
+    // A conflict: fix, stage, continue.
+    attempt("main 2") { try repo.checkout("main") }
+    write(repo, "a.txt", "one\nTWO (main)\nthree\n")
+    attempt("main's") { try repo.commit(message: "Main's two", stageAll: true) }
+    attempt("feature 2") { try repo.checkout("feature") }
+    write(repo, "a.txt", "one\nTWO (feature)\nthree\n")
+    attempt("feature's") { try repo.commit(message: "Feature's two", stageAll: true) }
+    attempt("conflicting rebase") { result = try repo.rebase(onto: "main") }
+    guard case .conflicts(let paths) = result else { check(false, "expected conflicts: \(String(describing: result))"); exit(1) }
+    check(paths == ["a.txt"] && repo.status().state == .rebasing, "stopped at the conflict, rebasing")
+    check(expectError("continuing unresolved") { _ = try repo.continueRebase() } != nil, "can't continue with conflicts")
+    write(repo, "a.txt", "one\nTWO (both)\nthree\n")
+    attempt("resolve") { try repo.stage(["a.txt"]) }
+    attempt("continue") { result = try repo.continueRebase() }
+    if case .done = result {} else { check(false, "continue: \(String(describing: result))") }
+    check(repo.log().first?.summary == "Feature's two" && repo.log()[1].summary == "Main's two" && repo.status().state == .none, "continued and finished")
+    check(read(repo, "a.txt") == "one\nTWO (both)\nthree\n", "the fixed text is kept")
+
+    // Abort.
+    attempt("main 3") { try repo.checkout("main") }
+    write(repo, "a.txt", "main 3\n")
+    attempt("m3") { try repo.commit(message: "M3", stageAll: true) }
+    attempt("feature 3") { try repo.checkout("feature") }
+    let before = repo.status().head
+    write(repo, "a.txt", "feature 3\n")
+    attempt("f3") { try repo.commit(message: "F3", stageAll: true) }
+    let tip = repo.status().head
+    attempt("rebase 3") { result = try repo.rebase(onto: "main") }
+    attempt("abort") { try repo.abortRebase() }
+    check(repo.status().head == tip && repo.status().branch == "feature" && repo.status().state == .none && before != tip, "aborting goes back to the branch as it was")
+    checkClean(repo, "after aborting")
+}
+
+section("merge options")
+do {
+    let repo = newRepo()
+    write(repo, "a.txt", "a\n")
+    attempt("base") { try repo.commit(message: "Base", stageAll: true) }
+    attempt("feature") { try repo.createBranch("feature") }
+    write(repo, "b.txt", "b\n")
+    attempt("b") { try repo.commit(message: "B", stageAll: true) }
+    attempt("main") { try repo.checkout("main") }
+    var result: GitMergeResult?
+    attempt("no-ff") { result = try repo.merge("feature", mode: .noFastForward) }
+    check(repo.log().first?.parents.count == 2, "--no-ff makes a merge commit: \(String(describing: result))")
+    attempt("other") { try repo.createBranch("other", at: repo.log().last!.id, checkout: true) }
+    write(repo, "c.txt", "c\n")
+    attempt("c") { try repo.commit(message: "C", stageAll: true) }
+    attempt("main") { try repo.checkout("main") }
+    check(expectError("ff-only on diverged") { _ = try repo.merge("other", mode: .fastForwardOnly) } != nil, "--ff-only refuses a real merge")
+    attempt("squash") { result = try repo.merge("other", mode: .squash) }
+    check(repo.status().stagedFiles.map(\.path) == ["c.txt"] && repo.status().state == .none, "--squash stages the changes, no merge in progress")
+    attempt("commit the squash") { try repo.commit(message: "Squashed C") }
+    check(repo.log().first?.parents.count == 1, "an ordinary commit")
+    check(Set(repo.branches(merged: true).map(\.name)) == ["main", "feature"] && repo.branches(merged: false).map(\.name) == ["other"], "--merged and --no-merged")
+}
+
+section("submodules")
+do {
+    // A library repository, published to its own server.
+    let libraryServer = newRemote()
+    let library = newRepo()
+    write(library, "lib.lua", "return 'lib'\n")
+    attempt("library") { try library.commit(message: "Library", stageAll: true) }
+    attempt("library remote") { try library.setRemote(url: libraryServer.path) }
+    attempt("library push") { try library.push() }
+
+    let appServer = newRemote()
+    let app = newRepo()
+    write(app, "main.lua", "require('lib')\n")
+    attempt("app") { try app.commit(message: "App", stageAll: true) }
+    attempt("add submodule") { try app.addSubmodule(libraryServer.path, at: "vendor/lib") }
+    check(read(app, "vendor/lib/lib.lua") == "return 'lib'\n" && read(app, ".gitmodules")?.contains("vendor/lib") == true, "added and cloned")
+    check(app.submodules().map(\.path) == ["vendor/lib"] && app.isSubmodule("vendor/lib"), "listed")
+    attempt("commit it") { try app.commit(message: "Add lib", stageAll: true) }
+    attempt("app remote") { try app.setRemote(url: appServer.path) }
+    attempt("app push") { try app.push() }
+
+    // Someone clones the app: the submodule comes too.
+    var clone: GitRepository?
+    attempt("clone") { clone = try GitRepository.clone(appServer.path, to: temporary("subclone").appendingPathComponent("app")) }
+    check(clone.flatMap { read($0, "vendor/lib/lib.lua") } == "return 'lib'\n", "a clone checks the submodule out")
+    check(clone?.submodules().first?.isCloned == true && clone?.submodules().first?.checkedOut == clone?.submodules().first?.recorded, "at the recorded commit")
+
+    var shallow: GitRepository?
+    attempt("clone without") { shallow = try GitRepository.clone(appServer.path, to: temporary("subclone2").appendingPathComponent("app"), submodules: false) }
+    check(shallow?.submodules().first?.isCloned == false, "--no-recurse-submodules leaves it")
+    var count = 0
+    attempt("update") { count = try shallow?.updateSubmodules() ?? 0 }
+    check(count == 1 && shallow.flatMap { read($0, "vendor/lib/lib.lua") } == "return 'lib'\n", "update --init clones it")
+}
+
+section("more of git in the Terminal")
+do {
+    let repo = newRepo()
+    write(repo, "a.txt", "alpha\nbeta\n")
+    _ = await GitCommandLine.run(["add", "."], root: repo.root, cwd: repo.root)
+    _ = await GitCommandLine.run(["commit", "-m", "First"], root: repo.root, cwd: repo.root)
+    _ = await GitCommandLine.run(["tag", "v1"], root: repo.root, cwd: repo.root)
+    write(repo, "a.txt", "alpha\nbeta\ngamma\n")
+    _ = await GitCommandLine.run(["commit", "-am", "Second"], root: repo.root, cwd: repo.root)
+    let run = { (args: [String]) async -> GitCommandLine.Output in await GitCommandLine.run(args, root: repo.root, cwd: repo.root) }
+    var out = await run(["log", "--format=%h %s"])
+    check(out.text.split(separator: "\n").count == 2 && out.text.contains(" Second"), "log --format: \(out.text)")
+    out = await run(["diff", "--stat", "HEAD~1"])
+    check(out.text.contains("a.txt") && out.text.contains("1 insertion"), "diff --stat: \(out.text)")
+    out = await run(["blame", "a.txt"])
+    check(out.text.contains("gamma") && out.text.split(separator: "\n").count == 3, "blame: \(out.text)")
+    out = await run(["describe"])
+    check(out.text.hasPrefix("v1-1-g"), "describe: \(out.text)")
+    out = await run(["ls-files"])
+    check(out.text == "a.txt\n", "ls-files: \(out.text)")
+    out = await run(["grep", "-n", "bet"])
+    check(out.text.contains("a.txt") && out.text.contains("beta"), "grep: \(out.text)")
+    out = await run(["shortlog", "-s"])
+    check(out.text.contains("2\t"), "shortlog -s: \(out.text)")
+    out = await run(["cat-file", "-t", "HEAD"])
+    check(out.text == "commit\n", "cat-file -t: \(out.text)")
+    out = await run(["rev-list", "--count", "HEAD"])
+    check(out.text == "2\n", "rev-list --count: \(out.text)")
+    write(repo, "junk.tmp", "x")
+    out = await run(["clean", "-n"])
+    check(out.text.contains("Would remove junk.tmp") && read(repo, "junk.tmp") != nil, "clean -n: \(out.text)")
+    out = await run(["clean", "-f"])
+    check(read(repo, "junk.tmp") == nil, "clean -f deletes it")
+    _ = await run(["checkout", "-b", "topic"])
+    out = await run(["checkout", "-"])
+    check(out.text.contains("main") && repo.status().branch == "main", "checkout -: \(out.text)")
+    out = await run(["reflog"])
+    check(out.text.contains("HEAD@{0}"), "reflog: \(out.text)")
+    _ = await run(["mv", "a.txt", "b.txt"])
+    check(read(repo, "b.txt") != nil && repo.status().stagedFiles.contains { $0.path == "b.txt" }, "mv stages the move: \(describe(repo.status()))")
+    out = await run(["status", "-sb"])
+    check(out.text.hasPrefix("## main"), "status -sb: \(out.text)")
+}
+
 // MARK: - AI merge answers
 
 section("cleaning AI conflict resolutions")

@@ -290,6 +290,11 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
         NotificationCenter.default.addObserver(forName: PullRequestsViewController.showRequest, object: nil, queue: .main) { [weak self] note in
             self?.showPullRequests(create: note.userInfo?["create"] as? Bool ?? false)
         }
+        // A submodule, opened as a project of its own (Source Control).
+        NotificationCenter.default.addObserver(forName: SourceControlPanelView.openProjectRequest, object: nil, queue: .main) { [weak self] note in
+            guard let url = note.userInfo?["url"] as? URL else { return }
+            self?.openProject(url)
+        }
         updateViewButtons()
         for name in [ExtensionManager.didChange, ExtensionViewsPanelView.contextChanged] {
             NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in

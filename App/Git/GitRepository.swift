@@ -176,9 +176,10 @@ final class GitRepository {
         return GitRepository(root: url, pointer: repo!)
     }
 
-    /// `git clone`: the whole history. Blocks; `progress` is called on this thread.
+    /// `git clone`: the whole history, and the submodules' (git clone --recursive) unless told
+    /// not to. Blocks; `transfer`'s progress is called on this thread.
     @discardableResult
-    static func clone(_ remote: String, to url: URL, transfer: GitTransfer = GitTransfer()) throws -> GitRepository {
+    static func clone(_ remote: String, to url: URL, submodules: Bool = true, transfer: GitTransfer = GitTransfer()) throws -> GitRepository {
         _ = Git.ready
         var options = git_clone_options()
         git_clone_options_init(&options, UInt32(GIT_CLONE_OPTIONS_VERSION))
@@ -187,7 +188,9 @@ final class GitRepository {
         var repo: OpaquePointer?
         let rc = git_clone(&repo, remote, url.path, &options)
         guard rc == 0, let repo else { throw transfer.error(rc, "Couldn't clone \(remote)") }
-        return GitRepository(root: url, pointer: repo)
+        let cloned = GitRepository(root: url, pointer: repo)
+        if submodules { try cloned.updateSubmodules(transfer: transfer) }
+        return cloned
     }
 
     static func notifyChange() {
@@ -1274,5 +1277,424 @@ extension GitRepository {
         case "H": return "\u{1B}[36m"
         default: return ""
         }
+    }
+}
+
+// MARK: - Rebase
+
+enum GitRebaseResult {
+    case upToDate
+    /// Done: how many commits were replayed.
+    case done(Int)
+    /// Stopped at a commit whose changes conflict: fix, stage, then continue (or skip, or abort).
+    case conflicts([String])
+}
+
+extension GitRepository {
+    private func rebaseOptions() -> git_rebase_options {
+        var options = git_rebase_options()
+        git_rebase_options_init(&options, UInt32(GIT_REBASE_OPTIONS_VERSION))
+        options.checkout_options.checkout_strategy = GIT_CHECKOUT_SAFE.rawValue
+        return options
+    }
+
+    private func annotatedCommit(_ spec: String) throws -> OpaquePointer {
+        let commit = try lookupCommit(branchSpec(spec))
+        defer { git_object_free(commit) }
+        var out: OpaquePointer?
+        try Git.check(git_annotated_commit_lookup(&out, pointer, git_commit_id(commit)))
+        return out!
+    }
+
+    /// Replays the current branch's commits on top of `upstream` (a branch, "origin/main", or a
+    /// commit), or of `newBase` when given (git rebase --onto newBase upstream).
+    func rebase(onto upstream: String, newBase: String? = nil) throws -> GitRebaseResult {
+        guard currentBranchName != nil else { throw GitError("HEAD is detached: check out the branch to rebase.") }
+        guard state == .none else { throw GitError("Finish or abort the \(state == .rebasing ? "rebase" : "merge") in progress first.") }
+        let base = try annotatedCommit(upstream)
+        defer { git_annotated_commit_free(base) }
+        let onto = try newBase.map { try annotatedCommit($0) }
+        defer { if let onto { git_annotated_commit_free(onto) } }
+
+        // Already on top of it: nothing to do.
+        if newBase == nil, let head = headCommit() {
+            defer { git_object_free(head) }
+            var mergeBase = git_oid()
+            if git_merge_base(&mergeBase, pointer, git_commit_id(head), git_annotated_commit_id(base)) == 0,
+               git_oid_equal(&mergeBase, git_annotated_commit_id(base)) == 1 {
+                return .upToDate
+            }
+        }
+        var options = rebaseOptions()
+        var rebase: OpaquePointer?
+        try Git.check(git_rebase_init(&rebase, pointer, nil, base, onto, &options), "Couldn't start the rebase")
+        defer { git_rebase_free(rebase) }
+        Self.notifyChange()
+        return try replay(rebase!, committedSoFar: 0)
+    }
+
+    /// Commits each step, stopping at conflicts; finishes when there are no more.
+    private func replay(_ rebase: OpaquePointer, committedSoFar: Int) throws -> GitRebaseResult {
+        let sig = try signature()
+        defer { git_signature_free(sig) }
+        var count = committedSoFar
+        var operation: UnsafeMutablePointer<git_rebase_operation>?
+        while true {
+            let rc = git_rebase_next(&operation, rebase)
+            if rc == GIT_ITEROVER.rawValue { break }
+            try Git.check(rc, "Couldn't apply the next commit")
+            let conflicted = conflicts()
+            if !conflicted.isEmpty {
+                Self.notifyChange()
+                return .conflicts(conflicted)
+            }
+            var id = git_oid()
+            let committed = git_rebase_commit(&id, rebase, nil, sig, nil, nil)
+            // GIT_EAPPLIED: the commit's changes are already there, so it's left out.
+            if committed != GIT_EAPPLIED.rawValue { try Git.check(committed, "Couldn't commit the rebased change") }
+            count += 1
+        }
+        try Git.check(git_rebase_finish(rebase, sig), "Couldn't finish the rebase")
+        Self.notifyChange()
+        return .done(count)
+    }
+
+    /// git rebase --continue: commits the fixed step (once its conflicts are staged) and goes on.
+    func continueRebase() throws -> GitRebaseResult {
+        var options = rebaseOptions()
+        var rebase: OpaquePointer?
+        try Git.check(git_rebase_open(&rebase, pointer, &options), "There's no rebase in progress")
+        defer { git_rebase_free(rebase) }
+        if !conflicts().isEmpty { throw GitError("Resolve the conflicts and stage the files first.") }
+        let sig = try signature()
+        defer { git_signature_free(sig) }
+        var id = git_oid()
+        let rc = git_rebase_commit(&id, rebase, nil, sig, nil, nil)
+        if rc != GIT_EAPPLIED.rawValue { try Git.check(rc, "Couldn't commit the rebased change") }
+        return try replay(rebase!, committedSoFar: Int(git_rebase_operation_current(rebase)) + 1)
+    }
+
+    /// git rebase --skip: drops the step that stopped, and goes on.
+    func skipRebaseStep() throws -> GitRebaseResult {
+        var options = rebaseOptions()
+        var rebase: OpaquePointer?
+        try Git.check(git_rebase_open(&rebase, pointer, &options), "There's no rebase in progress")
+        defer { git_rebase_free(rebase) }
+        if let head = headCommit() {
+            defer { git_object_free(head) }
+            var checkout = git_checkout_options()
+            git_checkout_options_init(&checkout, UInt32(GIT_CHECKOUT_OPTIONS_VERSION))
+            checkout.checkout_strategy = GIT_CHECKOUT_FORCE.rawValue
+            try Git.check(git_reset(pointer, head, GIT_RESET_HARD, &checkout))
+        }
+        return try replay(rebase!, committedSoFar: Int(git_rebase_operation_current(rebase)))
+    }
+
+    /// git rebase --abort: back to where the branch was.
+    func abortRebase() throws {
+        var options = rebaseOptions()
+        var rebase: OpaquePointer?
+        try Git.check(git_rebase_open(&rebase, pointer, &options), "There's no rebase in progress")
+        defer { git_rebase_free(rebase) }
+        try Git.check(git_rebase_abort(rebase), "Couldn't abort the rebase")
+        Self.notifyChange()
+    }
+
+    /// Fetches the upstream and rebases onto it (git pull --rebase).
+    func pullRebase(transfer: GitTransfer = GitTransfer()) throws -> GitRebaseResult {
+        guard let branch = currentBranchName else { throw GitError("HEAD is detached: check out a branch to pull.") }
+        let upstream = status().upstream ?? "origin/\(branch)"
+        try fetch(String(upstream.split(separator: "/").first ?? "origin"), transfer: transfer)
+        guard branches(remote: true).contains(where: { $0.name == upstream }) else { throw GitError("'\(upstream)' doesn't exist.") }
+        if status().upstream == nil, headId != nil { try setUpstream(branch, to: upstream) }
+        // Nothing of ours yet: just move to it.
+        if headId == nil {
+            _ = try merge(upstream)
+            return .done(0)
+        }
+        return try rebase(onto: upstream)
+    }
+}
+
+// MARK: - Merge options
+
+enum GitMergeMode {
+    /// A fast-forward when possible, else a merge commit (git merge).
+    case normal
+    /// Always a merge commit (git merge --no-ff).
+    case noFastForward
+    /// Only a fast-forward; refuse otherwise (git merge --ff-only).
+    case fastForwardOnly
+    /// The changes staged, without a merge commit (git merge --squash).
+    case squash
+}
+
+extension GitRepository {
+    func merge(_ branch: String, mode: GitMergeMode) throws -> GitMergeResult {
+        guard mode != .normal else { return try merge(branch) }
+        let target = try lookupCommit(branchSpec(branch))
+        defer { git_object_free(target) }
+        let theirs = git_commit_id(target)!
+        var ours = git_oid()
+        let unborn = git_reference_name_to_id(&ours, pointer, "HEAD") != 0
+        if !unborn && (git_oid_equal(&ours, theirs) == 1 || git_graph_descendant_of(pointer, &ours, theirs) == 1) { return .upToDate }
+        let canFastForward = unborn || git_graph_descendant_of(pointer, theirs, &ours) == 1
+        if mode == .fastForwardOnly {
+            guard canFastForward else { throw GitError("Not possible to fast-forward: the branches have diverged.") }
+            return try merge(branch)
+        }
+        var mergeOptions = git_merge_options()
+        git_merge_options_init(&mergeOptions, UInt32(GIT_MERGE_OPTIONS_VERSION))
+        var checkoutOptions = git_checkout_options()
+        git_checkout_options_init(&checkoutOptions, UInt32(GIT_CHECKOUT_OPTIONS_VERSION))
+        checkoutOptions.checkout_strategy = GIT_CHECKOUT_SAFE.rawValue | GIT_CHECKOUT_ALLOW_CONFLICTS.rawValue | GIT_CHECKOUT_CONFLICT_STYLE_MERGE.rawValue
+        var annotated: OpaquePointer?
+        try Git.check(git_annotated_commit_lookup(&annotated, pointer, theirs))
+        defer { git_annotated_commit_free(annotated) }
+        var heads: [OpaquePointer?] = [annotated]
+        try Git.check(heads.withUnsafeMutableBufferPointer { git_merge(pointer, $0.baseAddress, 1, &mergeOptions, &checkoutOptions) },
+                      "Couldn't merge \(branch)")
+        Self.notifyChange()
+        let conflicted = conflicts()
+        if mode == .squash {
+            // Staged, with no merge in progress: the next commit is an ordinary one.
+            git_repository_state_cleanup(pointer)
+            return conflicted.isEmpty ? .merged : .conflicts(conflicted)
+        }
+        if !conflicted.isEmpty { return .conflicts(conflicted) }
+        try commit(message: "Merge branch '\(branch)'")
+        return .merged
+    }
+
+    /// Branches whose commits are all in HEAD (git branch --merged), or not (--no-merged).
+    func branches(merged: Bool) -> [GitBranch] {
+        var head = git_oid()
+        guard git_reference_name_to_id(&head, pointer, "HEAD") == 0 else { return [] }
+        return branches().filter { branch in
+            var tip = git_oid()
+            guard git_oid_fromstr(&tip, branch.tip) == 0 else { return false }
+            let contained = git_oid_equal(&tip, &head) == 1 || git_graph_descendant_of(pointer, &head, &tip) == 1
+            return contained == merged
+        }
+    }
+
+    /// Deletes a branch on a remote (git push origin --delete branch).
+    func deleteRemoteBranch(_ branch: String, remote remoteName: String = "origin", transfer: GitTransfer = GitTransfer()) throws {
+        var remote: OpaquePointer?
+        try Git.check(git_remote_lookup(&remote, pointer, remoteName), "There's no remote \(remoteName)")
+        defer { git_remote_free(remote) }
+        var options = git_push_options()
+        git_push_options_init(&options, UInt32(GIT_PUSH_OPTIONS_VERSION))
+        transfer.install(&options.callbacks)
+        let rc = Git.withStrings([":refs/heads/\(branch)"]) { git_remote_push(remote, $0, &options) }
+        guard rc == 0 else { throw transfer.error(rc, "Couldn't delete \(branch) on \(remoteName)") }
+        try? deleteBranch("\(remoteName)/\(branch)", force: true, remote: true)
+        Self.notifyChange()
+    }
+}
+
+// MARK: - Submodules
+
+struct GitSubmodule: Hashable {
+    let name: String
+    let path: String
+    let url: String
+    /// The commit the parent repository records for it.
+    let recorded: String?
+    /// The commit checked out in it (nil when it isn't cloned yet).
+    let checkedOut: String?
+    let isCloned: Bool
+    /// Its files have changes, or it's on another commit than the recorded one.
+    let isModified: Bool
+}
+
+extension GitRepository {
+    func submodules() -> [GitSubmodule] {
+        final class Box { var names: [String] = [] }
+        let box = Box()
+        _ = git_submodule_foreach(pointer, { _, name, payload in
+            Unmanaged<Box>.fromOpaque(payload!).takeUnretainedValue().names.append(Git.string(name))
+            return 0
+        }, Unmanaged.passUnretained(box).toOpaque())
+        return box.names.compactMap { name in
+            var sm: OpaquePointer?
+            guard git_submodule_lookup(&sm, pointer, name) == 0, let sm else { return nil }
+            defer { git_submodule_free(sm) }
+            var flags: UInt32 = 0
+            git_submodule_status(&flags, pointer, name, GIT_SUBMODULE_IGNORE_UNSPECIFIED)
+            let has = { (flag: git_submodule_status_t) in flags & flag.rawValue != 0 }
+            let modified = has(GIT_SUBMODULE_STATUS_WD_MODIFIED) || has(GIT_SUBMODULE_STATUS_WD_INDEX_MODIFIED)
+                || has(GIT_SUBMODULE_STATUS_WD_WD_MODIFIED) || has(GIT_SUBMODULE_STATUS_INDEX_MODIFIED)
+            return GitSubmodule(name: name, path: Git.string(git_submodule_path(sm)), url: Git.string(git_submodule_url(sm)),
+                                recorded: git_submodule_head_id(sm).map { Git.hex($0) }, checkedOut: git_submodule_wd_id(sm).map { Git.hex($0) },
+                                isCloned: !has(GIT_SUBMODULE_STATUS_WD_UNINITIALIZED), isModified: modified)
+        }
+    }
+
+    func isSubmodule(_ path: String) -> Bool { submodules().contains { $0.path == path } }
+
+    /// Clones (when needed) and checks out the recorded commit of each submodule (or those in
+    /// `paths`); `recursive` does the same inside them (git submodule update --init [--recursive]).
+    @discardableResult
+    func updateSubmodules(_ paths: [String] = [], recursive: Bool = true, transfer: GitTransfer = GitTransfer()) throws -> Int {
+        var count = 0
+        for submodule in submodules() where paths.isEmpty || paths.contains(submodule.path) {
+            var sm: OpaquePointer?
+            try Git.check(git_submodule_lookup(&sm, pointer, submodule.name), "There's no submodule \(submodule.path)")
+            defer { git_submodule_free(sm) }
+            var options = git_submodule_update_options()
+            git_submodule_update_options_init(&options, UInt32(GIT_SUBMODULE_UPDATE_OPTIONS_VERSION))
+            options.checkout_opts.checkout_strategy = GIT_CHECKOUT_SAFE.rawValue
+            options.allow_fetch = 1
+            transfer.attempts = 0
+            transfer.install(&options.fetch_opts.callbacks)
+            let rc = git_submodule_update(sm, 1, &options)
+            guard rc == 0 else { throw transfer.error(rc, "Couldn't update \(submodule.path)") }
+            count += 1
+            if recursive, let inner = try? GitRepository.open(root.appendingPathComponent(submodule.path)) {
+                count += try inner.updateSubmodules(recursive: true, transfer: transfer)
+            }
+        }
+        if count > 0 { Self.notifyChange() }
+        return count
+    }
+
+    /// git submodule add <url> [path]: clones it into `path` and stages it.
+    func addSubmodule(_ url: String, at path: String? = nil, transfer: GitTransfer = GitTransfer()) throws {
+        let folder = path ?? (URL(string: url)?.deletingPathExtension().lastPathComponent ?? "submodule")
+        var sm: OpaquePointer?
+        try Git.check(git_submodule_add_setup(&sm, pointer, url, folder, 1), "Couldn't add \(url)")
+        defer { git_submodule_free(sm) }
+        var options = git_submodule_update_options()
+        git_submodule_update_options_init(&options, UInt32(GIT_SUBMODULE_UPDATE_OPTIONS_VERSION))
+        transfer.install(&options.fetch_opts.callbacks)
+        var cloned: OpaquePointer?
+        let rc = git_submodule_clone(&cloned, sm, &options)
+        guard rc == 0 else { throw transfer.error(rc, "Couldn't clone \(url)") }
+        git_repository_free(cloned)
+        try Git.check(git_submodule_add_finalize(sm), "Couldn't add \(folder)")
+        Self.notifyChange()
+    }
+
+    /// Copies each submodule's URL from .gitmodules to the config (git submodule sync).
+    func syncSubmodules() throws {
+        for submodule in submodules() {
+            var sm: OpaquePointer?
+            try Git.check(git_submodule_lookup(&sm, pointer, submodule.name))
+            defer { git_submodule_free(sm) }
+            try Git.check(git_submodule_sync(sm), "Couldn't sync \(submodule.path)")
+        }
+    }
+}
+
+// MARK: - More of git, for the Terminal
+
+extension GitRepository {
+    /// git reflog: where HEAD has been, newest first.
+    func reflog(limit: Int = 100) -> [(id: String, message: String)] {
+        var log: OpaquePointer?
+        guard git_reflog_read(&log, pointer, "HEAD") == 0, let log else { return [] }
+        defer { git_reflog_free(log) }
+        return (0..<min(limit, git_reflog_entrycount(log))).compactMap { i in
+            guard let entry = git_reflog_entry_byindex(log, i) else { return nil }
+            return (Git.hex(git_reflog_entry_id_new(entry)), Git.string(git_reflog_entry_message(entry)))
+        }
+    }
+
+    /// git describe --tags: the nearest tag, how far past it, and where.
+    func describe() -> String? {
+        guard let head = headCommit() else { return nil }
+        defer { git_object_free(head) }
+        var options = git_describe_options()
+        git_describe_options_init(&options, UInt32(GIT_DESCRIBE_OPTIONS_VERSION))
+        options.describe_strategy = GIT_DESCRIBE_TAGS.rawValue
+        var result: OpaquePointer?
+        guard git_describe_commit(&result, head, &options) == 0, let result else { return nil }
+        defer { git_describe_result_free(result) }
+        var format = git_describe_format_options()
+        git_describe_format_options_init(&format, UInt32(GIT_DESCRIBE_FORMAT_OPTIONS_VERSION))
+        return Git.buffer { git_describe_format($0, result, &format) }
+    }
+
+    /// git ls-files: the files in the index.
+    func trackedFiles() -> [String] {
+        guard let index = try? index() else { return [] }
+        defer { git_index_free(index) }
+        return (0..<git_index_entrycount(index)).compactMap { git_index_get_byindex(index, $0).map { Git.string($0.pointee.path) } }
+    }
+
+    /// git clean: deletes untracked files (and ignored ones with `ignored`); `dryRun` only lists them.
+    func clean(ignored: Bool = false, dryRun: Bool) -> [String] {
+        var options = git_status_options()
+        git_status_options_init(&options, UInt32(GIT_STATUS_OPTIONS_VERSION))
+        options.show = GIT_STATUS_SHOW_WORKDIR_ONLY
+        options.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED.rawValue | GIT_STATUS_OPT_RECURSE_UNTRACKED_DIRS.rawValue
+        if ignored { options.flags |= GIT_STATUS_OPT_INCLUDE_IGNORED.rawValue | GIT_STATUS_OPT_RECURSE_IGNORED_DIRS.rawValue }
+        var list: OpaquePointer?
+        guard git_status_list_new(&list, pointer, &options) == 0, let list else { return [] }
+        defer { git_status_list_free(list) }
+        var paths: [String] = []
+        for i in 0..<git_status_list_entrycount(list) {
+            guard let entry = git_status_byindex(list, i)?.pointee else { continue }
+            let flags = entry.status.rawValue
+            guard flags & GIT_STATUS_WT_NEW.rawValue != 0 || (ignored && flags & GIT_STATUS_IGNORED.rawValue != 0) else { continue }
+            let path = Git.string(entry.index_to_workdir?.pointee.new_file.path)
+            paths.append(path)
+            if !dryRun { try? FileManager.default.removeItem(at: root.appendingPathComponent(path)) }
+        }
+        if !dryRun { Self.notifyChange() }
+        return paths
+    }
+
+    /// git cat-file -p / -t: an object's type and content.
+    func object(_ spec: String) -> (type: String, text: String)? {
+        var object: OpaquePointer?
+        guard git_revparse_single(&object, pointer, spec) == 0, let object else { return nil }
+        defer { git_object_free(object) }
+        let type = git_object_type(object)
+        let name = Git.string(git_object_type2string(type))
+        switch type {
+        case GIT_OBJECT_BLOB:
+            guard let raw = git_blob_rawcontent(object) else { return (name, "") }
+            return (name, String(decoding: Data(bytes: raw, count: Int(git_blob_rawsize(object))), as: UTF8.self))
+        case GIT_OBJECT_TREE:
+            let lines = (0..<git_tree_entrycount(object)).compactMap { i -> String? in
+                guard let entry = git_tree_entry_byindex(object, i) else { return nil }
+                let kind = Git.string(git_object_type2string(git_tree_entry_type(entry)))
+                return String(format: "%06o", git_tree_entry_filemode(entry).rawValue) + " \(kind) \(Git.hex(git_tree_entry_id(entry)))\t\(Git.string(git_tree_entry_name(entry)))"
+            }
+            return (name, lines.joined(separator: "\n") + "\n")
+        case GIT_OBJECT_COMMIT:
+            var text = "tree \(Git.hex(git_commit_tree_id(object)))\n"
+            for i in 0..<git_commit_parentcount(object) { text += "parent \(Git.hex(git_commit_parent_id(object, i)))\n" }
+            if let author = git_commit_author(object)?.pointee {
+                text += "author \(Git.string(author.name)) <\(Git.string(author.email))> \(author.when.time)\n"
+            }
+            return (name, text + "\n" + Git.string(git_commit_message(object)))
+        default:
+            return (name, "")
+        }
+    }
+
+    /// git mv: renames a file and stages both sides.
+    func move(_ from: String, to: String) throws {
+        let source = root.appendingPathComponent(from), target = root.appendingPathComponent(to)
+        try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: source, to: target)
+        try stage([from, to])
+    }
+
+    /// git grep: tracked files' lines matching `pattern` (a regular expression).
+    func grep(_ pattern: String, ignoreCase: Bool) -> [(path: String, line: Int, text: String)] {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: ignoreCase ? [.caseInsensitive] : []) else { return [] }
+        var hits: [(path: String, line: Int, text: String)] = []
+        for path in trackedFiles() {
+            guard let text = text(of: path, at: .index) else { continue }
+            for (i, line) in text.components(separatedBy: "\n").enumerated()
+            where regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) != nil {
+                hits.append((path, i + 1, line))
+            }
+        }
+        return hits
     }
 }

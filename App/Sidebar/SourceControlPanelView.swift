@@ -214,12 +214,23 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
             UIAction(title: "Force Push", attributes: .destructive) { [weak self] _ in self?.confirmForcePush() },
             UIAction(title: "Fetch", image: Codicon.refresh.image()) { [weak self] _ in self?.fetch(prune: false) },
             UIAction(title: "Fetch (Prune)") { [weak self] _ in self?.fetch(prune: true) },
+            UIAction(title: "Pull (Rebase)", image: Codicon.repoPull.image()) { [weak self] _ in self?.pullRebase() },
         ])
         let tagMenu = UIMenu(title: "Tags", children: tagMenuItems())
+        let submoduleMenu = UIMenu(title: "Submodules", children: submoduleMenuItems())
         let branchMenu = UIMenu(title: "Branch", children: branchMenuItems())
         let stashMenu = UIMenu(title: "Stash", children: stashMenuItems())
         var mergeItems: [UIMenuElement] = []
-        if status.state != .none {
+        if status.state == .rebasing {
+            mergeItems.append(UIMenu(title: "Rebase in Progress", options: .displayInline, children: [
+                UIAction(title: "Continue Rebase", image: Codicon.debugContinue.image()) { [weak self] _ in self?.rebaseStep { try $0.continueRebase() } },
+                UIAction(title: "Skip This Commit") { [weak self] _ in self?.rebaseStep { try $0.skipRebaseStep() } },
+                UIAction(title: "Abort Rebase", image: Codicon.discard.image(), attributes: .destructive) { [weak self] _ in
+                    self?.perform { try $0.abortRebase() }
+                    self?.onFilesChangedOnDisk?()
+                },
+            ]))
+        } else if status.state != .none {
             let title = status.state == .reverting ? "Abort Revert" : status.state == .cherryPicking ? "Abort Cherry-Pick" : "Abort Merge"
             mergeItems.append(UIAction(title: title, image: Codicon.discard.image(), attributes: .destructive) { [weak self] _ in
                 self?.abortMerge()
@@ -244,7 +255,7 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
                 UIAction(title: "Fetch", image: Codicon.refresh.image()) { [weak self] _ in self?.fetch(prune: false) },
                 checkout,
             ]),
-            UIMenu(options: .displayInline, children: mergeItems + [commitMenu, changesMenu, syncMenu, branchMenu, remoteMenu, stashMenu, tagMenu]),
+            UIMenu(options: .displayInline, children: mergeItems + [commitMenu, changesMenu, syncMenu, branchMenu, remoteMenu, stashMenu, tagMenu, submoduleMenu]),
             pullRequestMenu,
             UIMenu(options: .displayInline, children: [viewMenu]),
         ]
@@ -684,6 +695,7 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
         if let merging = status.mergingBranch { title += "  (merging \(merging))" }
         if status.state == .reverting { title += "  (reverting)" }
         if status.state == .cherryPicking { title += "  (cherry-picking)" }
+        if status.state == .rebasing { title += "  (rebasing)" }
         let text = NSMutableAttributedString(attributedString: Codicon.gitBranch.attributed(14, color: VS.description))
         text.append(NSAttributedString(string: " " + title, attributes: [.font: VS.font(12), .foregroundColor: VS.description]))
         if status.behindCount > 0 {
@@ -715,6 +727,9 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
             UIAction(title: "Create Branch...", image: Codicon.add.image()) { [weak self] _ in self?.promptNewBranch(from: nil) },
             UIMenu(title: "Create Branch From...", children: (all.map(\.name) + remote).map { name in
                 UIAction(title: name) { [weak self] _ in self?.promptNewBranch(from: name) }
+            }),
+            UIMenu(title: "Rebase Branch onto...", image: Codicon.gitCommit.image(), children: (others + remote).map { name in
+                UIAction(title: name) { [weak self] _ in self?.rebase(onto: name) }
             }),
             UIAction(title: "Rename Branch...", image: Codicon.edit.image()) { [weak self] _ in self?.promptRenameBranch() },
             UIMenu(title: "Delete Branch...", image: Codicon.trash.image(), children: others.map { name in
@@ -1088,6 +1103,8 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
         switch group {
         case .merge:
             onOpenFile?(file.path)
+        case .changes where git.isSubmodule(file.path):
+            showSubmodule(file.path, git: git)
         case .changes:
             if file.status == .deleted {
                 let original = git.text(of: file.path, at: .index) ?? ""
@@ -1124,6 +1141,128 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
         guard let url = try? ProjectStore.shared.resolve(path), let data = try? Data(contentsOf: url) else { return false }
         return !data.prefix(8000).contains(0) && String(data: data, encoding: .utf8) != nil
     }
+
+    // MARK: - Rebase
+
+    private func rebase(onto upstream: String) {
+        rebaseStep { try $0.rebase(onto: upstream) }
+    }
+
+    /// A rebase, or its next step: done, or stopped at a commit with conflicts.
+    private func rebaseStep(_ work: @escaping (GitRepository) throws -> GitRebaseResult) {
+        saveEdits { [weak self] in
+            guard let self else { return }
+            do {
+                guard let repo = self.repo else { return }
+                self.showRebaseResult(try work(repo))
+            } catch {
+                self.showAlert(error.localizedDescription)
+                self.refresh()
+            }
+        }
+    }
+
+    private func showRebaseResult(_ result: GitRebaseResult) {
+        switch result {
+        case .upToDate:
+            toast("Already up to date.")
+        case .done(let count):
+            didSwitchBranch()
+            toast("Rebased \(count) commit\(count == 1 ? "" : "s").")
+        case .conflicts(let paths):
+            didSwitchBranch()
+            showAlert("The rebase stopped at a commit that conflicts in \(paths.joined(separator: ", ")). Fix each file, stage it, then choose Continue Rebase from the ... menu (or Skip This Commit, or Abort Rebase).")
+        }
+    }
+
+    private func pullRebase() {
+        guard status.remoteURL != nil else { return promptRemote { [weak self] in self?.pullRebase() } }
+        saveEdits { [weak self] in
+            guard let self else { return }
+            var result = GitRebaseResult.upToDate
+            self.network("Pulling", { repo, transfer in result = try repo.pullRebase(transfer: transfer) }) {
+                self.showRebaseResult(result)
+            }
+        }
+    }
+
+    // MARK: - Submodules
+
+    private func submoduleMenuItems() -> [UIMenuElement] {
+        let submodules = repo?.submodules() ?? []
+        var items: [UIMenuElement] = [
+            UIAction(title: "Update Submodules", image: Codicon.refresh.image(), attributes: submodules.isEmpty ? [.disabled] : []) { [weak self] _ in
+                self?.updateSubmodules([])
+            },
+            UIAction(title: "Add Submodule...", image: Codicon.add.image()) { [weak self] _ in self?.promptAddSubmodule() },
+        ]
+        if !submodules.isEmpty {
+            items.append(UIMenu(title: "Submodules", options: .displayInline, children: submodules.map { sm in
+                UIMenu(title: sm.path, subtitle: !sm.isCloned ? "Not cloned yet" : sm.isModified ? "Changed" : sm.checkedOut.map { String($0.prefix(7)) },
+                       image: Codicon.packageIcon.image(), children: [
+                    UIAction(title: sm.isCloned ? "Update" : "Clone and Check Out") { [weak self] _ in self?.updateSubmodules([sm.path]) },
+                    UIAction(title: "Open as Project", attributes: sm.isCloned ? [] : [.disabled]) { [weak self] _ in self?.openSubmodule(sm.path) },
+                    UIAction(title: "Copy URL", image: Codicon.copy.image()) { _ in UIPasteboard.general.string = sm.url },
+                ])
+            }))
+        }
+        return items
+    }
+
+    private func updateSubmodules(_ paths: [String]) {
+        var count = 0
+        network("Updating submodules", { repo, transfer in count = try repo.updateSubmodules(paths, transfer: transfer) }) { [weak self] in
+            self?.onFilesChangedOnDisk?()
+            self?.toast("Updated \(count) submodule\(count == 1 ? "" : "s").")
+        }
+    }
+
+    private func promptAddSubmodule() {
+        let alert = UIAlertController(title: "Add Submodule", message: "A repository to include in this one, at a folder of its own.", preferredStyle: .alert)
+        alert.addTextField { field in
+            field.placeholder = "https://github.com/owner/repo"
+            field.keyboardType = .URL
+            field.autocapitalizationType = .none
+            field.autocorrectionType = .no
+        }
+        alert.addTextField { field in
+            field.placeholder = "Folder (optional)"
+            field.autocapitalizationType = .none
+            field.autocorrectionType = .no
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Add", style: .default) { [weak self, weak alert] _ in
+            guard let self, let fields = alert?.textFields, let url = fields[0].text?.trimmingCharacters(in: .whitespaces), !url.isEmpty else { return }
+            let folder = fields[1].text?.trimmingCharacters(in: .whitespaces)
+            self.network("Adding \(url)", { repo, transfer in
+                try repo.addSubmodule(url, at: folder?.isEmpty == false ? folder : nil, transfer: transfer)
+            }) {
+                self.onFilesChangedOnDisk?()
+                self.toast("Added. Commit .gitmodules and the submodule to record it.")
+            }
+        })
+        presenter?.present(alert, animated: true)
+    }
+
+    /// A submodule's change is a different commit, not a text diff.
+    private func showSubmodule(_ path: String, git: GitRepository) {
+        guard let sm = git.submodules().first(where: { $0.path == path }) else { return }
+        let recorded = sm.recorded.map { String($0.prefix(7)) } ?? "none"
+        let current = sm.checkedOut.map { String($0.prefix(7)) } ?? "not cloned"
+        let alert = UIAlertController(title: "Submodule \(path)", message: "Recorded: \(recorded)\nChecked out: \(current)\(sm.isModified ? "\nIt has changes of its own." : "")",
+                                      preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Update to Recorded", style: .default) { [weak self] _ in self?.updateSubmodules([path]) })
+        alert.addAction(UIAlertAction(title: "Open as Project", style: .default) { [weak self] _ in self?.openSubmodule(path) })
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        presenter?.present(alert, animated: true)
+    }
+
+    private func openSubmodule(_ path: String) {
+        NotificationCenter.default.post(name: Self.openProjectRequest, object: nil, userInfo: ["url": project.appendingPathComponent(path)])
+    }
+
+    /// Opening a submodule as its own project (IDEViewController).
+    static let openProjectRequest = Notification.Name("MobileStudioOpenProjectRequest")
 
     // MARK: - Commits in the Graph
 
