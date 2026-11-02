@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.1
+
+### AI chat
+- **Cloud models, if you want them**: Settings → AI → Cloud Models connects Chat to Anthropic, OpenAI or OpenRouter with your own API key, or to Ollama or LM Studio on your network. It's off until you add a key, and the key is kept in the Keychain. The chat lists cloud models separately and says that your messages, and the files the agent reads, go to the provider. Tools, modes, thinking and subagents work the same as with local models.
+- Fixed: after using the Extensions panel, the chat sometimes couldn't be opened.
+
+### Getting started
+- The Welcome screen has a **Get Started** section: **Open Sample Game** (a small LÖVE game to play with and change), **Set Up AI Chat…**, and a tip on where the chat agent is.
+
+### Updates
+- Mobile Studio now tells you when a new version is out (it checks GitHub at most once a day), and shows what's new after you update. Settings → About also has **Check for Updates** and **What's New**.
+
+### Accessibility and diagnostics
+- VoiceOver names for the chat's controls; selected activity bar buttons and search options are announced as selected.
+- The Welcome screen and What's New follow your text size.
+- **Settings → Advanced → Export Diagnostics** makes one text file for bug reports: app and device details, a few settings, your extensions, crash reports, the program console and the extension host's log. It has no keys, tokens or project files.
+
+### Behind the scenes
+- The editor's browser tests now live in the repository and run before every build.
+
 ## 0.2.0
 
 ### AI chat agent
