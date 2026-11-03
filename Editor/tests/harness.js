@@ -8,7 +8,7 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 async function until(test, ms = 5000) {
   const end = Date.now() + ms;
   while (Date.now() < end) {
-    try { if (test()) return true; } catch (e) { /* not yet */ }
+    try { if (await test()) return true; } catch (e) { /* not yet */ }
     await wait(50);
   }
   return false;

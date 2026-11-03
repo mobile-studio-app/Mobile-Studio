@@ -99,7 +99,7 @@ scenario(async () => {
   check('colours get a swatch', !!document.querySelector('.cm-color-swatch'));
 
   document.querySelector('.cm-codelens-item').dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-  check('tapping a code lens runs its command', await until(async () => false, 300) || JSON.stringify(await run('test.ran')).includes('lens load'), JSON.stringify(await run('test.ran')));
+  check('tapping a code lens runs its command', await until(async () => false, 300) || JSON.stringify((await run('test.ran')) || []).includes('lens load'), JSON.stringify(await run('test.ran')));
 
   // ⌘-click follows a link.
   const linkEl = document.querySelector('.cm-ext-link');
@@ -143,7 +143,7 @@ scenario(async () => {
   key('Enter');
   check('accepting inserts it', await until(() => text().includes('    zebraFunction')), text().slice(-40));
   check('and applies its additional edit', await until(() => text().startsWith('-- imported\n-- Sample')), text().slice(0, 30));
-  check('and runs its command', await until(async () => false, 400) || (await run('test.ran')).includes('accepted'), JSON.stringify(await run('test.ran')));
+  check('and runs its command', await until(async () => false, 400) || ((await run('test.ran')) || []).includes('accepted'), JSON.stringify(await run('test.ran')));
 
   // Go to Implementation.
   view().dispatch({ selection: { anchor: 0 } });

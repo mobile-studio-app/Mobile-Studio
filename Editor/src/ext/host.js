@@ -245,7 +245,16 @@ async function connectNode() {
 }
 
 /** (Re)starts the host with the enabled extensions that have browser code. */
-export async function startHost(api) {
+// Starts run one at a time: two at once (extensions changing as the page starts) would each
+// start a worker, and an extension would run twice.
+let starting = Promise.resolve();
+export function startHost(api) {
+  const run = starting.then(() => startHostNow(api), () => startHostNow(api));
+  starting = run.catch(() => {});
+  return run;
+}
+
+async function startHostNow(api) {
   app = api;
   stopHost();
   const web = contributions.extensions.filter((e) => typeof e.manifest.browser === 'string');

@@ -77,7 +77,7 @@ scenario(async () => {
   check('an item whose when is false doesn\'t show', !titleButtons().some((b) => b.title === 'Gated Thing'));
 
   titleButtons().find((b) => b.title === 'Open Lua Preview').click();
-  check('its command runs with the file\'s Uri', await until(async () => (await run('menus.ran')).includes('preview main.lua')), JSON.stringify(await run('menus.ran')));
+  check('its command runs with the file\'s Uri', await until(async () => ((await run('menus.ran')) || []).includes('preview main.lua')), JSON.stringify(await run('menus.ran')));
 
   // "…": the title bar's other items, then editor/context's.
   titleButtons().find((b) => b.title === 'More Actions...').click();
@@ -85,7 +85,7 @@ scenario(async () => {
   const labels = [...document.querySelectorAll('.qi-item')].map((e) => e.textContent);
   check('"…" lists the other title items and the context menu\'s', labels.some((l) => l.includes('Other Lua Thing')) && labels.some((l) => l.includes('Lua Context Thing')), labels.join('|'));
   [...document.querySelectorAll('.qi-item')].find((e) => e.textContent.includes('Lua Context Thing')).click();
-  check('and runs the one picked', await until(async () => (await run('menus.ran')).includes('context main.lua')), JSON.stringify(await run('menus.ran')));
+  check('and runs the one picked', await until(async () => ((await run('menus.ran')) || []).includes('context main.lua')), JSON.stringify(await run('menus.ran')));
 
   // Right-click in the editor: editor/context.
   view().contentDOM.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
@@ -105,7 +105,7 @@ scenario(async () => {
   check('and for a folder', JSON.stringify(forFolder) === '["Other Lua Thing"]', JSON.stringify(forFolder));
   check('with their codicon', window.duocode.explorerMenu('main.lua', false)[0]?.icon === 'zap');
   await window.duocode.runForResource('menus.explorer', 'main.lua');
-  check('running one gives it the file\'s Uri', (await run('menus.ran')).includes('explorer main.lua'), JSON.stringify(await run('menus.ran')));
+  check('running one gives it the file\'s Uri', ((await run('menus.ran')) || []).includes('explorer main.lua'), JSON.stringify(await run('menus.ran')));
 
   // File decorations for the Explorer.
   const decorations = await window.duocode.fileDecorations(['main.lua', 'README.md']);
