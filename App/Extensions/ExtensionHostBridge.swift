@@ -81,10 +81,44 @@ enum ExtensionHostBridge {
             }
         case "fs":
             do { reply(try fileOperation(body, store: store), nil) } catch { reply(nil, error.localizedDescription) }
+        case "extSecret":
+            reply(secret(body), nil)
         default:
             return false
         }
         return true
+    }
+
+    /// context.secrets: an extension's secrets, in the Keychain. Each extension's key names are kept
+    /// too (under one more entry), for keys().
+    private static func secret(_ body: [String: Any]) -> Any {
+        let id = body["id"] as? String ?? ""
+        let key = body["key"] as? String ?? ""
+        let account = "ext-secret.\(id).\(key)"
+        let indexAccount = "ext-secret-keys.\(id)"
+        var keys = (KeychainStore.string(for: indexAccount).flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) } as? [String]) ?? []
+        let saveKeys = {
+            if let data = try? JSONSerialization.data(withJSONObject: keys), let text = String(data: data, encoding: .utf8) {
+                KeychainStore.set(text, for: indexAccount)
+            }
+        }
+        switch body["op"] as? String ?? "" {
+        case "get":
+            return KeychainStore.string(for: account) ?? NSNull()
+        case "store":
+            KeychainStore.set(body["value"] as? String ?? "", for: account)
+            if !keys.contains(key) { keys.append(key); saveKeys() }
+            return true
+        case "delete":
+            KeychainStore.remove(account)
+            keys.removeAll { $0 == key }
+            saveKeys()
+            return true
+        case "keys":
+            return keys
+        default:
+            return NSNull()
+        }
     }
 
     /// workspace.fs, sandboxed to the open project. Paths are project-relative.

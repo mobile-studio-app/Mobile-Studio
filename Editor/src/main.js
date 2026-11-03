@@ -47,9 +47,9 @@ import { setupSplit, mainChanged, sideText, openToSide, refreshSplit, flushSplit
 import { setupTasks } from './tasks.js';
 import { setupDebugConsole, showPanel, togglePanel } from './panel.js';
 import { setupProblems, problemsChanged } from './problems.js';
-import { setupTerminal, showTerminal } from './terminal.js';
+import { setupTerminal, showTerminal, runInTerminal } from './terminal.js';
 import { setupOutput } from './ext/output.js';
-import { nodeAddress, nodeJob, hostDiagnostics, checkNodeHost } from './ext/host.js';
+import { nodeAddress, nodeJob, hostDiagnostics, checkNodeHost, didChangeFile, didChangeTheme } from './ext/host.js';
 import { addCommands } from './palette.js';
 import { customEditorsFor } from './ext/registry.js';
 import { quickPick } from './ext/ui.js';
@@ -276,6 +276,8 @@ const hostAPI = {
   save: () => save(),
   languageIdFor,
   builtinCommands: () => builtinCommands(() => view),
+  showVirtual: (uri, text, languageId) => showVirtual(uri, text, languageId),
+  runInTerminal: (text, fresh) => runInTerminal(text, fresh),
 };
 
 const quickOpenAPI = { getView: () => view, native, current: () => current, openFile: (path) => openFromUser(path) };
@@ -432,6 +434,7 @@ async function openFile(path) {
 
 /** A file or folder was renamed (to) or deleted (to null): tabs, cached states and the open file follow. */
 function pathMoved(from, to) {
+  didChangeFile(to ? 'rename' : 'delete', from, to);
   const inside = (p) => p === from || p.startsWith(from + '/');
   for (const key of [...states.keys()]) {
     if (!inside(key)) continue;
@@ -476,9 +479,17 @@ async function closeTab(tab) {
   const next = removeTab(tab.key);
   // Closing discards the file's editing state (undo history), as in VS Code.
   if (!tab.key.startsWith('diff:')) states.delete(tab.path);
+  if (tab.key.startsWith('virtual:')) virtualDocuments.delete(tab.key);
   if (active && active.key === tab.key) {
-    if (next) openFile(next.path); else showEmpty();
+    if (next) openTab(next); else showEmpty();
   }
+}
+
+/** A tab's file, or its virtual document. */
+function openTab(tab) {
+  const virtual = virtualDocuments.get(tab.key);
+  if (virtual) showVirtual(virtual.uri, virtual.text, virtual.languageId);
+  else openFile(tab.path);
 }
 
 setupBreadcrumbs($('breadcrumbs'), (value) => quickOpen(value));
@@ -543,7 +554,7 @@ setupTabs($('tabs'), {
   select: (tab) => {
     if (tab.key.startsWith('webview:')) { showTab(tab); revealWebview(tab.key.slice(8)); return; }
     revealWebview(null);
-    openFile(tab.path);
+    openTab(tab);
   },
   close: (tab) => {
     if (tab.key.startsWith('webview:')) {
@@ -638,6 +649,37 @@ function toggleDiffLayout() {
 function showSideBySide() {
   const { path, original, modified } = lastDiff;
   openSideBySide({ view, path, original, readOnly: modified != null, save: () => save() });
+}
+
+/** A virtual document (an extension's content provider's, such as "git-show:..."): read-only, in a
+ * tab of its own. */
+const VIRTUAL_EXTENSIONS = { javascript: 'js', typescript: 'ts', json: 'json', markdown: 'md', lua: 'lua', python: 'py', html: 'html', css: 'css', diff: 'diff' };
+const virtualDocuments = new Map();   // tab key -> { uri, text, languageId }
+async function showVirtual(uri, text, languageId) {
+  virtualDocuments.set('virtual:' + uri, { uri, text, languageId });
+  leaveDiff();
+  if (dirty) await save();
+  hideDocsSheet();
+  if (current) states.set(current, view.state);
+  ++openSeq;
+  current = null;
+  setDirty(false);
+  hideViewer();
+  $('empty-editor').hidden = true;
+  view.dom.hidden = false;
+  readOnly = true;
+  const name = decodeURIComponent(uri.replace(/[?#].*$/, '').split('/').pop() || uri);
+  // The language goes by the name, so a name without the language's extension is given one.
+  const ext = VIRTUAL_EXTENSIONS[languageId];
+  const path = ext && !name.endsWith('.' + ext) ? `${name}.${ext}` : name;
+  view.setState(EditorState.create({
+    doc: text,
+    extensions: [baseExtensions(path), EditorState.readOnly.of(true), EditorView.editable.of(false)],
+  }));
+  posLabel.style.visibility = 'visible';
+  updatePos(view.state);
+  showTab({ key: 'virtual:' + uri, path, title: name, icon: '👁' });
+  return true;
 }
 
 async function openDiff({ path, original, modified, title }) {
@@ -786,6 +828,7 @@ function pushChrome() {
   if (key === lastChrome) return;
   lastChrome = key;
   native({ cmd: 'themeColors', theme: settings.theme, dark: document.documentElement.style.colorScheme !== 'light', colors }).catch(() => {});
+  didChangeTheme();
 }
 
 function applySettings(values) {

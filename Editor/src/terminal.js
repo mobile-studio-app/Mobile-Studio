@@ -67,15 +67,36 @@ async function newTerminal() {
   term.onData((data) => input(t, data));
 
   t.base = await api.nodeAddress();
-  if (!t.base) { term.write('The terminal needs Mobile Studio\'s Node.js, which isn\'t available.\r\n'); return; }
+  if (!t.base) { term.write('The terminal needs Mobile Studio\'s Node.js, which isn\'t available.\r\n'); return t; }
   const dir = await api.projectPath();
   const opened = await post(t, 'open', { dir }).catch(() => null);
-  if (!opened) { term.write('The terminal couldn\'t start.\r\n'); return; }
+  if (!opened) { term.write('The terminal couldn\'t start.\r\n'); return t; }
   t.id = opened.id;
   term.write('\x1b[2mMobile Studio terminal: type help for the commands.\x1b[0m\r\n');
   t.events = new EventSource(`${t.base}/term/events?id=${t.id}`);
   t.events.onmessage = (e) => event(t, JSON.parse(e.data));
   renderList();
+  return t;
+}
+
+/** An extension's Terminal.sendText: typed in as if by the user (a command at the prompt, or input
+ * for the program running). `fresh` opens a new terminal for it, as an extension's own terminal. */
+export async function runInTerminal(text, fresh = false) {
+  const t = fresh || !active ? await newTerminal() : active;
+  showPanel('terminal');
+  activate(t);
+  if (!t.id) return false;
+  // A new terminal's prompt comes once its session is ready.
+  for (let i = 0; i < 50 && t.busy && fresh; i++) await new Promise((r) => setTimeout(r, 100));
+  const lines = String(text).replace(/\r\n?/g, '\n').replace(/\n$/, '').split('\n');
+  for (const [i, line] of lines.entries()) {
+    if (i > 0) await new Promise((r) => setTimeout(r, 50));
+    t.term.write(line);
+    t.line = line;
+    t.cursor = line.length;
+    submit(t);
+  }
+  return true;
 }
 
 function activate(t) {

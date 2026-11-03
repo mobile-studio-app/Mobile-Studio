@@ -13,7 +13,7 @@ import workerSource from '../../build/ext-worker.txt';
 import { contributions, readExtensionFile } from './registry.js';
 import { convertSnippet } from './snippets.js';
 import { relativeRequires, candidates } from './modules.js';
-import { quickPick, inputBox, notify as showNotification } from './ui.js';
+import { quickPick, inputBox, closeQuickInput, notify as showNotification } from './ui.js';
 import { showWebview, postToWebview, retitleWebview, closeWebview, reveal as revealWebview } from './webviews.js';
 import { channelOutput } from './output.js';
 
@@ -265,7 +265,7 @@ export async function startHost(api) {
       hosts.push(host);
       const joinPath = (dir, file) => dir.replace(/\/$/, '') + '/' + file.replace(/^\.\//, '');
       port.postMessage({
-        type: 'init', host: 'node', workspaceRoot: root, configuration: init.configuration || {}, state: init.state || {},
+        type: 'init', host: 'node', workspaceRoot: root, configuration: init.configuration || {}, state: init.state || {}, themeKind: themeKind(),
         extensions: node.map((e) => ({ id: e.id, manifest: e.manifest, path: e.path, nodeMain: joinPath(e.path, e.manifest.main) })),
       });
     }
@@ -282,7 +282,7 @@ export async function startHost(api) {
     port.onmessage = ({ data }) => receive(data, host);
     port.onerror = (e) => log('error', `Extension host: ${e.message || e}`);
     hosts.push(host);
-    port.postMessage({ type: 'init', host: 'web', workspaceRoot: root, configuration: init.configuration || {}, state: init.state || {}, extensions });
+    port.postMessage({ type: 'init', host: 'web', workspaceRoot: root, configuration: init.configuration || {}, state: init.state || {}, themeKind: themeKind(), extensions });
   }
   if (!hosts.length) return;
   const path = app.current();
@@ -327,7 +327,7 @@ function receive(message, host) {
       return;
     }
     case 'notify':
-      onNotify(message.method, message.params || {});
+      onNotify(message.method, message.params || {}, host);
       return;
     case 'request': {
       const handler = requests[message.method];
@@ -341,7 +341,7 @@ function receive(message, host) {
   }
 }
 
-function onNotify(method, params) {
+function onNotify(method, params, host) {
   if (method === 'log') log(params.level, params.text);
   if (method === 'output') channelOutput(params.channel, params.op, params.text);
   if (method === 'treeChanged') app.native({ cmd: 'extViewChanged', viewId: params.viewId }).catch(() => {});
@@ -350,6 +350,15 @@ function onNotify(method, params) {
   if (method === 'taskEnd') channelOutput('Tasks', 'append', `\n${params.label || 'Task'} finished${params.code ? ` with exit code ${params.code}` : ''}.\n`);
   if (method === 'statusItem') {
     if (params.text) statusItems.set(params.id, params); else statusItems.delete(params.id);
+    renderStatus();
+  }
+  // withProgress: shown as a status bar item until the task ends (tap to cancel, if it can be).
+  if (method === 'progress') {
+    if (params.done) statusItems.delete(params.id);
+    else {
+      const text = ['$(loading~spin)', params.title, params.message].filter(Boolean).join(' ') + (params.percent != null ? ` ${params.percent}%` : '');
+      statusItems.set(params.id, { id: params.id, text, tooltip: params.cancellable ? 'Tap to cancel' : '', progress: true, cancellable: params.cancellable, host, alignment: 1, priority: 1e6 });
+    }
     renderStatus();
   }
   if (method === 'webview') showWebview(params);
@@ -387,15 +396,30 @@ function renderStatus() {
     pos.before(bar);
   }
   bar.textContent = '';
-  for (const item of statusItems.values()) {
+  // Left-aligned items first; higher priority further left (VS Code's order).
+  const sorted = [...statusItems.values()].sort((a, b) => ((a.alignment || 1) - (b.alignment || 1)) || ((b.priority || 0) - (a.priority || 0)));
+  for (const item of sorted) {
     const el = document.createElement('button');
     el.className = 'ext-status-item';
     el.textContent = item.text.replace(/\$\(([\w-]+)(~spin)?\)/g, (_, icon) => ICON_TEXT[icon] || '');
     el.title = item.tooltip || '';
-    if (item.command) el.onclick = () => runCommand(item.command);
+    const color = themeColor(item.color);
+    if (color) el.style.color = color;
+    const background = { 'statusBarItem.errorBackground': '#c72e0f', 'statusBarItem.warningBackground': '#7a6400', 'statusBarItem.prominentBackground': 'rgba(255, 255, 255, .15)' }[item.background];
+    if (background) { el.style.background = background; el.style.color = '#fff'; }
+    if (item.progress) {
+      if (item.cancellable) el.onclick = () => item.host.port.postMessage({ type: 'progressCancel', id: item.id });
+      else el.disabled = true;
+    } else if (item.command) el.onclick = () => runCommand(item.command, ...(item.args || []));
     else el.disabled = true;
     bar.append(el);
   }
+}
+/** A colour as a CSS value: '#rrggbb', or a theme colour id ('errorForeground'). */
+function themeColor(color) {
+  if (!color) return '';
+  if (/^(#|rgb|hsl)/.test(color)) return color;
+  return THEME_COLORS[color] || '';
 }
 const ICON_TEXT = { check: '✓', error: '⊗', warning: '⚠', info: 'ⓘ', sync: '⟳', loading: '⟳', gear: '⚙', bell: '🔔', zap: '⚡', 'circle-slash': '⊘', play: '▶', debug: '🐞' };
 
@@ -465,11 +489,31 @@ const requests = {
     }
     return { written };
   },
-  async findFiles({ pattern }) {
+  async findFiles({ pattern, exclude }) {
     const files = (await app.native({ cmd: 'list' })) || [];
-    const re = globToRegExp(pattern.replace(/^\.?\//, ''));
-    return files.filter((f) => re.test(f) || (!pattern.includes('/') && re.test(f.split('/').pop())));
+    const test = (glob) => {
+      const re = globToRegExp(glob.replace(/^\.?\//, ''));
+      return (f) => re.test(f) || (!glob.includes('/') && re.test(f.split('/').pop()));
+    };
+    const included = test(pattern);
+    const excluded = exclude ? test(exclude) : () => false;
+    return files.filter((f) => included(f) && !excluded(f));
   },
+  secret: (params) => app.native({ cmd: 'extSecret', ...params }),
+  terminalSend: ({ text, fresh }) => app.runInTerminal(text, fresh),
+  terminalShow: () => app.runInTerminal('', false).then(() => true),
+  closeQuickInput: () => { closeQuickInput(); return true; },
+  // TextEditor.selection set by an extension.
+  select({ uri, anchor, active }) {
+    if (pathFor(uri) !== app.current()) return false;
+    const doc = app.view.state.doc;
+    const from = offsetAt(doc, anchor);
+    const to = offsetAt(doc, active);
+    app.view.dispatch({ selection: { anchor: from, head: to }, effects: EditorView.scrollIntoView(to, { y: 'nearest' }) });
+    return true;
+  },
+  showVirtualDocument: ({ uri, text, languageId }) => app.showVirtual(uri, text, languageId),
+  builtinCommandList: () => app.builtinCommands().map((c) => c.command),
   extFile: ({ id, path }) => app.native({ cmd: 'extRead', id, path, binary: true }),
   fs: ({ op, uri, to, base64 }) => app.native({ cmd: 'fs', op, path: pathFor(uri), to: to && pathFor(to), base64 }),
   saveState: ({ key, value }) => app.native({ cmd: 'extSaveState', key, value }),
@@ -517,6 +561,24 @@ export function didChange(path, getText) {
   changeTimer = setTimeout(() => post({ type: 'docChange', uri: uriFor(path), text: getText(), version: ++version }), 250);
 }
 export function didSave(path) { post({ type: 'docSave', uri: uriFor(path) }); }
+
+/** A file or folder the app created, deleted ('delete') or moved ('rename', to): extensions' file
+ * watchers hear. Paths are project-relative. */
+export function didChangeFile(kind, path, to) {
+  if (!hosts.length) return;
+  post({ type: 'fileEvent', kind, uri: uriFor(path), to: to ? uriFor(to) : undefined });
+}
+
+/** ColorThemeKind: 1 light, 2 dark. */
+const themeKind = () => (document.documentElement.style.colorScheme === 'light' ? 1 : 2);
+let lastThemeKind = 0;
+/** The theme changed: extensions' activeColorTheme follows. */
+export function didChangeTheme() {
+  const kind = themeKind();
+  if (kind === lastThemeKind) return;
+  lastThemeKind = kind;
+  if (hosts.length) post({ type: 'theme', kind });
+}
 let selectionTimer = 0;
 export function didSelect(path, state) {
   if (!hosts.length) return;
@@ -625,7 +687,10 @@ const extensionLint = linter((view) => {
       const key = `${from}-${to}\0${d.message}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      out.push({ from, to, severity: SEVERITIES[d.severity] || 'error', message: d.message, source: d.source });
+      // Unnecessary (1) code shows faded and Deprecated (2) struck through, as in VS Code.
+      const tags = d.tags || [];
+      const markClass = [tags.includes(1) ? 'cm-ext-unnecessary' : '', tags.includes(2) ? 'cm-ext-deprecated' : ''].filter(Boolean).join(' ') || undefined;
+      out.push({ from, to, severity: SEVERITIES[d.severity] || 'error', message: d.code ? `${d.message} (${d.code})` : d.message, source: d.source, markClass });
     }
   }
   return out;
@@ -875,6 +940,10 @@ export function hostExtensions() {
     hover,
     extensionLint,
     decorationLayer,
+    EditorView.baseTheme({
+      '.cm-ext-unnecessary': { opacity: '.6', backgroundImage: 'none !important' },
+      '.cm-ext-deprecated': { textDecoration: 'line-through' },
+    }),
     keymap.of([
       { key: 'Shift-Alt-f', run: () => { formatDocument(); return true; } },
 

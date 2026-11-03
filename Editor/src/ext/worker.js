@@ -137,12 +137,29 @@ class TextEdit {
   static delete(range) { return new TextEdit(range, ''); }
 }
 
+/** A snippet's text without its tab stops and placeholders ("${1:x}" -> "x"), for edits that can't be snippets. */
+function snippetText(value) {
+  let text = String(value);
+  for (let i = 0; i < 5; i++) text = text.replace(/\$\{\d+:([^{}]*)\}/g, '$1').replace(/\$\{\d+\|([^,|]*)[^}]*\|\}/g, '$1');
+  return text.replace(/\$\{\d+\}|\$\d+/g, '').replace(/\\([$}\\])/g, '$1');
+}
+
 class WorkspaceEdit {
-  constructor() { this._edits = []; }
+  constructor() { this._edits = []; this._files = []; }
   replace(uri, range, newText) { this._edits.push({ uri, edit: new TextEdit(range, newText) }); }
   insert(uri, position, text) { this.replace(uri, new Range(position, position), text); }
   delete(uri, range) { this.replace(uri, range, ''); }
-  set(uri, edits) { for (const e of edits || []) this._edits.push({ uri, edit: e }); }
+  set(uri, edits) {
+    for (const e of edits || []) {
+      // [edit, metadata] pairs, and snippet edits (as plain text).
+      const edit = Array.isArray(e) ? e[0] : e;
+      if (edit && edit.snippet) this._edits.push({ uri, edit: new TextEdit(edit.range, snippetText(edit.snippet.value ?? edit.snippet)) });
+      else if (edit && edit.range) this._edits.push({ uri, edit });
+    }
+  }
+  createFile(uri, options = {}) { this._files.push({ op: 'create', uri, options }); }
+  deleteFile(uri, options = {}) { this._files.push({ op: 'delete', uri, options }); }
+  renameFile(oldUri, newUri, options = {}) { this._files.push({ op: 'rename', uri: oldUri, to: newUri, options }); }
   has(uri) { return this._edits.some((e) => e.uri.toString() === uri.toString()); }
   entries() {
     const map = new Map();
@@ -153,7 +170,7 @@ class WorkspaceEdit {
     }
     return [...map.values()];
   }
-  get size() { return this.entries().length; }
+  get size() { return this.entries().length + this._files.length; }
 }
 
 class MarkdownString {
@@ -179,6 +196,32 @@ class Hover { constructor(contents, range) { this.contents = Array.isArray(conte
 const DiagnosticSeverity = { Error: 0, Warning: 1, Information: 2, Hint: 3 };
 class Diagnostic {
   constructor(range, message, severity = DiagnosticSeverity.Error) { this.range = range; this.message = message; this.severity = severity; }
+}
+class DiagnosticRelatedInformation { constructor(location, message) { this.location = location; this.message = message; } }
+class CancellationError extends Error { constructor() { super('Canceled'); this.name = 'Canceled'; } }
+class FileDecoration { constructor(badge, tooltip, color) { Object.assign(this, { badge, tooltip, color, propagate: false }); } }
+class CallHierarchyIncomingCall { constructor(item, fromRanges) { this.from = item; this.fromRanges = fromRanges; } }
+class CallHierarchyOutgoingCall { constructor(item, fromRanges) { this.to = item; this.fromRanges = fromRanges; } }
+class TerminalLink { constructor(startIndex, length, tooltip) { Object.assign(this, { startIndex, length, tooltip }); } }
+class TerminalProfile { constructor(options) { this.options = options; } }
+class TimelineItem { constructor(label, timestamp) { this.label = label; this.timestamp = timestamp; } }
+class TelemetryTrustedValue { constructor(value) { this.value = value; } }
+class DebugAdapterServer { constructor(port, host) { this.port = port; this.host = host; } }
+class DebugAdapterNamedPipeServer { constructor(path) { this.path = path; } }
+class TestTag { constructor(id) { this.id = id; } }
+class TestRunRequest { constructor(include, exclude, profile, continuous) { Object.assign(this, { include, exclude, profile, continuous }); } }
+class TestCoverageCount { constructor(covered, total) { this.covered = covered; this.total = total; } }
+class LanguageModelError extends Error {
+  constructor(message, code = 'Unknown') { super(message); this.code = code; }
+  static NoPermissions(m) { return new LanguageModelError(m || 'No permission', 'NoPermissions'); }
+  static Blocked(m) { return new LanguageModelError(m || 'Blocked', 'Blocked'); }
+  static NotFound(m) { return new LanguageModelError(m || 'No language models', 'NotFound'); }
+}
+class LanguageModelTextPart { constructor(value) { this.value = value; } }
+class LanguageModelChatMessage {
+  constructor(role, content, name) { Object.assign(this, { role, content: typeof content === 'string' ? [new LanguageModelTextPart(content)] : content, name }); }
+  static User(content, name) { return new LanguageModelChatMessage(1, content, name); }
+  static Assistant(content, name) { return new LanguageModelChatMessage(2, content, name); }
 }
 class Location { constructor(uri, rangeOrPosition) { this.uri = uri; this.range = rangeOrPosition instanceof Position ? new Range(rangeOrPosition, rangeOrPosition) : rangeOrPosition; } }
 const SymbolKind = { File: 0, Module: 1, Namespace: 2, Package: 3, Class: 4, Method: 5, Property: 6, Field: 7, Constructor: 8, Enum: 9, Interface: 10, Function: 11, Variable: 12, Constant: 13, String: 14, Number: 15, Boolean: 16, Array: 17, Object: 18, Key: 19, Null: 20, EnumMember: 21, Struct: 22, Event: 23, Operator: 24, TypeParameter: 25 };
@@ -365,6 +408,23 @@ const enums = {
   FileChangeType: { Changed: 1, Created: 2, Deleted: 3 },
   FilePermission: { Readonly: 1 },
   LogLevel: { Off: 0, Trace: 1, Debug: 2, Info: 3, Warning: 4, Error: 5 },
+  TextEditorSelectionChangeKind: { Keyboard: 1, Mouse: 2, Command: 3 },
+  InlineCompletionTriggerKind: { Invoke: 0, Automatic: 1 },
+  InputBoxValidationSeverity: { Info: 1, Warning: 2, Error: 3 },
+  TerminalLocation: { Panel: 1, Editor: 2 },
+  TerminalExitReason: { Unknown: 0, Shutdown: 1, Process: 2, User: 3, Extension: 4 },
+  TerminalShellExecutionCommandLineConfidence: { Low: 0, Medium: 1, High: 2 },
+  CommentThreadState: { Unresolved: 0, Resolved: 1 },
+  CommentThreadApplicability: { Current: 0, Outdated: 1 },
+  DebugConsoleMode: { Separate: 0, MergeWithParent: 1 },
+  DebugConfigurationProviderTriggerKind: { Initial: 1, Dynamic: 2 },
+  SourceControlInputBoxValidationType: { Error: 0, Warning: 1, Information: 2 },
+  LanguageModelChatMessageRole: { User: 1, Assistant: 2 },
+  ChatResultFeedbackKind: { Unhelpful: 0, Helpful: 1 },
+  SyntaxTokenType: { Other: 0, Comment: 1, String: 2, RegEx: 3 },
+  TextDocumentChangeReasonKind: { Undo: 1, Redo: 2 },
+  TestMessageStackFrame: undefined,
+  PortAutoForwardAction: { Notify: 1, OpenBrowser: 2, OpenPreview: 3, Silent: 4, Ignore: 5 },
 };
 
 // MARK: - Documents
@@ -380,6 +440,7 @@ const onDidChangeConfiguration = new EventEmitter();
 const onDidChangeVisibleTextEditors = new EventEmitter();
 const onDidChangeDiagnostics = new EventEmitter();
 const onDidChangeTabs = new EventEmitter();
+const onDidChangeActiveColorTheme = new EventEmitter();
 
 /** The editor's tabs as VS Code's tab group: one tab per open document. */
 function tabGroup() {
@@ -396,6 +457,26 @@ const diagnosticCollections = new Set();   // each collection's uri -> Diagnosti
 let collectionId = 0;
 let workspaceRoot = '/';
 let activeEditor;
+let themeKind = 2;
+const contentProviders = new Map();   // scheme -> TextDocumentContentProvider
+const languageStatusItems = new Set();
+
+/** Language status items show while the open file matches their selector. */
+function updateLanguageStatus() {
+  for (const item of languageStatusItems) {
+    const show = activeEditor && matches(item.selector, activeEditor.document) > 0;
+    if (show) item.show(); else item.hide();
+  }
+}
+
+/** A language for a path by its extension, for virtual documents. */
+function languageFor(path) {
+  const ext = (path.split('.').pop() || '').toLowerCase();
+  for (const e of extensions.values()) {
+    for (const lang of e.manifest.contributes?.languages || []) if ((lang.extensions || []).includes('.' + ext)) return lang.id;
+  }
+  return { js: 'javascript', ts: 'typescript', json: 'json', md: 'markdown', lua: 'lua', py: 'python', html: 'html', css: 'css', diff: 'diff' }[ext] || 'plaintext';
+}
 
 class TextDocument {
   constructor(uri, languageId, text, version) {
@@ -663,7 +744,7 @@ async function activate(ext) {
       asAbsolutePath: (p) => Uri.joinPath(extensionUri, p).fsPath,
       globalState: memento(`global:${ext.id}`),
       workspaceState: memento(`workspace:${ext.id}`),
-      secrets: { get: async () => undefined, store: async () => {}, delete: async () => {}, onDidChange: new EventEmitter().event },
+      secrets: secretStorage(ext.id),
       globalStorageUri: Uri.parse(`duocode-ext-storage://${ext.id}/global`),
       storageUri: Uri.parse(`duocode-ext-storage://${ext.id}/workspace`),
       logUri: Uri.parse(`duocode-ext-storage://${ext.id}/log`),
@@ -705,13 +786,300 @@ function activateFor(event) {
   for (const ext of extensions.values()) {
     const events = ext.manifest.activationEvents || [];
     const c = ext.manifest.contributes || {};
+    // VS Code adds these by itself (since 1.74): a contributed command, language, view or custom
+    // editor activates its extension when it's used.
     const implicit = [
       ...(c.commands || []).map((x) => 'onCommand:' + x.command),
       ...(c.languages || []).map((x) => 'onLanguage:' + x.id),
+      ...Object.values(c.views || {}).flat().map((x) => 'onView:' + x.id),
+      ...(c.customEditors || []).map((x) => 'onCustomEditor:' + x.viewType),
+      ...(c.authentication || []).map((x) => 'onAuthenticationRequest:' + x.id),
     ];
     if (events.includes(event) || implicit.includes(event) || events.includes('*')) work.push(activate(ext));
   }
   return Promise.all(work);
+}
+
+/** workspaceContains:<glob> activation: an extension starts when the project has a matching file. */
+async function activateForWorkspaceContents() {
+  const work = [];
+  for (const ext of extensions.values()) {
+    const patterns = (ext.manifest.activationEvents || []).filter((e) => e.startsWith('workspaceContains:')).map((e) => e.slice(18));
+    if (!patterns.length) continue;
+    work.push((async () => {
+      for (const pattern of patterns) {
+        const found = await request('findFiles', { pattern, maxResults: 1 }).catch(() => []);
+        if (found && found.length) { await activate(ext); return; }
+      }
+    })());
+  }
+  await Promise.all(work);
+}
+
+// MARK: - Files, watchers and secrets
+
+const fileWatchers = new Set();   // { re, events: { create, change, delete }, ignore }
+const onDidCreateFiles = new EventEmitter();
+const onDidDeleteFiles = new EventEmitter();
+const onDidRenameFiles = new EventEmitter();
+const onWillSaveTextDocument = new EventEmitter();
+
+function watcherPattern(pattern) {
+  const glob = typeof pattern === 'string' ? pattern : pattern?.pattern || '**/*';
+  const base = typeof pattern === 'object' && pattern?.base ? (typeof pattern.base === 'string' ? pattern.base : pattern.base.uri?.path || pattern.base.path) : '';
+  let re = '';
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === '*' && glob[i + 1] === '*') { re += glob[i + 2] === '/' ? '(?:.*/)?' : '.*'; i += glob[i + 2] === '/' ? 2 : 1; }
+    else if (c === '*') re += '[^/]*';
+    else if (c === '?') re += '[^/]';
+    else if (c === '{') re += '(?:';
+    else if (c === '}') re += ')';
+    else if (c === ',') re += '|';
+    else re += c.replace(/[.+^$()|[\]\\]/g, '\\$&');
+  }
+  return { re: new RegExp('(^|/)' + re + '$'), base };
+}
+
+/** A file was created, changed or deleted (by an extension, the editor or the app): watchers hear. */
+function fileEvent(kind, uri) {
+  const path = uri.path;
+  for (const w of fileWatchers) {
+    if (w.base && !path.startsWith(w.base)) continue;
+    if (!w.re.test(path)) continue;
+    if (w.ignore[kind]) continue;
+    w.events[kind].fire(uri);
+  }
+}
+
+function createFileSystemWatcher(pattern, ignoreCreate = false, ignoreChange = false, ignoreDelete = false) {
+  const { re, base } = watcherPattern(pattern);
+  const watcher = { re, base, ignore: { create: ignoreCreate, change: ignoreChange, delete: ignoreDelete },
+    events: { create: new EventEmitter(), change: new EventEmitter(), delete: new EventEmitter() } };
+  fileWatchers.add(watcher);
+  return {
+    ignoreCreateEvents: ignoreCreate, ignoreChangeEvents: ignoreChange, ignoreDeleteEvents: ignoreDelete,
+    onDidCreate: watcher.events.create.event, onDidChange: watcher.events.change.event, onDidDelete: watcher.events.delete.event,
+    dispose: () => fileWatchers.delete(watcher),
+  };
+}
+
+/** context.secrets: kept by the app (in the iOS Keychain), per extension. */
+function secretStorage(id) {
+  const changed = new EventEmitter();
+  return {
+    get: (key) => request('secret', { op: 'get', id, key }).then((v) => v ?? undefined, () => undefined),
+    store: (key, value) => request('secret', { op: 'store', id, key, value: String(value) }).then(() => changed.fire({ key })),
+    delete: (key) => request('secret', { op: 'delete', id, key }).then(() => changed.fire({ key })),
+    keys: () => request('secret', { op: 'keys', id }).then((v) => v || [], () => []),
+    onDidChange: changed.event,
+  };
+}
+
+// MARK: - Terminals
+
+const terminals = [];
+const onDidOpenTerminal = new EventEmitter();
+const onDidCloseTerminal = new EventEmitter();
+const onDidChangeActiveTerminal = new EventEmitter();
+let terminalId = 0;
+
+/** An extension's terminal: commands it sends run in a Terminal tab (the app's shell); a
+ * pseudoterminal's output goes to an Output channel of the terminal's name. */
+function createTerminal(a, b, c) {
+  const options = typeof a === 'object' && a ? a : { name: a, shellPath: b, shellArgs: c };
+  const name = options.name || 'Terminal';
+  const id = ++terminalId;
+  let fresh = true;
+  const terminal = {
+    name, creationOptions: options, processId: Promise.resolve(undefined), exitStatus: undefined,
+    state: { isInteractedWith: false, shell: undefined }, shellIntegration: undefined,
+    sendText(text, addNewLine = true) {
+      request('terminalSend', { text: String(text), fresh, name }).catch(() => {});
+      fresh = false;
+      terminal.state = { ...terminal.state, isInteractedWith: true };
+      void addNewLine;
+    },
+    show() { request('terminalShow', {}).catch(() => {}); },
+    hide() {},
+    dispose() {
+      const i = terminals.indexOf(terminal);
+      if (i >= 0) { terminals.splice(i, 1); onDidCloseTerminal.fire(terminal); }
+    },
+  };
+  const pty = options.pty;
+  if (pty) {
+    const channel = outputChannel(name);
+    if (pty.onDidWrite) pty.onDidWrite((data) => channel.append(String(data).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/\r\n?/g, '\n')));
+    if (pty.onDidClose) pty.onDidClose((code) => { terminal.exitStatus = { code, reason: 4 }; terminal.dispose(); });
+    terminal.sendText = (text) => { if (pty.handleInput) pty.handleInput(String(text) + '\r'); };
+    terminal.show = () => channel.show(true);
+    Promise.resolve().then(() => pty.open && pty.open({ columns: 80, rows: 24 }));
+  }
+  terminals.push(terminal);
+  onDidOpenTerminal.fire(terminal);
+  onDidChangeActiveTerminal.fire(terminal);
+  void id;
+  return terminal;
+}
+
+// MARK: - Quick picks and input boxes
+
+/** window.createQuickPick: shown with the items it has when show() is called (or once they arrive,
+ * while it's busy loading them); accepting fires onDidAccept with selectedItems set. */
+function createQuickPick() {
+  const accept = new EventEmitter(), hide = new EventEmitter(), changeValue = new EventEmitter(), changeActive = new EventEmitter();
+  const changeSelection = new EventEmitter(), trigger = new EventEmitter(), triggerItem = new EventEmitter();
+  let shown = false, waiting = 0, disposed = false;
+  const pick = {
+    title: undefined, step: undefined, totalSteps: undefined, enabled: true, busy: false, ignoreFocusOut: false,
+    placeholder: undefined, value: '', items: [], activeItems: [], selectedItems: [], canSelectMany: false,
+    matchOnDescription: false, matchOnDetail: false, keepScrollPosition: false, buttons: [], sortByLabel: true,
+    onDidAccept: accept.event, onDidHide: hide.event, onDidChangeValue: changeValue.event, onDidChangeActive: changeActive.event,
+    onDidChangeSelection: changeSelection.event, onDidTriggerButton: trigger.event, onDidTriggerItemButton: triggerItem.event,
+    async show() {
+      if (shown || disposed) return;
+      shown = true;
+      // Items still loading: wait for them (up to a few seconds).
+      while (!pick.items.length && waiting < 40 && !disposed) { waiting++; await new Promise((r) => setTimeout(r, 100)); }
+      const list = pick.items.filter((x) => x.kind !== -1);
+      const chosen = await request('quickPick', {
+        items: list.map((x) => ({ label: x.label, description: x.description, detail: x.detail, picked: !!x.picked })),
+        placeholder: pick.placeholder || pick.title || '', canPickMany: !!pick.canSelectMany, value: pick.value,
+      });
+      shown = false;
+      if (chosen == null) { hide.fire(); return; }
+      pick.selectedItems = Array.isArray(chosen) ? chosen.map((i) => list[i]) : [list[chosen]];
+      pick.activeItems = pick.selectedItems;
+      changeSelection.fire(pick.selectedItems);
+      accept.fire();
+    },
+    hide() { request('closeQuickInput', {}).catch(() => {}); },
+    dispose() { disposed = true; },
+  };
+  return pick;
+}
+
+function createInputBox() {
+  const accept = new EventEmitter(), hide = new EventEmitter(), changeValue = new EventEmitter(), trigger = new EventEmitter();
+  let disposed = false;
+  const box = {
+    title: undefined, step: undefined, totalSteps: undefined, enabled: true, busy: false, ignoreFocusOut: false,
+    value: '', valueSelection: undefined, placeholder: undefined, password: false, prompt: undefined,
+    validationMessage: undefined, buttons: [],
+    onDidAccept: accept.event, onDidHide: hide.event, onDidChangeValue: changeValue.event, onDidTriggerButton: trigger.event,
+    async show() {
+      if (disposed) return;
+      const value = await request('inputBox', {
+        prompt: [box.validationMessage?.message ?? box.validationMessage, box.prompt || box.title].filter(Boolean).join(' — '),
+        value: box.value || '', placeholder: box.placeholder || '', password: !!box.password,
+      });
+      if (value == null) { hide.fire(); return; }
+      box.value = value;
+      changeValue.fire(value);
+      accept.fire();
+    },
+    hide() { request('closeQuickInput', {}).catch(() => {}); },
+    dispose() { disposed = true; },
+  };
+  return box;
+}
+
+// MARK: - Progress
+
+let progressId = 0;
+
+/** window.withProgress: the title, message and percentage in the status bar (tap to cancel). */
+async function withProgress(options, task) {
+  const id = `${HOST}-progress-${++progressId}`;
+  const source = new CancellationTokenSource();
+  progressCancels.set(id, source);
+  let done = 0;
+  let text = '';
+  const show = () => notify('progress', { id, title: options.title || '', message: text, percent: done ? Math.round(done) : null, cancellable: !!options.cancellable });
+  show();
+  try {
+    return await task({ report(update) { if (update.message !== undefined) text = update.message; if (update.increment) done = Math.min(100, done + update.increment); show(); } }, source.token);
+  } finally {
+    progressCancels.delete(id);
+    notify('progress', { id, done: true });
+  }
+}
+const progressCancels = new Map();
+
+// MARK: - Source control
+
+const sourceControls = new Set();
+
+function createSourceControl(id, label, rootUri) {
+  const groups = [];
+  const control = {
+    id, label, rootUri,
+    inputBox: { value: '', placeholder: '', enabled: true, visible: true, validateInput: undefined },
+    count: undefined, quickDiffProvider: undefined, commitTemplate: undefined, acceptInputCommand: undefined, statusBarCommands: undefined,
+    createResourceGroup(groupId, groupLabel) {
+      const group = { id: groupId, label: groupLabel, resourceStates: [], hideWhenEmpty: false, contextValue: undefined, dispose() { groups.splice(groups.indexOf(group), 1); } };
+      groups.push(group);
+      return group;
+    },
+    dispose() { sourceControls.delete(control); },
+  };
+  sourceControls.add(control);
+  return control;
+}
+
+// MARK: - Tests, comments, chat and language models
+
+/** Test controllers keep their items so extensions work; the app doesn't show a Testing view yet. */
+function itemCollection() {
+  const items = new Map();
+  return {
+    get size() { return items.size; },
+    add(item) { items.set(item.id, item); },
+    delete(id) { items.delete(id); },
+    get: (id) => items.get(id),
+    replace(list) { items.clear(); for (const item of list) items.set(item.id, item); },
+    forEach(fn) { items.forEach((item) => fn(item, this)); },
+    [Symbol.iterator]() { return [...items.entries()][Symbol.iterator](); },
+  };
+}
+
+function createTestController(id, label) {
+  const runs = [];
+  return {
+    id, label, items: itemCollection(), resolveHandler: undefined, refreshHandler: undefined, invalidateTestResults() {},
+    createRunProfile(profileLabel, kind, runHandler, isDefault = false, tag, supportsContinuousRun = false) {
+      return { label: profileLabel, kind, runHandler, isDefault, tag, supportsContinuousRun, configureHandler: undefined, onDidChangeDefault: new EventEmitter().event, dispose() {} };
+    },
+    createTestItem(itemId, itemLabel, uri) {
+      return { id: itemId, label: itemLabel, uri, children: itemCollection(), parent: undefined, tags: [], canResolveChildren: false, busy: false, range: undefined, error: undefined, description: undefined, sortText: undefined };
+    },
+    createTestRun(request, name, persist = true) {
+      const output = outputChannel('Test Results');
+      const run = {
+        name, token: noCancel, isPersisted: persist,
+        enqueued() {}, started(t) { output.appendLine(`▶ ${t.label}`); }, skipped(t) { output.appendLine(`○ ${t.label} skipped`); },
+        passed(t, ms) { output.appendLine(`✓ ${t.label}${ms != null ? ` (${Math.round(ms)} ms)` : ''}`); },
+        failed(t, messages) { output.appendLine(`✗ ${t.label}: ${[].concat(messages || []).map((m) => plainText(m.message)).join('; ')}`); },
+        errored(t, messages) { output.appendLine(`⚠ ${t.label}: ${[].concat(messages || []).map((m) => plainText(m.message)).join('; ')}`); },
+        appendOutput(text) { output.append(String(text).replace(/\r\n/g, '\n')); }, addCoverage() {},
+        end() {}, onDidDispose: new EventEmitter().event,
+      };
+      runs.push(run);
+      return run;
+    },
+    dispose() {},
+  };
+}
+
+function createCommentController(id, label) {
+  return {
+    id, label, options: undefined, commentingRangeProvider: undefined, reactionHandler: undefined,
+    createCommentThread(uri, range, comments) {
+      return { uri, range, comments, collapsibleState: 0, canReply: true, contextValue: undefined, label: undefined, state: 0, dispose() {} };
+    },
+    dispose() {},
+  };
 }
 
 // MARK: - The vscode namespace
@@ -742,13 +1110,23 @@ function outputChannel(name) {
 let statusItemId = 0;
 function createStatusBarItem(a, b) {
   const id = `${HOST}-status-${++statusItemId}`;
-  const item = { id, text: '', tooltip: '', command: undefined, alignment: typeof a === 'number' ? a : b || 1, visible: false };
-  const update = () => notify('statusItem', { id, text: item.visible ? item.text : '', tooltip: String(item.tooltip?.value ?? item.tooltip ?? ''), command: typeof item.command === 'string' ? item.command : item.command?.command });
+  // (alignment, priority) or (id, alignment, priority).
+  const item = typeof a === 'string'
+    ? { id, text: '', tooltip: '', command: undefined, alignment: b || 1, priority: arguments[2], visible: false, name: undefined }
+    : { id, text: '', tooltip: '', command: undefined, alignment: a || 1, priority: b, visible: false, name: undefined };
+  const update = () => notify('statusItem', {
+    id, text: item.visible ? item.text : '', tooltip: String(item.tooltip?.value ?? item.tooltip ?? ''),
+    command: typeof item.command === 'string' ? item.command : item.command?.command,
+    args: typeof item.command === 'object' && item.command?.arguments ? JSON.parse(JSON.stringify(item.command.arguments)) : [],
+    alignment: item.alignment, priority: item.priority ?? 0,
+    color: item.color && typeof item.color === 'object' ? item.color.id : item.color,
+    background: item.backgroundColor && item.backgroundColor.id,
+  });
   return new Proxy(item, {
     get(t, k) {
       if (k === 'show') return () => { t.visible = true; update(); };
       if (k === 'hide') return () => { t.visible = false; update(); };
-      if (k === 'dispose') return () => { t.visible = false; update(); };
+      if (k === 'dispose') return () => { t.visible = false; update(); if (t.onDispose) t.onDispose(); };
       return t[k];
     },
     set(t, k, v) { t[k] = v; if (t.visible) update(); return true; },
@@ -776,6 +1154,9 @@ const api = {
   DebugAdapterInlineImplementation, FileSystemError, TestMessage, TabInputText, TabInputTextDiff, TabInputCustom, TabInputWebview, TabInputNotebook,
   TabInputNotebookDiff, TabInputTerminal, TabInputInteractiveWindow, QuickInputButtons,
   NotebookCellOutputItem, NotebookCellOutput, NotebookCellData, NotebookData, NotebookRange, NotebookEdit,
+  DiagnosticRelatedInformation, CancellationError, FileDecoration, CallHierarchyIncomingCall, CallHierarchyOutgoingCall, TerminalLink,
+  TerminalProfile, TimelineItem, TelemetryTrustedValue, DebugAdapterServer, DebugAdapterNamedPipeServer, TestTag, TestRunRequest,
+  TestCoverageCount, LanguageModelError, LanguageModelTextPart, LanguageModelChatMessage,
   TreeItemCheckboxState: { Unchecked: 0, Checked: 1 },
   NotebookCellKind: { Markup: 1, Code: 2 },
   NotebookEditorRevealType: { Default: 0, InCenter: 1, InCenterIfOutsideViewport: 2, AtTop: 3 },
@@ -789,32 +1170,95 @@ const api = {
   ...enums,
   commands: {
     registerCommand(name, fn, thisArg) { commands.set(name, { fn, thisArg }); return new Disposable(() => commands.delete(name)); },
+    // The edits the command makes with its edit builder are applied when it returns.
     registerTextEditorCommand(name, fn, thisArg) {
-      commands.set(name, { fn: (...args) => fn.call(thisArg, activeEditor, { replace: () => {}, insert: () => {}, delete: () => {} }, ...args) });
+      commands.set(name, {
+        fn: async (...args) => {
+          if (!activeEditor) return undefined;
+          const edits = [];
+          const builder = {
+            replace: (r, t) => edits.push({ range: r instanceof Position ? new Range(r, r) : r, newText: t }),
+            insert: (p, t) => edits.push({ range: new Range(p, p), newText: t }),
+            delete: (r) => edits.push({ range: r, newText: '' }),
+            setEndOfLine() {},
+          };
+          const result = await fn.call(thisArg, activeEditor, builder, ...args);
+          if (edits.length) await request('applyEdit', { changes: [{ uri: activeEditor.document.uri.toString(), edits }] });
+          return result;
+        },
+      });
       return new Disposable(() => commands.delete(name));
     },
     executeCommand: (name, ...args) => executeCommand(name, args),
-    getCommands: async () => [...commands.keys()],
+    async getCommands(filterInternal) {
+      const contributed = [...extensions.values()].flatMap((ext) => (ext.manifest.contributes?.commands || []).map((c) => c.command));
+      const builtins = (await request('builtinCommandList', {}).catch(() => [])) || [];
+      const all = [...new Set([...commands.keys(), ...contributed, ...builtins])];
+      return filterInternal ? all.filter((c) => !c.startsWith('_')) : all;
+    },
   },
   window: {
     showInformationMessage: message('info'),
     showWarningMessage: message('warning'),
     showErrorMessage: message('error'),
     async showQuickPick(items, options = {}) {
-      const list = await items;
-      const labels = list.map((x) => (typeof x === 'string' ? { label: x } : { label: x.label, description: x.description, detail: x.detail }));
+      // Separators (kind -1) aren't choices.
+      const list = (await items).filter((x) => typeof x === 'string' || x.kind !== -1);
+      const labels = list.map((x) => (typeof x === 'string' ? { label: x } : { label: x.label, description: x.description, detail: x.detail, picked: !!x.picked }));
       const chosen = await request('quickPick', { items: labels, placeholder: options.placeHolder || options.title || '', canPickMany: !!options.canPickMany });
       if (chosen == null) return undefined;
-      return Array.isArray(chosen) ? chosen.map((i) => list[i]) : list[chosen];
+      const picked = Array.isArray(chosen) ? chosen.map((i) => list[i]) : list[chosen];
+      if (options.onDidSelectItem && !Array.isArray(picked)) options.onDidSelectItem(picked);
+      return picked;
     },
+    // validateInput: asked again, with the problem shown, until the value is fine or it's cancelled.
     async showInputBox(options = {}) {
-      const value = await request('inputBox', { prompt: options.prompt || options.title || '', value: options.value || '', placeholder: options.placeHolder || '', password: !!options.password });
-      if (value != null && options.validateInput) {
-        const problem = await options.validateInput(value);
-        if (problem) { await message('error')(typeof problem === 'string' ? problem : problem.message); return undefined; }
+      let value = options.value || '';
+      let problem = '';
+      for (;;) {
+        const answer = await request('inputBox', { prompt: [problem, options.prompt || options.title || ''].filter(Boolean).join(' — '), value, placeholder: options.placeHolder || '', password: !!options.password });
+        if (answer == null) return undefined;
+        if (!options.validateInput) return answer;
+        const result = await options.validateInput(answer);
+        const text = typeof result === 'string' ? result : result?.message;
+        // Warnings and information don't stop it.
+        if (!text || (typeof result === 'object' && result.severity && result.severity < 3)) return answer;
+        problem = '⚠ ' + text;
+        value = answer;
       }
-      return value ?? undefined;
     },
+    createQuickPick,
+    createInputBox,
+    async showOpenDialog(options = {}) {
+      const folders = options.canSelectFolders && !options.canSelectFiles;
+      const files = (await request('findFiles', { pattern: '**/*' }).catch(() => [])) || [];
+      const filters = Object.values(options.filters || {}).flat().map((x) => '.' + String(x).toLowerCase());
+      const choices = folders ? [...new Set(files.map((f) => f.split('/').slice(0, -1).join('/')).filter(Boolean))].sort()
+        : files.filter((f) => !filters.length || filters.some((x) => f.toLowerCase().endsWith(x)));
+      const chosen = await request('quickPick', { items: [...(folders ? ['.'] : []), ...choices].map((label) => ({ label })), placeholder: options.title || options.openLabel || 'Open', canPickMany: !!options.canSelectMany });
+      if (chosen == null) return undefined;
+      const all = [...(folders ? ['.'] : []), ...choices];
+      return [].concat(chosen).map((i) => Uri.file(workspaceRoot + (all[i] === '.' ? '' : '/' + all[i])));
+    },
+    async showSaveDialog(options = {}) {
+      const suggested = options.defaultUri ? vscode.workspace.asRelativePath(options.defaultUri) : '';
+      const path = await request('inputBox', { prompt: options.title || options.saveLabel || 'Save as (a path in the project)', value: suggested, placeholder: 'folder/file.txt' });
+      return path ? Uri.file(workspaceRoot + '/' + String(path).replace(/^\/+/, '')) : undefined;
+    },
+    showWorkspaceFolderPick: async () => vscode.workspace.workspaceFolders[0],
+    get terminals() { return [...terminals]; },
+    get activeTerminal() { return terminals[terminals.length - 1]; },
+    onDidOpenTerminal: onDidOpenTerminal.event,
+    onDidCloseTerminal: onDidCloseTerminal.event,
+    onDidChangeActiveTerminal: onDidChangeActiveTerminal.event,
+    onDidChangeTerminalState: new EventEmitter().event,
+    onDidChangeTerminalShellIntegration: new EventEmitter().event,
+    onDidStartTerminalShellExecution: new EventEmitter().event,
+    onDidEndTerminalShellExecution: new EventEmitter().event,
+    visibleNotebookEditors: [],
+    activeNotebookEditor: undefined,
+    onDidChangeVisibleNotebookEditors: new EventEmitter().event,
+    onDidChangeActiveNotebookEditor: new EventEmitter().event,
     createOutputChannel: (name) => outputChannel(name),
     createStatusBarItem,
     setStatusBarMessage(text, timeout) {
@@ -825,10 +1269,7 @@ const api = {
       else if (timeout && timeout.then) timeout.then(() => d.dispose());
       return d;
     },
-    async withProgress(options, task) {
-      const item = options.title ? vscode.window.setStatusBarMessage('⏳ ' + options.title) : null;
-      try { return await task({ report() {} }, noCancel); } finally { if (item) item.dispose(); }
-    },
+    withProgress,
     get activeTextEditor() { return activeEditor; },
     get visibleTextEditors() { return activeEditor ? [activeEditor] : []; },
     onDidChangeActiveTextEditor: onDidChangeActiveTextEditor.event,
@@ -837,14 +1278,26 @@ const api = {
     onDidChangeTextEditorVisibleRanges: new EventEmitter().event,
     onDidChangeWindowState: new EventEmitter().event,
     state: { focused: true, active: true },
-    activeColorTheme: { kind: enums.ColorThemeKind.Dark },
-    onDidChangeActiveColorTheme: new EventEmitter().event,
+    get activeColorTheme() { return { kind: themeKind }; },
+    onDidChangeActiveColorTheme: onDidChangeActiveColorTheme.event,
     createTextEditorDecorationType(options) {
       const key = HOST + '-dec-' + (++decorationTypeId);
       notify('decorationType', { key, options: plainOptions(options) });
       return { key, dispose: () => notify('decorationType', { key, options: null }) };
     },
-    showTextDocument: async (doc) => { await request('openFile', { uri: (doc.uri || doc).toString() }); return activeEditor; },
+    async showTextDocument(doc, options) {
+      const uri = (doc.uri || doc).toString();
+      // A virtual document (a content provider's): shown read-only.
+      if (!uri.startsWith('file:')) {
+        const virtual = doc.getText ? doc : await vscode.workspace.openTextDocument(doc);
+        await request('showVirtualDocument', { uri, text: virtual.getText(), languageId: virtual.languageId });
+        return activeEditor;
+      }
+      await request('openFile', { uri });
+      const selection = options && !(typeof options === 'number') ? options.selection : undefined;
+      if (selection && activeEditor) activeEditor.selection = new Selection(selection.start, selection.end);
+      return activeEditor;
+    },
     registerTreeDataProvider: (viewId, provider) => { const view = createTreeView(viewId, { treeDataProvider: provider }); return new Disposable(() => view.dispose()); },
     createTreeView,
     registerWebviewViewProvider(viewId, provider, options) {
@@ -858,7 +1311,7 @@ const api = {
     },
     registerUriHandler: () => new Disposable(),
     createWebviewPanel: (viewType, title, showOptions, options) => createWebviewPanel(viewType, title, options),
-    createTerminal: () => { throw new Error('Terminals aren\'t available on iOS.'); },
+    createTerminal,
     tabGroups: {
       get all() { return [tabGroup()]; },
       get activeTabGroup() { return tabGroup(); },
@@ -880,21 +1333,56 @@ const api = {
     onDidCloseTextDocument: onDidCloseTextDocument.event,
     onDidChangeTextDocument: onDidChangeTextDocument.event,
     onDidSaveTextDocument: onDidSaveTextDocument.event,
-    onWillSaveTextDocument: new EventEmitter().event,
+    onWillSaveTextDocument: onWillSaveTextDocument.event,
     onDidChangeWorkspaceFolders: new EventEmitter().event,
-    onDidCreateFiles: new EventEmitter().event,
-    onDidDeleteFiles: new EventEmitter().event,
-    onDidRenameFiles: new EventEmitter().event,
+    onDidCreateFiles: onDidCreateFiles.event,
+    onDidDeleteFiles: onDidDeleteFiles.event,
+    onDidRenameFiles: onDidRenameFiles.event,
+    onWillCreateFiles: new EventEmitter().event,
+    onWillDeleteFiles: new EventEmitter().event,
+    onWillRenameFiles: new EventEmitter().event,
     async openTextDocument(arg) {
       if (arg && arg.content !== undefined) return new TextDocument(Uri.parse('untitled:Untitled'), arg.language || 'plaintext', arg.content, 1);
       const uri = typeof arg === 'string' ? Uri.file(arg) : arg;
       const open = documents.get(uri.toString());
       if (open) return open;
+      // A virtual document from an extension's content provider.
+      const provider = contentProviders.get(uri.scheme);
+      if (provider) {
+        const text = (await provider.provideTextDocumentContent(uri, noCancel)) || '';
+        const doc = new TextDocument(uri, languageFor(uri.path), text, 1);
+        documents.set(uri.toString(), doc);
+        onDidOpenTextDocument.fire(doc);
+        return doc;
+      }
       const { text, languageId } = await request('readDocument', { uri: uri.toString() });
       return new TextDocument(uri, languageId, text, 1);
     },
     async applyEdit(edit) {
+      // File operations first, in order, then text edits.
+      for (const op of edit._files || []) {
+        const fs = vscode.workspace.fs;
+        try {
+          if (op.op === 'create') {
+            const exists = await fs.stat(op.uri).then(() => true, () => false);
+            if (exists && op.options.ignoreIfExists) continue;
+            if (exists && !op.options.overwrite) return false;
+            await fs.writeFile(op.uri, op.options.contents || new Uint8Array());
+          } else if (op.op === 'delete') {
+            const exists = await fs.stat(op.uri).then(() => true, () => false);
+            if (!exists) { if (op.options.ignoreIfNotExists) continue; return false; }
+            await fs.delete(op.uri, { recursive: !!op.options.recursive });
+          } else if (op.op === 'rename') {
+            if (!op.options.overwrite && await fs.stat(op.to).then(() => true, () => false)) { if (op.options.ignoreIfExists) continue; return false; }
+            await fs.rename(op.uri, op.to, { overwrite: !!op.options.overwrite });
+            onDidRenameFiles.fire({ files: [{ oldUri: op.uri, newUri: op.to }] });
+          }
+        } catch (e) {
+          return false;
+        }
+      }
       const changes = edit.entries().map(([uri, edits]) => ({ uri: uri.toString(), edits: edits.map((e) => ({ range: e.range, newText: e.newText })) }));
+      if (!changes.length) return true;
       const result = await request('applyEdit', { changes });
       for (const uri of (result && result.written) || []) {
         const doc = documents.get(uri);
@@ -903,14 +1391,39 @@ const api = {
       }
       return !!result;
     },
-    async findFiles(include) {
+    async findFiles(include, exclude, maxResults) {
       const pattern = typeof include === 'string' ? include : include?.pattern || '**/*';
-      const paths = await request('findFiles', { pattern });
+      const base = typeof include === 'object' && include?.base ? (typeof include.base === 'string' ? include.base : include.base.uri?.path || include.base.path) : '';
+      const prefix = base && base.startsWith(workspaceRoot + '/') ? base.slice(workspaceRoot.length + 1) + '/' : '';
+      const excludePattern = typeof exclude === 'string' ? exclude : exclude?.pattern;
+      let paths = await request('findFiles', { pattern: prefix + pattern, exclude: excludePattern || null });
+      if (maxResults) paths = paths.slice(0, maxResults);
       return paths.map((p) => Uri.file(workspaceRoot + '/' + p));
     },
+    async save(uri) { await request('save', { uri: uri.toString() }); return uri; },
+    async saveAll() { await request('save', {}); return true; },
+    async saveAs(uri) { return vscode.window.showSaveDialog({ defaultUri: uri }); },
+    updateWorkspaceFolders: () => false,
+    workspaceFile: undefined,
+    decode: async (content) => new TextDecoder().decode(content),
+    encode: async (text) => new TextEncoder().encode(text),
     asRelativePath(x) { const p = typeof x === 'string' ? x : x.path; return p.startsWith(workspaceRoot + '/') ? p.slice(workspaceRoot.length + 1) : p; },
-    createFileSystemWatcher: () => ({ onDidCreate: new EventEmitter().event, onDidChange: new EventEmitter().event, onDidDelete: new EventEmitter().event, dispose() {} }),
-    registerTextDocumentContentProvider: () => new Disposable(),
+    createFileSystemWatcher,
+    registerTextDocumentContentProvider(scheme, provider) {
+      contentProviders.set(scheme, provider);
+      // A changed virtual document is read again.
+      const changes = provider.onDidChange && provider.onDidChange(async (uri) => {
+        const doc = documents.get(uri.toString());
+        if (!doc) return;
+        const text = (await provider.provideTextDocumentContent(uri, noCancel)) || '';
+        const oldEnd = doc.positionAt(doc._text.length);
+        const oldLength = doc._text.length;
+        doc._set(text);
+        doc.version++;
+        onDidChangeTextDocument.fire({ document: doc, contentChanges: [{ range: new Range(new Position(0, 0), oldEnd), rangeOffset: 0, rangeLength: oldLength, text }], reason: undefined });
+      });
+      return new Disposable(() => { contentProviders.delete(scheme); if (changes) changes.dispose(); });
+    },
     registerFileSystemProvider: () => new Disposable(),
     isTrusted: true,
     onDidGrantWorkspaceTrust: new EventEmitter().event,
@@ -922,11 +1435,16 @@ const api = {
         const base64 = await request('fs', { op: 'read', uri: uri.toString() });
         return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
       },
-      writeFile: (uri, bytes) => {
-        if (nodeFs) return nodeFs.mkdir(nodeRequire('path').dirname(uri.fsPath), { recursive: true }).then(() => nodeFs.writeFile(uri.fsPath, bytes));
-        let binary = '';
-        for (const b of bytes) binary += String.fromCharCode(b);
-        return request('fs', { op: 'write', uri: uri.toString(), base64: btoa(binary) });
+      writeFile: async (uri, bytes) => {
+        const existed = await vscode.workspace.fs.stat(uri).then(() => true, () => false);
+        if (nodeFs) await nodeFs.mkdir(nodeRequire('path').dirname(uri.fsPath), { recursive: true }).then(() => nodeFs.writeFile(uri.fsPath, bytes));
+        else {
+          let binary = '';
+          for (const b of bytes) binary += String.fromCharCode(b);
+          await request('fs', { op: 'write', uri: uri.toString(), base64: btoa(binary) });
+        }
+        fileEvent(existed ? 'change' : 'create', uri);
+        if (!existed) onDidCreateFiles.fire({ files: [uri] });
       },
       stat: async (uri) => {
         if (nodeFs) {
@@ -945,9 +1463,23 @@ const api = {
         return entries.map((e) => [e.name, e.isDirectory() ? enums.FileType.Directory : enums.FileType.File]);
       },
       createDirectory: (uri) => (nodeFs ? nodeFs.mkdir(uri.fsPath, { recursive: true }) : request('fs', { op: 'mkdir', uri: uri.toString() })),
-      delete: (uri, options) => (nodeFs ? nodeFs.rm(uri.fsPath, { recursive: !!(options && options.recursive), force: false }) : request('fs', { op: 'delete', uri: uri.toString() })),
-      rename: (from, to) => (nodeFs ? nodeFs.rename(from.fsPath, to.fsPath) : request('fs', { op: 'rename', uri: from.toString(), to: to.toString() })),
-      copy: async (from, to) => vscode.workspace.fs.writeFile(to, await vscode.workspace.fs.readFile(from)),
+      delete: async (uri, options) => {
+        await (nodeFs ? nodeFs.rm(uri.fsPath, { recursive: !!(options && options.recursive), force: false }) : request('fs', { op: 'delete', uri: uri.toString() }));
+        fileEvent('delete', uri);
+        onDidDeleteFiles.fire({ files: [uri] });
+      },
+      rename: async (from, to) => {
+        await (nodeFs ? nodeFs.rename(from.fsPath, to.fsPath) : request('fs', { op: 'rename', uri: from.toString(), to: to.toString() }));
+        fileEvent('delete', from);
+        fileEvent('create', to);
+      },
+      // Folders too, file by file.
+      copy: async (from, to) => {
+        const st = await vscode.workspace.fs.stat(from);
+        if (st.type !== enums.FileType.Directory) return vscode.workspace.fs.writeFile(to, await vscode.workspace.fs.readFile(from));
+        await vscode.workspace.fs.createDirectory(to);
+        for (const [name] of await vscode.workspace.fs.readDirectory(from)) await vscode.workspace.fs.copy(Uri.joinPath(from, name), Uri.joinPath(to, name));
+      },
       isWritableFileSystem: () => true,
     },
   },
@@ -956,31 +1488,53 @@ const api = {
     registerHoverProvider: (sel, provider) => addProvider('hover', sel, provider),
     registerDocumentFormattingEditProvider: (sel, provider) => addProvider('formatting', sel, provider),
     registerDocumentRangeFormattingEditProvider: (sel, provider) => addProvider('rangeFormatting', sel, provider),
-    registerOnTypeFormattingEditProvider: () => new Disposable(),
+    registerOnTypeFormattingEditProvider: (sel, provider, ...triggers) => addProvider('onTypeFormatting', sel, provider, { triggers }),
     registerDefinitionProvider: (sel, provider) => addProvider('definition', sel, provider),
     registerDocumentSymbolProvider: (sel, provider) => addProvider('symbols', sel, provider),
     registerSignatureHelpProvider: (sel, provider) => addProvider('signature', sel, provider),
     registerCodeActionsProvider: (sel, provider) => addProvider('codeActions', sel, provider),
-    registerColorProvider: () => new Disposable(),
-    registerFoldingRangeProvider: () => new Disposable(),
-    registerDocumentLinkProvider: () => new Disposable(),
+    registerColorProvider: (sel, provider) => addProvider('colors', sel, provider),
+    registerFoldingRangeProvider: (sel, provider) => addProvider('folding', sel, provider),
+    registerDocumentLinkProvider: (sel, provider) => addProvider('links', sel, provider),
     registerReferenceProvider: (sel, provider) => addProvider('references', sel, provider),
     registerRenameProvider: (sel, provider) => addProvider('rename', sel, provider),
-    registerDocumentHighlightProvider: () => new Disposable(),
+    registerDocumentHighlightProvider: (sel, provider) => addProvider('highlights', sel, provider),
     registerInlayHintsProvider: (sel, provider) => addProvider('inlayHints', sel, provider),
-    registerCodeLensProvider: () => new Disposable(),
-    registerTypeDefinitionProvider: () => new Disposable(),
-    registerImplementationProvider: () => new Disposable(),
-    registerWorkspaceSymbolProvider: () => new Disposable(),
-    registerSelectionRangeProvider: () => new Disposable(),
-    registerDocumentSemanticTokensProvider: () => new Disposable(),
-    registerInlineCompletionItemProvider: () => new Disposable(),
+    registerCodeLensProvider: (sel, provider) => addProvider('codeLens', sel, provider),
+    registerTypeDefinitionProvider: (sel, provider) => addProvider('typeDefinition', sel, provider),
+    registerImplementationProvider: (sel, provider) => addProvider('implementation', sel, provider),
+    registerWorkspaceSymbolProvider: (provider) => addProvider('workspaceSymbols', '*', provider),
+    registerDeclarationProvider: (sel, provider) => addProvider('declaration', sel, provider),
+    registerCallHierarchyProvider: (sel, provider) => addProvider('callHierarchy', sel, provider),
+    registerTypeHierarchyProvider: (sel, provider) => addProvider('typeHierarchy', sel, provider),
+    registerEvaluatableExpressionProvider: () => new Disposable(),
+    registerInlineValuesProvider: () => new Disposable(),
+    registerLinkedEditingRangeProvider: () => new Disposable(),
+    registerDocumentDropEditProvider: () => new Disposable(),
+    registerDocumentPasteEditProvider: () => new Disposable(),
+    registerDocumentRangeSemanticTokensProvider: () => new Disposable(),
+    registerSelectionRangeProvider: (sel, provider) => addProvider('selectionRanges', sel, provider),
+    registerDocumentSemanticTokensProvider: (sel, provider, legend) => addProvider('semanticTokens', sel, provider, { legend }),
+    registerInlineCompletionItemProvider: (sel, provider) => addProvider('inlineCompletions', sel, provider),
     setLanguageConfiguration: () => new Disposable(),
+    async setTextDocumentLanguage(doc, languageId) {
+      onDidCloseTextDocument.fire(doc);
+      doc.languageId = languageId;
+      onDidOpenTextDocument.fire(doc);
+      await activateFor('onLanguage:' + languageId);
+      return doc;
+    },
     createLanguageStatusItem(id, selector) {
+      // Shown in the status bar while the open file matches its selector.
       const item = createStatusBarItem(enums.StatusBarAlignment.Right);
       item.selector = selector;
       item.severity = 0;
-      // VS Code tucks these behind the language's status bar entry; DuoCode doesn't show them yet.
+      item.id = id;
+      item.busy = false;
+      item.detail = '';
+      languageStatusItems.add(item);
+      item.onDispose = () => languageStatusItems.delete(item);
+      updateLanguageStatus();
       return item;
     },
     getLanguages: async () => request('languages', {}),
@@ -994,7 +1548,8 @@ const api = {
         onDidChangeDiagnostics.fire({ uris: [uri] });
         notify('diagnostics', {
           owner, uri: uri.toString(),
-          items: list.map((d) => ({ range: d.range, message: d.message, severity: d.severity ?? 0, source: d.source })),
+          items: list.map((d) => ({ range: d.range, message: d.message, severity: d.severity ?? 0, source: d.source,
+            code: d.code == null ? undefined : String(typeof d.code === 'object' ? d.code.value : d.code), tags: d.tags || [] })),
         });
       };
       return {
@@ -1023,7 +1578,8 @@ const api = {
   },
   env: {
     appName: 'Mobile Studio', appRoot: '/', language: 'en', machineId: 'duocode', sessionId: String(Date.now()), uriScheme: 'duocode',
-    uiKind: enums.UIKind.Web, shell: '', remoteName: undefined, isTelemetryEnabled: false,
+    uiKind: enums.UIKind.Web, shell: '/bin/sh', remoteName: undefined, isTelemetryEnabled: false,
+    appHost: 'desktop', logLevel: 3, onDidChangeLogLevel: new EventEmitter().event, isNewAppInstall: false, isAppPortable: false,
     onDidChangeTelemetryEnabled: new EventEmitter().event,
     clipboard: { readText: () => request('clipboardRead', {}), writeText: (text) => request('clipboardWrite', { text }) },
     openExternal: (uri) => request('openExternal', { uri: uri.toString() }),
@@ -1052,9 +1608,32 @@ const api = {
     onDidStartTaskProcess: new EventEmitter().event,
     get onDidEndTaskProcess() { return onDidEndTaskProcess.event; },
   },
-  scm: { createSourceControl: () => ({ createResourceGroup: () => ({ resourceStates: [], dispose() {} }), dispose() {} }) },
+  scm: { createSourceControl, get inputBox() { return [...sourceControls][0]?.inputBox || { value: '' }; } },
   authentication: { getSession: async () => undefined, onDidChangeSessions: new EventEmitter().event },
-  l10n: { t: (message, ...args) => String(typeof message === 'string' ? message : message.message).replace(/\{(\d+)\}/g, (_, i) => args[i]), bundle: undefined, uri: undefined },
+  // Positional ({0}) and named ({name}) arguments.
+  l10n: {
+    t(message, ...args) {
+      const text = typeof message === 'string' ? message : message.message;
+      const values = typeof message === 'object' && message.args ? message.args : args.length === 1 && args[0] && typeof args[0] === 'object' && !Array.isArray(args[0]) ? args[0] : args;
+      return String(text).replace(/\{([\w-]+)\}/g, (all, key) => (values[key] === undefined ? all : String(values[key])));
+    },
+    bundle: undefined,
+    uri: undefined,
+  },
+  tests: { createTestController, createTestObserver: () => ({ tests: [], onDidChangeTest: new EventEmitter().event, dispose() {} }) },
+  comments: { createCommentController },
+  chat: {
+    createChatParticipant: (id, handler) => ({ id, requestHandler: handler, iconPath: undefined, followupProvider: undefined, onDidReceiveFeedback: new EventEmitter().event, dispose() {} }),
+  },
+  // No language models to lend extensions yet: selectChatModels finds none.
+  lm: {
+    selectChatModels: async () => [],
+    onDidChangeChatModels: new EventEmitter().event,
+    tools: [],
+    registerTool: () => new Disposable(),
+    invokeTool: async () => { throw LanguageModelError.NotFound(); },
+    registerMcpServerDefinitionProvider: () => new Disposable(),
+  },
   notebooks: { createNotebookController: () => ({ dispose() {} }) },
 };
 
@@ -1322,7 +1901,58 @@ async function resetHost() {
   for (const name of [...outputChannels.keys()]) outputChannels.get(name).dispose();
 }
 
+/** The vscode.execute*Provider commands: [provider kind, (provider, doc, ...args) => result]. */
+const PROVIDER_COMMANDS = {
+  'vscode.executeHoverProvider': ['hover', (p, doc, pos) => p.provideHover(doc, pos, noCancel)],
+  'vscode.executeDefinitionProvider': ['definition', (p, doc, pos) => p.provideDefinition(doc, pos, noCancel)],
+  'vscode.executeTypeDefinitionProvider': ['typeDefinition', (p, doc, pos) => p.provideTypeDefinition(doc, pos, noCancel)],
+  'vscode.executeImplementationProvider': ['implementation', (p, doc, pos) => p.provideImplementation(doc, pos, noCancel)],
+  'vscode.executeDeclarationProvider': ['declaration', (p, doc, pos) => p.provideDeclaration(doc, pos, noCancel)],
+  'vscode.executeReferenceProvider': ['references', (p, doc, pos) => p.provideReferences(doc, pos, { includeDeclaration: true }, noCancel)],
+  'vscode.executeDocumentHighlights': ['highlights', (p, doc, pos) => p.provideDocumentHighlights(doc, pos, noCancel)],
+  'vscode.executeDocumentSymbolProvider': ['symbols', (p, doc) => p.provideDocumentSymbols(doc, noCancel)],
+  'vscode.executeFormatDocumentProvider': ['formatting', (p, doc, options) => p.provideDocumentFormattingEdits(doc, options || { tabSize: 4, insertSpaces: true }, noCancel)],
+  'vscode.executeFormatRangeProvider': ['rangeFormatting', (p, doc, range, options) => p.provideDocumentRangeFormattingEdits(doc, range, options || { tabSize: 4, insertSpaces: true }, noCancel)],
+  'vscode.executeCodeActionProvider': ['codeActions', (p, doc, range, kind) => p.provideCodeActions(doc, range, { diagnostics: [], only: kind ? new CodeActionKind(kind) : undefined, triggerKind: 1 }, noCancel)],
+  'vscode.executeCodeLensProvider': ['codeLens', (p, doc) => p.provideCodeLenses(doc, noCancel)],
+  'vscode.executeLinkProvider': ['links', (p, doc) => p.provideDocumentLinks(doc, noCancel)],
+  'vscode.executeDocumentColorProvider': ['colors', (p, doc) => p.provideDocumentColors(doc, noCancel)],
+  'vscode.executeFoldingRangeProvider': ['folding', (p, doc) => p.provideFoldingRanges(doc, {}, noCancel)],
+  'vscode.executeSelectionRangeProvider': ['selectionRanges', (p, doc, positions) => p.provideSelectionRanges(doc, positions, noCancel)],
+  'vscode.executeInlayHintProvider': ['inlayHints', (p, doc, range) => p.provideInlayHints(doc, range, noCancel)],
+  'vscode.executeSignatureHelpProvider': ['signature', (p, doc, pos, trigger) => p.provideSignatureHelp(doc, pos, noCancel, { triggerKind: 1, triggerCharacter: trigger, isRetrigger: false })],
+  'vscode.executeCompletionItemProvider': ['completion', (p, doc, pos, trigger) => p.provideCompletionItems(doc, pos, noCancel, { triggerKind: trigger ? 1 : 0, triggerCharacter: trigger })],
+  'vscode.executeDocumentRenameProvider': ['rename', (p, doc, pos, newName) => p.provideRenameEdits(doc, pos, newName, noCancel)],
+  'vscode.prepareCallHierarchy': ['callHierarchy', (p, doc, pos) => p.prepareCallHierarchy(doc, pos, noCancel)],
+};
+// One answer, not a list, for these.
+const SINGLE_RESULT = new Set(['vscode.executeSignatureHelpProvider', 'vscode.executeDocumentRenameProvider']);
+
+async function executeProviderCommand(name, args) {
+  if (name === 'vscode.executeWorkspaceSymbolProvider') {
+    const out = [];
+    for (const { provider } of providers.workspaceSymbols || []) out.push(...((await provider.provideWorkspaceSymbols(args[0] || '', noCancel)) || []));
+    return out;
+  }
+  const [kind, run] = PROVIDER_COMMANDS[name];
+  const uri = typeof args[0] === 'string' ? Uri.parse(args[0]) : args[0];
+  const doc = documents.get(uri.toString()) || await vscode.workspace.openTextDocument(uri);
+  // Positions and ranges may come as plain objects (from JSON).
+  const rest = args.slice(1).map((a) => (a && a.line !== undefined && a.character !== undefined ? toPosition(a)
+    : a && a.start && a.end && a.start.line !== undefined ? new Range(toPosition(a.start), toPosition(a.end)) : a));
+  const answers = [];
+  for (const { provider } of providersFor(kind, doc)) {
+    const r = await Promise.resolve(run(provider, doc, ...rest)).catch(() => null);
+    if (r && SINGLE_RESULT.has(name)) return r;
+    if (r) answers.push(r);
+  }
+  if (SINGLE_RESULT.has(name)) return undefined;
+  if (name === 'vscode.executeCompletionItemProvider') return new CompletionList(answers.flatMap((r) => (Array.isArray(r) ? r : r.items || [])));
+  return answers.flat();
+}
+
 async function executeCommand(name, args) {
+  if (PROVIDER_COMMANDS[name] || name === 'vscode.executeWorkspaceSymbolProvider') return executeProviderCommand(name, args || []);
   if (!commands.has(name)) await activateFor('onCommand:' + name);
   const command = commands.get(name);
   if (command) return command.fn.apply(command.thisArg, args);
@@ -1625,7 +2255,10 @@ self.onmessage = async ({ data }) => {
       userConfiguration = message.configuration || {};
       self.__state = message.state || {};
       for (const ext of message.extensions) extensions.set(ext.id, { ...ext, active: null });
+      themeKind = message.themeKind || enums.ColorThemeKind.Dark;
       await activateFor('*');
+      await activateFor('onFileSystem:file');
+      await activateForWorkspaceContents();
       await activateFor('onStartupFinished');
       postMessage({ type: 'ready' });
       break;
@@ -1641,9 +2274,15 @@ self.onmessage = async ({ data }) => {
       documents.set(message.uri, doc);
       await activateFor('onLanguage:' + message.languageId);
       onDidOpenTextDocument.fire(doc);
+      let selections = [new Selection(0, 0, 0, 0)];
       activeEditor = {
         document: doc,
-        selection: new Selection(0, 0, 0, 0), selections: [new Selection(0, 0, 0, 0)],
+        // Setting the selection moves the editor's cursor.
+        get selection() { return selections[0]; },
+        set selection(s) { selections = [s]; request('select', { uri: message.uri, anchor: s.anchor || s.start, active: s.active || s.end }).catch(() => {}); },
+        get selections() { return selections; },
+        set selections(list) { if (list && list.length) this.selection = list[0]; },
+        _setSelection(s) { selections = [s]; },
         options: { tabSize: 4, insertSpaces: true },
         visibleRanges: [new Range(0, 0, doc.lineCount, 0)],
         edit: async (fn) => {
@@ -1663,6 +2302,7 @@ self.onmessage = async ({ data }) => {
       };
       onDidChangeActiveTextEditor.fire(activeEditor);
       onDidChangeVisibleTextEditors.fire([activeEditor]);
+      updateLanguageStatus();
       onDidChangeTabs.fire({ opened: [], closed: [], changed: tabGroup().tabs });
       break;
     }
@@ -1686,6 +2326,32 @@ self.onmessage = async ({ data }) => {
     case 'docSave': {
       const doc = documents.get(message.uri);
       if (doc) { doc.isDirty = false; onDidSaveTextDocument.fire(doc); }
+      fileEvent('change', Uri.parse(message.uri));
+      break;
+    }
+    // Files the app created, deleted or moved (the Explorer, git, the Terminal).
+    case 'fileEvent': {
+      const uri = Uri.parse(message.uri);
+      if (message.kind === 'rename') {
+        const to = Uri.parse(message.to);
+        fileEvent('delete', uri);
+        fileEvent('create', to);
+        onDidRenameFiles.fire({ files: [{ oldUri: uri, newUri: to }] });
+      } else {
+        fileEvent(message.kind, uri);
+        if (message.kind === 'create') onDidCreateFiles.fire({ files: [uri] });
+        if (message.kind === 'delete') onDidDeleteFiles.fire({ files: [uri] });
+      }
+      break;
+    }
+    case 'progressCancel': {
+      const source = progressCancels.get(message.id);
+      if (source) source.cancel();
+      break;
+    }
+    case 'theme': {
+      themeKind = message.kind;
+      onDidChangeActiveColorTheme.fire({ kind: themeKind });
       break;
     }
     case 'docClose': {
@@ -1696,8 +2362,7 @@ self.onmessage = async ({ data }) => {
     case 'selection': {
       if (activeEditor && activeEditor.document.uri.toString() === message.uri) {
         const s = new Selection(toPosition(message.anchor), toPosition(message.head));
-        activeEditor.selection = s;
-        activeEditor.selections = [s];
+        activeEditor._setSelection(s);
         onDidChangeTextEditorSelection.fire({ textEditor: activeEditor, selections: [s], kind: 1 });
       }
       break;
