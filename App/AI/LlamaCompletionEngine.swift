@@ -32,6 +32,9 @@ final class LlamaCompletionEngine {
     private var stopTokens = Set<llama_token>()
     private var cached: [llama_token] = []   // tokens currently in the KV cache, in order
 
+    /// The model is in memory (for estimating what unloading it frees).
+    var isLoaded: Bool { context != nil }
+
     static let backendReady: Void = {
         llama_log_set({ _, _, _ in }, nil)   // llama.cpp is chatty; keep the console for the game
         llama_backend_init()

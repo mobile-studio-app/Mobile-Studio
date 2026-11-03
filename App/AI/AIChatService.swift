@@ -72,11 +72,12 @@ final class AIChatService {
     /// What a chat model can use (for the Chat panel's context sizes to say why one won't fit).
     var availableMemory: Int64 { memoryForChat }
 
-    /// Memory the app can still use, plus what loaded chat models already take (they'd be replaced).
+    /// Memory the app can still use, plus what loaded chat models already take (they'd be replaced)
+    /// and the suggestion models (they're unloaded while a chat answers).
     private var memoryForChat: Int64 {
         let free = Int64(os_proc_available_memory())
         let loaded = engines.values.reduce(Int64(0)) { $0 + Self.memory(of: $1.model, context: $1.contextSize, kvBits: $1.kvBits) }
-        return free + loaded
+        return free + loaded + AICompletionService.shared.loadedMemory
     }
 
     /// The sizes a model offers: up to its longest (with YaRN, past its trained length), each
@@ -181,6 +182,13 @@ final class AIChatService {
             return completion(.failure(Self.error("Pick a chat model in the menu above. Download one in Settings → Advanced → AI Models.")))
         }
         guard model.isSupported else { return completion(.failure(Self.error("\(model.name): \(model.requirementText)"))) }
+        // Loading a model that doesn't fit gets the app closed by iOS: say so instead.
+        let sizes = contexts(for: model)
+        guard sizes.contains(where: \.fits) else {
+            let gb = { (b: Int64) in String(format: "%.1f GB", Double(b) / 1e9) }
+            return completion(.failure(Self.error("\(model.name) needs about \(gb(sizes.first?.bytes ?? model.bytes)), but iOS lets Mobile Studio use "
+                + "\(gb(Int64(Double(memoryForChat) * 0.9))) right now. Pick a smaller model, or close other apps and try again.")))
+        }
         // The suggestions model makes way while chatting.
         AICompletionService.shared.unload()
         // One engine per model: a smaller request uses a bigger loaded context; a bigger one (or a

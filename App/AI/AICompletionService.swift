@@ -42,6 +42,14 @@ final class AICompletionService {
         selectionMayHaveChanged()
     }
 
+    /// Memory the loaded suggestion and merge models take (their 2K context, 16-bit cache and
+    /// working space): a chat frees it, since they make way while it answers.
+    var loadedMemory: Int64 {
+        [engine, mergeEngine].compactMap { $0 }.filter(\.isLoaded).reduce(Int64(0)) {
+            $0 + $1.model.bytes + Int64($1.model.kvBytesPerToken) * 2048 + 200_000_000
+        }
+    }
+
     /// Frees the local model (memory warning, or a game needs the memory). It reloads on the next request.
     func unload() {
         cancel()

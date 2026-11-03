@@ -152,10 +152,12 @@ enum AIModelCatalog {
                    bytes: 2_740_937_888, minimumMemory: 6_000_000_000, chats: true, license: "Apache 2.0", trainedContext: 262144, kvBytesPerToken: 32768,
                    agent: true, reasoning: .optional, format: .thinkPrefill),
         LocalModel(id: "qwen3.5-9b", name: "Qwen3.5 9B", detail: "Best coding agent here",
-                   fileName: "Qwen3.5-9B-Q4_K_M.gguf",
-                   url: hf("unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf"),
-                   sha256: "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
-                   bytes: 5_680_522_464, minimumMemory: 10_000_000_000, chats: true, license: "Apache 2.0", trainedContext: 262144, kvBytesPerToken: 32768,
+                   // IQ4_XS: about Q4's quality in half a gigabyte less, which is what fits a 12 GB phone's
+                   // share of memory.
+                   fileName: "Qwen3.5-9B-IQ4_XS.gguf",
+                   url: hf("unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-IQ4_XS.gguf"),
+                   sha256: "7e918aeca06c52bcb528ea6b04b4ec957e75ee8c0a73138854c0dfcf371ea429",
+                   bytes: 5_168_653_536, minimumMemory: 10_000_000_000, chats: true, license: "Apache 2.0", trainedContext: 262144, kvBytesPerToken: 32768,
                    agent: true, reasoning: .optional, format: .thinkPrefill),
         // Gemma 4: most layers attend over the last 512 tokens, and later layers share earlier ones' cache.
         LocalModel(id: "gemma4-e2b", name: "Gemma 4 E2B", detail: "Google's small assistant",
@@ -201,11 +203,13 @@ enum AIModelCatalog {
         ("deepseek-r1-1.5b", "DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf"),
         ("smollm2-1.7b", "SmolLM2-1.7B-Instruct-Q4_K_M.gguf"),
     ]
+    /// Files of models still here that now download another file (Qwen3.5 9B's Q4_K_M, too big to load).
+    private static let replacedFiles = ["Qwen3.5-9B-Q4_K_M.gguf"]
 
     /// Deletes retired models' files and moves settings that named one to a model still here.
     static func removeRetired() {
-        for model in retired {
-            try? FileManager.default.removeItem(at: directory.appendingPathComponent(model.fileName))
+        for name in retired.map(\.fileName) + replacedFiles {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
         }
         let ids = Set(retired.map(\.id))
         let settings = AppSettings.shared
