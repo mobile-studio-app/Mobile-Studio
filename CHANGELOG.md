@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1
+
+### Fixes
+- **The chat agent answers again.** With the 4-bit cache option, Qwen models wrote nothing or nonsense (a blank reply, "--"). The option now keeps the half of the cache those models need at 8 bits. It's called **Smaller**, and fits about a third more context instead of twice as much.
+- An empty answer now says so, and a model that fails partway through says it failed, instead of showing a blank reply.
+- Context sizes that won't fit say how much memory there is. If iOS gives the app only part of the device's memory (some sideloading tools drop its increased memory limit), the chat settings say so.
+
 ## 0.3.0
 
 ### Git, for real
