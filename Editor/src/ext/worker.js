@@ -1491,7 +1491,8 @@ const api = {
     registerOnTypeFormattingEditProvider: (sel, provider, ...triggers) => addProvider('onTypeFormatting', sel, provider, { triggers }),
     registerDefinitionProvider: (sel, provider) => addProvider('definition', sel, provider),
     registerDocumentSymbolProvider: (sel, provider) => addProvider('symbols', sel, provider),
-    registerSignatureHelpProvider: (sel, provider) => addProvider('signature', sel, provider),
+    registerSignatureHelpProvider: (sel, provider, ...rest) => addProvider('signature', sel, provider,
+      rest[0] && typeof rest[0] === 'object' ? { triggers: rest[0].triggerCharacters || [], retriggers: rest[0].retriggerCharacters || [] } : { triggers: rest, retriggers: [] }),
     registerCodeActionsProvider: (sel, provider) => addProvider('codeActions', sel, provider),
     registerColorProvider: (sel, provider) => addProvider('colors', sel, provider),
     registerFoldingRangeProvider: (sel, provider) => addProvider('folding', sel, provider),
@@ -1969,6 +1970,19 @@ function plainText(content) {
 }
 
 let codeActionList = [];   // the last codeActions answer's actions, by id
+let completionItems = [];  // the last completion answer's items, by id
+let codeLensList = [];     // code lenses' commands, by id
+let linkList = [];         // document links, by id
+let colorList = [];        // document colours, by id
+
+async function resolveCompletion(entry) {
+  if (!entry.resolved) {
+    entry.resolved = entry.provider.resolveCompletionItem
+      ? Promise.resolve(entry.provider.resolveCompletionItem(entry.item, noCancel)).then((r) => r || entry.item, () => entry.item)
+      : Promise.resolve(entry.item);
+  }
+  return entry.resolved;
+}
 
 const callHandlers = {
   hasCommand: ({ name }) => commands.has(name)
@@ -1978,21 +1992,222 @@ const callHandlers = {
     if (!doc) return [];
     const pos = toPosition(position);
     const out = [];
+    completionItems = [];
     for (const { provider, extra } of providersFor('completion', doc)) {
       if (triggerCharacter && !(extra?.triggers || []).includes(triggerCharacter)) continue;
       try {
         const result = await provider.provideCompletionItems(doc, pos, noCancel, { triggerKind: triggerCharacter ? 1 : 0, triggerCharacter });
         const items = Array.isArray(result) ? result : result?.items || [];
+        const incomplete = !Array.isArray(result) && !!result?.isIncomplete;
         for (const item of items) {
           const label = typeof item.label === 'string' ? item.label : item.label?.label;
-          const insert = item.insertText instanceof SnippetString ? { snippet: item.insertText.value } : { text: typeof item.insertText === 'string' ? item.insertText : label };
+          const insert = item.insertText instanceof SnippetString || item.insertText?.value !== undefined ? { snippet: item.insertText.value } : { text: typeof item.insertText === 'string' ? item.insertText : label };
           const range = item.range ? (item.range.start ? item.range : item.range.replacing) : undefined;
-          out.push({ label, kind: item.kind, detail: item.detail || (typeof item.label === 'object' ? item.label.description : undefined),
-            documentation: plainText(item.documentation), sortText: item.sortText, filterText: item.filterText, range, ...insert });
+          const id = completionItems.push({ provider, item }) - 1;
+          out.push({ id, label, kind: item.kind, detail: item.detail || (typeof item.label === 'object' ? item.label.description : undefined),
+            documentation: plainText(item.documentation), sortText: item.sortText, filterText: item.filterText, range, incomplete,
+            preselect: !!item.preselect, deprecated: (item.tags || []).includes(1), commitCharacters: item.commitCharacters,
+            // Accepting it does more (or resolving it might).
+            more: !!(item.additionalTextEdits?.length || item.command || provider.resolveCompletionItem), ...insert });
         }
       } catch (e) { /* one provider failing doesn't stop the others */ }
     }
     return out;
+  },
+  // The documentation of the highlighted completion, from resolveCompletionItem.
+  async completionDetails({ id }) {
+    const entry = completionItems[id];
+    if (!entry) return null;
+    const item = await resolveCompletion(entry);
+    return { detail: item.detail, documentation: plainText(item.documentation) };
+  },
+  // A completion was accepted: its additional edits (imports) apply and its command runs.
+  async completionAccepted({ uri, id }) {
+    const entry = completionItems[id];
+    if (!entry) return false;
+    const item = await resolveCompletion(entry);
+    if (item.additionalTextEdits?.length) {
+      await request('applyEdit', { changes: [{ uri, edits: item.additionalTextEdits.map((e) => ({ range: e.range, newText: e.newText })) }] });
+    }
+    if (item.command) await executeCommand(item.command.command, item.command.arguments || []);
+    return true;
+  },
+  async signatureHelp({ uri, position, triggerCharacter, retrigger }) {
+    const doc = documents.get(uri);
+    if (!doc) return null;
+    for (const { provider } of providersFor('signature', doc)) {
+      try {
+        const help = await provider.provideSignatureHelp(doc, toPosition(position), noCancel, { triggerKind: triggerCharacter ? 2 : 1, triggerCharacter, isRetrigger: !!retrigger, activeSignatureHelp: undefined });
+        if (!help || !help.signatures?.length) continue;
+        const active = Math.min(help.activeSignature || 0, help.signatures.length - 1);
+        const sig = help.signatures[active];
+        const param = sig.activeParameter ?? help.activeParameter ?? 0;
+        // A parameter's label is its text, or [start, end] in the signature's label.
+        const p = sig.parameters?.[param];
+        let span = null;
+        if (p) {
+          if (Array.isArray(p.label)) span = p.label;
+          else { const at = sig.label.indexOf(p.label); if (at >= 0) span = [at, at + p.label.length]; }
+        }
+        return { label: sig.label, documentation: plainText(sig.documentation), parameter: span, parameterDocumentation: p ? plainText(p.documentation) : '',
+          count: help.signatures.length, index: active };
+      } catch (e) { /* ignore */ }
+    }
+    return null;
+  },
+  // What a file's providers say about all of it, at once: folding, code lenses, semantic tokens,
+  // links and colours (for those it has providers for).
+  async documentFeatures({ uri }) {
+    const doc = documents.get(uri);
+    if (!doc) return null;
+    codeLensList = [];
+    linkList = [];
+    colorList = [];
+    const out = {};
+    const each = async (kind, fn) => {
+      const list = providersFor(kind, doc);
+      if (!list.length) return;
+      out[kind] = [];
+      for (const entry of list) {
+        try { const r = await fn(entry); if (r) out[kind].push(...r); } catch (e) { /* ignore */ }
+      }
+    };
+    await Promise.all([
+      each('folding', async ({ provider }) => ((await provider.provideFoldingRanges(doc, {}, noCancel)) || [])
+        .map((f) => ({ start: f.start, end: f.end, kind: f.kind }))),
+      each('codeLens', async ({ provider }) => {
+        const lenses = (await provider.provideCodeLenses(doc, noCancel)) || [];
+        return Promise.all(lenses.map(async (lens) => {
+          let resolved = lens;
+          if (!lens.command && provider.resolveCodeLens) resolved = (await Promise.resolve(provider.resolveCodeLens(lens, noCancel)).catch(() => null)) || lens;
+          if (!resolved.command) return null;
+          const id = codeLensList.push(resolved.command) - 1;
+          return { id, line: lens.range.start.line, title: resolved.command.title, tooltip: resolved.command.tooltip || '' };
+        })).then((list) => list.filter(Boolean));
+      }),
+      each('semanticTokens', async ({ provider, extra }) => {
+        const result = await provider.provideDocumentSemanticTokens(doc, noCancel);
+        if (!result || !result.data) return [];
+        const types = extra?.legend?.tokenTypes || [];
+        const modifiers = extra?.legend?.tokenModifiers || [];
+        const data = result.data;
+        const tokens = [];
+        let line = 0, char = 0;
+        for (let i = 0; i + 4 < data.length; i += 5) {
+          line += data[i];
+          char = data[i] ? data[i + 1] : char + data[i + 1];
+          const mods = [];
+          for (let m = 0; m < modifiers.length; m++) if (data[i + 4] & (1 << m)) mods.push(modifiers[m]);
+          tokens.push([line, char, data[i + 2], types[data[i + 3]] || '', mods.join(' ')]);
+        }
+        return tokens;
+      }),
+      each('links', async ({ provider }) => ((await provider.provideDocumentLinks(doc, noCancel)) || []).map((link) => {
+        const id = linkList.push({ provider, link }) - 1;
+        return { id, range: link.range, target: link.target ? link.target.toString() : null, tooltip: link.tooltip || '' };
+      })),
+      each('colors', async ({ provider }) => ((await provider.provideDocumentColors(doc, noCancel)) || []).map((info) => {
+        const id = colorList.push({ provider, info, doc }) - 1;
+        return { id, range: info.range, color: { red: info.color.red, green: info.color.green, blue: info.color.blue, alpha: info.color.alpha } };
+      })),
+    ]);
+    return out;
+  },
+  async runCodeLens({ id }) {
+    const command = codeLensList[id];
+    if (!command) return false;
+    await executeCommand(command.command, command.arguments || []);
+    return true;
+  },
+  // A link's target (resolving it if the provider leaves that until it's followed).
+  async linkTarget({ id }) {
+    const entry = linkList[id];
+    if (!entry) return null;
+    let { link } = entry;
+    if (!link.target && entry.provider.resolveDocumentLink) link = (await entry.provider.resolveDocumentLink(link, noCancel)) || link;
+    return link.target ? link.target.toString() : null;
+  },
+  // A colour picked for a colour in the file: written as the provider presents it.
+  async pickColor({ id, color }) {
+    const entry = colorList[id];
+    if (!entry) return false;
+    const picked = new Color(color.red, color.green, color.blue, color.alpha);
+    const [presentation] = (await entry.provider.provideColorPresentations(picked, { document: entry.doc, range: entry.info.range }, noCancel)) || [];
+    if (!presentation) return false;
+    const edit = presentation.textEdit || new TextEdit(entry.info.range, presentation.label);
+    const edits = [edit, ...(presentation.additionalTextEdits || [])].map((e) => ({ range: e.range, newText: e.newText }));
+    await request('applyEdit', { changes: [{ uri: entry.doc.uri.toString(), edits }] });
+    return true;
+  },
+  async highlights({ uri, position }) {
+    const doc = documents.get(uri);
+    if (!doc) return [];
+    for (const { provider } of providersFor('highlights', doc)) {
+      try {
+        const list = await provider.provideDocumentHighlights(doc, toPosition(position), noCancel);
+        if (list && list.length) return list.map((h) => ({ range: h.range, kind: h.kind ?? 0 }));
+      } catch (e) { /* ignore */ }
+    }
+    return [];
+  },
+  async workspaceSymbols({ query }) {
+    const out = [];
+    for (const { provider } of providers.workspaceSymbols || []) {
+      try {
+        for (const s of (await provider.provideWorkspaceSymbols(query, noCancel)) || []) {
+          let symbol = s;
+          if (!symbol.location?.range && provider.resolveWorkspaceSymbol) symbol = (await provider.resolveWorkspaceSymbol(s, noCancel)) || s;
+          if (!symbol.location) continue;
+          out.push({ name: symbol.name, kind: symbol.kind, container: symbol.containerName || '', uri: symbol.location.uri.toString(),
+            range: symbol.location.range || new Range(0, 0, 0, 0) });
+        }
+      } catch (e) { /* ignore */ }
+    }
+    return out;
+  },
+  // Go to Type Definition, Implementation and Declaration: [{ uri, range }].
+  async locations({ uri, position, kind }) {
+    const doc = documents.get(uri);
+    if (!doc) return [];
+    const method = { typeDefinition: 'provideTypeDefinition', implementation: 'provideImplementation', declaration: 'provideDeclaration' }[kind];
+    if (!method) return [];
+    const out = [];
+    for (const { provider } of providersFor(kind, doc)) {
+      try {
+        const result = await provider[method](doc, toPosition(position), noCancel);
+        for (const l of [].concat(result || [])) out.push({ uri: (l.uri || l.targetUri).toString(), range: l.targetSelectionRange || l.range || l.targetRange });
+      } catch (e) { /* ignore */ }
+    }
+    return out;
+  },
+  async rangeFormat({ uri, range, options }) {
+    const doc = documents.get(uri);
+    if (!doc) return null;
+    const [entry] = providersFor('rangeFormatting', doc);
+    if (!entry) return null;
+    const edits = await entry.provider.provideDocumentRangeFormattingEdits(doc, toRange(range), options || { tabSize: 4, insertSpaces: true }, noCancel);
+    return (edits || []).map((e) => ({ range: e.range, newText: e.newText }));
+  },
+  // Characters that ask for signature help or format as they're typed.
+  async triggers({ uri }) {
+    const doc = documents.get(uri);
+    if (!doc) return { signature: [], onType: [] };
+    const signature = providersFor('signature', doc).flatMap(({ extra }) => extra?.triggers || []);
+    const retrigger = providersFor('signature', doc).flatMap(({ extra }) => extra?.retriggers || []);
+    const onType = providersFor('onTypeFormatting', doc).flatMap(({ extra }) => extra?.triggers || []);
+    return { signature, retrigger, onType };
+  },
+  async onTypeFormat({ uri, position, ch, options }) {
+    const doc = documents.get(uri);
+    if (!doc) return null;
+    for (const { provider, extra } of providersFor('onTypeFormatting', doc)) {
+      if (!(extra?.triggers || []).includes(ch)) continue;
+      try {
+        const edits = await provider.provideOnTypeFormattingEdits(doc, toPosition(position), ch, options || { tabSize: 4, insertSpaces: true }, noCancel);
+        if (edits && edits.length) return edits.map((e) => ({ range: e.range, newText: e.newText }));
+      } catch (e) { /* ignore */ }
+    }
+    return null;
   },
   async hover({ uri, position }) {
     const doc = documents.get(uri);

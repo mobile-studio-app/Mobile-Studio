@@ -4,11 +4,11 @@
 // Web Worker (worker.js, bundled as text); this file starts it, answers its requests (messages,
 // quick picks, files, edits) and connects its providers to CodeMirror: completions, hovers,
 // diagnostics, formatting, go to definition, symbols and commands for the Command Palette.
-import { hoverTooltip, keymap, EditorView, Decoration, ViewPlugin, WidgetType } from '@codemirror/view';
-import { RangeSetBuilder, Text } from '@codemirror/state';
+import { hoverTooltip, keymap, EditorView, Decoration, ViewPlugin, WidgetType, showTooltip } from '@codemirror/view';
+import { RangeSetBuilder, Text, StateEffect, StateField } from '@codemirror/state';
 import { linter, forceLinting } from '@codemirror/lint';
 import { snippetCompletion } from '@codemirror/autocomplete';
-import { indentRange } from '@codemirror/language';
+import { indentRange, foldService } from '@codemirror/language';
 import workerSource from '../../build/ext-worker.txt';
 import { contributions, readExtensionFile } from './registry.js';
 import { convertSnippet } from './snippets.js';
@@ -302,6 +302,7 @@ export function stopHost() {
   calls.clear();
   diagnostics.clear();
   statusItems.clear();
+  triggerCache.clear();
   decorationTypes.clear();
   decorations.clear();
   if (app) refreshDecorations();
@@ -608,18 +609,51 @@ export async function extensionCompletions(context) {
   const trigger = /[.:<"'/@#(]/.test(before) ? before : undefined;
   if (!context.explicit && !trigger && (!word || word.from === word.to)) return null;
   flushChange();
-  const items = await call('completion', { uri: uriFor(app.current()), position: positionAt(context.state.doc, context.pos), triggerCharacter: trigger }).catch(() => null);
-  if (!items || !items.length || context.aborted) return null;
+  const uri = uriFor(app.current());
+  const answers = await callEach('completion', { uri, position: positionAt(context.state.doc, context.pos), triggerCharacter: trigger });
+  const items = unique(answers.flatMap(({ host, r }) => (Array.isArray(r) ? r : []).map((item) => ({ ...item, host }))), (c) => `${c.label}\0${c.snippet ?? c.text ?? ''}`);
+  if (!items.length || context.aborted) return null;
   const from = word ? word.from : context.pos;
+  const doc = context.state.doc;
   return {
     from,
     options: items.map((item) => {
-      const info = item.documentation || undefined;
-      const base = { label: item.label, detail: item.detail, info, type: KIND_TYPES[item.kind] || 'text', boost: item.sortText ? 0 : undefined };
-      if (item.snippet != null) return snippetCompletion(convertSnippet(item.snippet, app.current()), base);
-      return { ...base, apply: item.text ?? item.label };
+      let info = item.documentation || undefined;
+      // Documentation the provider fills in when the item is resolved.
+      if (!info && item.more) {
+        info = async () => {
+          const details = await callHost(item.host, 'completionDetails', { id: item.id }).catch(() => null);
+          if (!details || !(details.documentation || details.detail)) return null;
+          const dom = document.createElement('div');
+          dom.className = 'ext-hover';
+          dom.innerHTML = renderMarkdown([details.detail && !item.detail ? '`' + details.detail + '`' : '', details.documentation].filter(Boolean).join('\n\n'));
+          return dom;
+        };
+      }
+      const base = { label: item.label, detail: item.detail, info, type: KIND_TYPES[item.kind] || 'text',
+        boost: item.preselect ? 50 : item.sortText ? 0 : undefined, class: item.deprecated ? 'cm-ext-deprecated' : undefined };
+      // The text it replaces, when the provider says (from there to the cursor).
+      const start = item.range ? Math.min(offsetAt(doc, item.range.start), from) : null;
+      const accepted = item.more ? () => { flushChange(); callHost(item.host, 'completionAccepted', { uri, id: item.id }).catch(() => {}); } : null;
+      if (item.snippet != null) {
+        const completion = snippetCompletion(convertSnippet(item.snippet, app.current()), base);
+        if (start == null && !accepted) return completion;
+        const apply = completion.apply;
+        return { ...completion, apply: (view, c, f, t) => { apply(view, c, start ?? f, t); if (accepted) accepted(); } };
+      }
+      const text = item.text ?? item.label;
+      if (start == null && !accepted) return { ...base, apply: text };
+      return {
+        ...base,
+        apply: (view, c, f, t) => {
+          const at = start ?? f;
+          view.dispatch({ changes: { from: at, to: t, insert: text }, selection: { anchor: at + text.length }, userEvent: 'input.complete' });
+          if (accepted) accepted();
+        },
+      };
     }),
-    validFor: /^[\w$]*$/,
+    // An incomplete list is asked for again as the word grows.
+    validFor: items.some((i) => i.incomplete) ? undefined : /^[\w$]*$/,
   };
 }
 
@@ -835,6 +869,445 @@ export async function goToSymbol() {
 }
 const SYMBOL_KINDS = ['file', 'module', 'namespace', 'package', 'class', 'method', 'property', 'field', 'constructor', 'enum', 'interface', 'function', 'variable', 'constant', 'string', 'number', 'boolean', 'array', 'object', 'key', 'null', 'enum member', 'struct', 'event', 'operator', 'type parameter'];
 
+// MARK: - More language features
+
+/** Every host's answer to `method`, with the host it came from (ids in answers are per host). */
+async function callEach(method, params) {
+  const answers = await Promise.all(hosts.map((host) => callHost(host, method, params).then((r) => ({ host, r }), () => ({ host, r: null }))));
+  return answers.filter((a) => a.r != null);
+}
+
+/** A link's target opened: a file of the project (at a line, with #L12), a command, or the web. */
+async function openTarget(target) {
+  if (!target) return;
+  if (target.startsWith('command:')) {
+    const [name, query] = target.slice(8).split('?');
+    let args = [];
+    try { args = query ? [].concat(JSON.parse(decodeURIComponent(query))) : []; } catch (e) { args = []; }
+    await runCommand(name, ...args);
+    return;
+  }
+  if (target.startsWith('file:')) {
+    const [uri, fragment] = target.split('#');
+    const path = pathFor(uri);
+    await app.openFile(path);
+    const m = /^L?(\d+)(?:,(\d+))?/.exec(fragment || '');
+    if (m && path === app.current()) {
+      const doc = app.view.state.doc;
+      const pos = offsetAt(doc, { line: Number(m[1]) - 1, character: m[2] ? Number(m[2]) - 1 : 0 });
+      app.view.dispatch({ selection: { anchor: pos }, effects: EditorView.scrollIntoView(pos, { y: 'center' }) });
+    }
+    return;
+  }
+  await app.native({ cmd: 'openExternal', uri: target }).catch(() => {});
+}
+
+// Signature help: the signature of the call being typed, above the cursor, with the parameter
+// being typed in bold. Typing a provider's trigger character ("(" and ",", usually) asks for it.
+const triggerCache = new Map();   // path -> Promise<{ signature, retrigger, onType }>
+function triggersFor(path) {
+  if (!triggerCache.has(path)) {
+    triggerCache.set(path, callEach('triggers', { uri: uriFor(path) }).then((answers) => ({
+      signature: answers.flatMap((a) => a.r.signature || []),
+      retrigger: answers.flatMap((a) => a.r.retrigger || []),
+      onType: answers.flatMap((a) => a.r.onType || []),
+    })));
+  }
+  return triggerCache.get(path);
+}
+
+const setSignature = StateEffect.define();
+const signatureField = StateField.define({
+  create: () => null,
+  update(value, tr) {
+    for (const e of tr.effects) if (e.is(setSignature)) return e.value;
+    if (!value) return value;
+    const anchor = tr.changes.mapPos(value.anchor);
+    const head = tr.state.selection.main.head;
+    // Moving off the call's line (or before it) closes it.
+    if (head < anchor || tr.state.doc.lineAt(head).number !== tr.state.doc.lineAt(Math.min(anchor, tr.state.doc.length)).number) return null;
+    return { ...value, anchor, pos: head };
+  },
+  provide: (f) => showTooltip.from(f, (v) => (v ? { pos: v.pos, above: true, strictSide: false, create: () => ({ dom: signatureDOM(v.help) }) } : null)),
+});
+
+function signatureDOM(help) {
+  const dom = document.createElement('div');
+  dom.className = 'dc-hover ext-hover ext-signature';
+  const label = document.createElement('div');
+  label.className = 'ext-signature-label';
+  if (help.count > 1) {
+    const count = document.createElement('span');
+    count.className = 'ext-signature-count';
+    count.textContent = `${help.index + 1}/${help.count} `;
+    label.append(count);
+  }
+  if (help.parameter) {
+    const [a, b] = help.parameter;
+    const bold = document.createElement('b');
+    bold.textContent = help.label.slice(a, b);
+    label.append(help.label.slice(0, a), bold, help.label.slice(b));
+  } else {
+    label.append(help.label);
+  }
+  dom.append(label);
+  const docs = [help.parameterDocumentation, help.documentation].filter(Boolean).join('\n\n');
+  if (docs) {
+    const body = document.createElement('div');
+    body.innerHTML = renderMarkdown(docs);
+    dom.append(body);
+  }
+  return dom;
+}
+
+let signatureSeq = 0;
+async function askSignature(view, triggerCharacter, retrigger) {
+  if (!hosts.length || !app.current() || view !== app.view) return;
+  const seq = ++signatureSeq;
+  flushChange();
+  const { state } = view;
+  const head = state.selection.main.head;
+  const help = await call('signatureHelp', { uri: uriFor(app.current()), position: positionAt(state.doc, head), triggerCharacter, retrigger }).catch(() => null);
+  if (seq !== signatureSeq || view.state.selection.main.head !== head) return;
+  const current = view.state.field(signatureField, false);
+  if (!help) { if (current) view.dispatch({ effects: setSignature.of(null) }); return; }
+  view.dispatch({ effects: setSignature.of({ help, pos: head, anchor: current ? current.anchor : Math.max(0, head - 1) }) });
+}
+
+/** Trigger Parameter Hints (⇧⌘Space). */
+export function triggerSignatureHelp(view = app && app.view) {
+  if (view) askSignature(view, undefined, false);
+  return true;
+}
+
+// Typed characters: signature help's triggers, and formatting as you type (on-type formatting).
+const typingTriggers = ViewPlugin.fromClass(class {
+  update(u) {
+    if (!u.docChanged || !hosts.length || !app || u.view !== app.view || !app.current()) return;
+    if (!u.transactions.some((tr) => tr.isUserEvent('input.type'))) return;
+    const head = u.state.selection.main.head;
+    const ch = u.state.sliceDoc(head - 1, head);
+    const path = app.current();
+    const open = !!u.state.field(signatureField, false);
+    triggersFor(path).then((t) => {
+      if (t.signature.includes(ch)) askSignature(u.view, ch, open);
+      else if (open) askSignature(u.view, t.retrigger.includes(ch) ? ch : undefined, true);
+      const onTypeCh = ch === '\n' ? '\n' : ch;
+      if (t.onType.includes(onTypeCh)) formatOnType(u.view, onTypeCh);
+    }, () => {});
+  }
+});
+
+async function formatOnType(view, ch) {
+  flushChange();
+  const { state } = view;
+  const edits = await call('onTypeFormat', { uri: uriFor(app.current()), position: positionAt(state.doc, state.selection.main.head), ch, options: { tabSize: state.tabSize, insertSpaces: true } }).catch(() => null);
+  if (edits && edits.length && view.state === state) applyToView(edits);
+}
+
+// Folding ranges, code lenses, semantic tokens, links and colours: asked for once the file has
+// been still for a moment, all at once.
+const setFeatures = StateEffect.define();
+const noFeatures = { folding: new Map(), lenses: Decoration.none, marks: Decoration.none, links: [], hasFolding: false };
+const featuresField = StateField.define({
+  create: () => noFeatures,
+  update(value, tr) {
+    for (const e of tr.effects) if (e.is(setFeatures)) return e.value;
+    if (!tr.docChanged) return value;
+    return { ...value, lenses: value.lenses.map(tr.changes), marks: value.marks.map(tr.changes),
+      links: value.links.map((l) => ({ ...l, from: tr.changes.mapPos(l.from), to: tr.changes.mapPos(l.to) })) };
+  },
+  provide: (f) => [EditorView.decorations.from(f, (v) => v.lenses), EditorView.decorations.from(f, (v) => v.marks)],
+});
+
+/** For foldGutter's foldingChanged: the gutter redraws when providers' folding ranges arrive. */
+export const foldingChanged = (u) => u.transactions.some((tr) => tr.effects.some((e) => e.is(setFeatures)));
+
+// Folding by the providers' ranges, where they have one for the line (otherwise by the syntax).
+const providerFolding = foldService.of((state, lineStart, lineEnd) => {
+  const value = state.field(featuresField, false);
+  if (!value || !value.hasFolding) return null;
+  const line = state.doc.lineAt(lineStart).number - 1;
+  const end = value.folding.get(line);
+  if (end == null || end <= line || end + 1 > state.doc.lines) return null;
+  return { from: lineEnd, to: state.doc.line(end + 1).to };
+});
+
+class LensWidget extends WidgetType {
+  constructor(lenses, indent) { super(); this.lenses = lenses; this.indent = indent; }
+  eq(other) { return other.indent === this.indent && other.lenses.map((l) => l.title).join('\0') === this.lenses.map((l) => l.title).join('\0'); }
+  toDOM() {
+    const dom = document.createElement('div');
+    dom.className = 'cm-codelens';
+    dom.style.paddingLeft = `${this.indent}ch`;
+    this.lenses.forEach((lens, i) => {
+      if (i) dom.append(' | ');
+      const el = document.createElement('span');
+      el.className = 'cm-codelens-item';
+      el.textContent = lens.title.replace(/\$\(([\w-]+)(~spin)?\)/g, (_, icon) => ICON_TEXT[icon] || '');
+      el.title = lens.tooltip || '';
+      el.onmousedown = (e) => { e.preventDefault(); callHost(lens.host, 'runCodeLens', { id: lens.id }).catch(() => {}); };
+      dom.append(el);
+    });
+    return dom;
+  }
+  ignoreEvent() { return true; }
+}
+
+const cssColor = (c) => `rgba(${Math.round(c.red * 255)}, ${Math.round(c.green * 255)}, ${Math.round(c.blue * 255)}, ${c.alpha})`;
+const hexColor = (c) => '#' + [c.red, c.green, c.blue].map((v) => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
+
+class SwatchWidget extends WidgetType {
+  constructor(entry) { super(); this.entry = entry; }
+  eq(other) { return cssColor(other.entry.color) === cssColor(this.entry.color); }
+  toDOM() {
+    const dom = document.createElement('span');
+    dom.className = 'cm-color-swatch';
+    dom.style.background = cssColor(this.entry.color);
+    // Tapping it picks another colour, written as the extension writes colours.
+    const input = document.createElement('input');
+    input.type = 'color';
+    input.value = hexColor(this.entry.color);
+    input.addEventListener('change', () => {
+      const v = input.value;
+      const color = { red: parseInt(v.slice(1, 3), 16) / 255, green: parseInt(v.slice(3, 5), 16) / 255, blue: parseInt(v.slice(5, 7), 16) / 255, alpha: this.entry.color.alpha };
+      flushChange();
+      callHost(this.entry.host, 'pickColor', { id: this.entry.id, color }).catch(() => {});
+    });
+    dom.append(input);
+    return dom;
+  }
+  ignoreEvent() { return true; }
+}
+
+const MAX_TOKENS = 30000;
+function featureDecorations(state, answers) {
+  const doc = state.doc;
+  const folding = new Map();
+  let hasFolding = false;
+  const lensesByLine = new Map();
+  const marks = [];
+  const links = [];
+  for (const { host, r } of answers) {
+    if (r.folding) {
+      hasFolding = true;
+      for (const f of r.folding) if (!folding.has(f.start) || folding.get(f.start) < f.end) folding.set(f.start, f.end);
+    }
+    for (const lens of r.codeLens || []) {
+      if (lens.line >= doc.lines) continue;
+      if (!lensesByLine.has(lens.line)) lensesByLine.set(lens.line, []);
+      lensesByLine.get(lens.line).push({ ...lens, host });
+    }
+    for (const [line, char, length, type, mods] of (r.semanticTokens || []).slice(0, MAX_TOKENS)) {
+      if (line >= doc.lines || !type) continue;
+      const from = offsetAt(doc, { line, character: char });
+      const to = offsetAt(doc, { line, character: char + length });
+      if (to <= from) continue;
+      const readonly = /\breadonly\b/.test(mods) && (type === 'variable' || type === 'property');
+      marks.push(Decoration.mark({ class: `cm-sem-${readonly ? 'constant' : type}` }).range(from, to));
+    }
+    for (const link of r.links || []) {
+      const from = offsetAt(doc, link.range.start);
+      const to = offsetAt(doc, link.range.end);
+      if (to <= from) continue;
+      links.push({ from, to, host, id: link.id, target: link.target });
+      marks.push(Decoration.mark({ class: 'cm-ext-link', attributes: { title: (link.tooltip || 'Follow link') + ' (⌘-click)' } }).range(from, to));
+    }
+    for (const c of r.colors || []) {
+      const from = offsetAt(doc, c.range.start);
+      marks.push(Decoration.widget({ widget: new SwatchWidget({ ...c, host }), side: -1 }).range(from));
+    }
+  }
+  const lenses = [...lensesByLine.entries()].sort((a, b) => a[0] - b[0]).map(([line, list]) => {
+    const l = doc.line(line + 1);
+    const indent = /^\s*/.exec(l.text)[0].replace(/\t/g, ' '.repeat(state.tabSize)).length;
+    return Decoration.widget({ widget: new LensWidget(list, indent), block: true, side: -1 }).range(l.from);
+  });
+  return { folding, hasFolding, lenses: Decoration.set(lenses, true), marks: Decoration.set(marks, true), links };
+}
+
+const featureFetcher = ViewPlugin.fromClass(class {
+  constructor(view) { this.timer = 0; this.seq = 0; this.path = null; this.schedule(view, 300); }
+  update(u) {
+    if (u.docChanged) this.schedule(u.view, 800);
+    else if (app && app.current() !== this.path) this.schedule(u.view, 100);
+  }
+  schedule(view, delay) {
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.fetch(view), delay);
+  }
+  async fetch(view) {
+    if (!app || view !== app.view) return;
+    const path = app.current();
+    this.path = path;
+    const seq = ++this.seq;
+    if (!hosts.length || !path) {
+      if (view.state.field(featuresField, false) !== noFeatures) view.dispatch({ effects: setFeatures.of(noFeatures) });
+      return;
+    }
+    flushChange();
+    const { state } = view;
+    const answers = await callEach('documentFeatures', { uri: uriFor(path) });
+    if (seq !== this.seq || view.state !== state || app.current() !== path) return;
+    const empty = answers.every(({ r }) => !Object.keys(r).length);
+    if (empty && view.state.field(featuresField, false) === noFeatures) return;
+    view.dispatch({ effects: setFeatures.of(empty ? noFeatures : featureDecorations(state, answers)) });
+  }
+  destroy() { clearTimeout(this.timer); }
+});
+
+// ⌘-click (or Ctrl-click) follows a document link.
+const linkClicks = EditorView.domEventHandlers({
+  mousedown(e, view) {
+    if (!(e.metaKey || e.ctrlKey)) return false;
+    const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+    if (pos == null) return false;
+    const link = view.state.field(featuresField, false)?.links.find((l) => pos >= l.from && pos <= l.to);
+    if (!link) return false;
+    e.preventDefault();
+    (link.target ? Promise.resolve(link.target) : callHost(link.host, 'linkTarget', { id: link.id })).then(openTarget, () => {});
+    return true;
+  },
+});
+
+// Document highlights: the other uses of the symbol at the cursor, as the cursor rests on it.
+const setHighlights = StateEffect.define();
+const highlightField = StateField.define({
+  create: () => Decoration.none,
+  update(value, tr) {
+    for (const e of tr.effects) if (e.is(setHighlights)) return e.value;
+    return tr.docChanged ? Decoration.none : value;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
+const highlightFetcher = ViewPlugin.fromClass(class {
+  constructor() { this.timer = 0; this.seq = 0; }
+  update(u) {
+    if (!u.selectionSet && !u.docChanged) return;
+    clearTimeout(this.timer);
+    const seq = ++this.seq;
+    this.timer = setTimeout(async () => {
+      const view = u.view;
+      if (!app || view !== app.view || !hosts.length || !app.current() || !view.state.selection.main.empty) {
+        if (view.state.field(highlightField, false)?.size) view.dispatch({ effects: setHighlights.of(Decoration.none) });
+        return;
+      }
+      flushChange();
+      const { state } = view;
+      const list = (await call('highlights', { uri: uriFor(app.current()), position: positionAt(state.doc, state.selection.main.head) }).catch(() => null)) || [];
+      if (seq !== this.seq || view.state !== state) return;
+      const marks = list.map((h) => {
+        const from = offsetAt(state.doc, h.range.start);
+        const to = offsetAt(state.doc, h.range.end);
+        return to > from ? Decoration.mark({ class: h.kind === 2 ? 'cm-ext-highlight-write' : 'cm-ext-highlight' }).range(from, to) : null;
+      }).filter(Boolean);
+      if (marks.length || view.state.field(highlightField, false)?.size) view.dispatch({ effects: setHighlights.of(Decoration.set(marks, true)) });
+    }, 300);
+  }
+  destroy() { clearTimeout(this.timer); }
+});
+
+// Semantic token colours: VS Code's Dark+ and Light+ (for the language extensions that colour
+// by meaning, over the grammar's colours).
+const SEMANTIC_COLORS = {
+  namespace: ['#4ec9b0', '#267f99'], class: ['#4ec9b0', '#267f99'], type: ['#4ec9b0', '#267f99'], interface: ['#4ec9b0', '#267f99'],
+  enum: ['#4ec9b0', '#267f99'], struct: ['#4ec9b0', '#267f99'], typeParameter: ['#4ec9b0', '#267f99'],
+  function: ['#dcdcaa', '#795e26'], method: ['#dcdcaa', '#795e26'], decorator: ['#dcdcaa', '#795e26'],
+  variable: ['#9cdcfe', '#001080'], parameter: ['#9cdcfe', '#001080'], property: ['#9cdcfe', '#001080'],
+  enumMember: ['#4fc1ff', '#0070c1'], constant: ['#4fc1ff', '#0070c1'], event: ['#9cdcfe', '#001080'],
+  macro: ['#569cd6', '#0000ff'], keyword: ['#569cd6', '#0000ff'], modifier: ['#569cd6', '#0000ff'],
+  string: ['#ce9178', '#a31515'], number: ['#b5cea8', '#098658'], regexp: ['#d16969', '#811f3f'], comment: ['#6a9955', '#008000'],
+};
+const featureTheme = EditorView.baseTheme(Object.fromEntries([
+  ...Object.entries(SEMANTIC_COLORS).flatMap(([type, [dark, light]]) => [
+    [`&dark .cm-sem-${type}, &dark .cm-sem-${type} *`, { color: `${dark} !important` }],
+    [`&light .cm-sem-${type}, &light .cm-sem-${type} *`, { color: `${light} !important` }],
+  ]),
+  ['.cm-codelens', { fontSize: '85%', opacity: '.7', padding: '1px 0', fontFamily: 'inherit', whiteSpace: 'pre' }],
+  ['.cm-codelens-item', { cursor: 'pointer' }],
+  ['.cm-codelens-item:hover', { textDecoration: 'underline', opacity: '1' }],
+  ['.cm-ext-link', { textDecoration: 'underline dotted', textUnderlineOffset: '2px' }],
+  ['.cm-color-swatch', { display: 'inline-block', position: 'relative', width: '.8em', height: '.8em', margin: '0 2px', border: '1px solid rgba(128, 128, 128, .7)', verticalAlign: 'middle', cursor: 'pointer' }],
+  ['.cm-color-swatch input', { position: 'absolute', inset: '0', width: '100%', height: '100%', opacity: '0', cursor: 'pointer', padding: '0', border: '0' }],
+  ['&dark .cm-ext-highlight', { background: 'rgba(87, 87, 87, .5)' }],
+  ['&light .cm-ext-highlight', { background: 'rgba(87, 87, 87, .15)' }],
+  ['&dark .cm-ext-highlight-write', { background: 'rgba(0, 100, 180, .4)' }],
+  ['&light .cm-ext-highlight-write', { background: 'rgba(0, 100, 180, .15)' }],
+  ['.ext-signature-label', { fontFamily: 'var(--mono, monospace)', whiteSpace: 'pre-wrap' }],
+  ['.ext-signature-count', { opacity: '.7' }],
+]));
+
+const languageFeatureExtensions = [
+  signatureField, typingTriggers, featuresField, providerFolding, featureFetcher, linkClicks,
+  highlightField, highlightFetcher, featureTheme,
+  keymap.of([
+    { key: 'Escape', run: (view) => { if (!view.state.field(signatureField, false)) return false; view.dispatch({ effects: setSignature.of(null) }); return true; } },
+    { key: 'Shift-Mod-Space', run: (view) => triggerSignatureHelp(view) },
+  ]),
+];
+
+// MARK: - Go to, workspace symbols and Format Selection
+
+/** Go to Type Definition / Implementation / Declaration ('typeDefinition' | 'implementation' |
+ * 'declaration'): to the place, or a list to pick from when there are several. */
+export async function goToLocation(kind) {
+  if (!hosts.length || !app.current()) return false;
+  flushChange();
+  const { view } = app;
+  const answers = await callEach('locations', { uri: uriFor(app.current()), position: positionAt(view.state.doc, view.state.selection.main.head), kind });
+  const list = unique(answers.flatMap(({ r }) => r), (l) => l.uri + rangeKey(l.range));
+  const names = { typeDefinition: 'type definition', implementation: 'implementation', declaration: 'declaration' };
+  if (!list.length) { showNotification('info', `No ${names[kind] || 'location'} found.`, []); return false; }
+  let target = list[0];
+  if (list.length > 1) {
+    const chosen = await quickPick({ placeholder: `${list.length} ${names[kind]}s`, items: list.map((l) => ({ label: pathFor(l.uri), description: `line ${l.range.start.line + 1}` })) });
+    if (chosen == null) return false;
+    target = list[chosen];
+  }
+  await revealLocation(target);
+  return true;
+}
+
+async function revealLocation(target) {
+  const path = pathFor(target.uri);
+  if (path !== app.current()) await app.openFile(path);
+  const doc = app.view.state.doc;
+  const from = offsetAt(doc, target.range.start);
+  app.view.dispatch({ selection: { anchor: from, head: offsetAt(doc, target.range.end) }, effects: EditorView.scrollIntoView(from, { y: 'center' }) });
+  app.view.focus();
+}
+
+/** Go to Symbol in Workspace (⌘T): extensions' workspace symbol providers, searched by name. */
+export async function goToWorkspaceSymbol() {
+  if (!hosts.length) { showNotification('info', 'No extension provides workspace symbols.', []); return; }
+  const query = await inputBox({ prompt: 'Go to symbol in workspace', placeholder: 'Symbol name' });
+  if (query == null) return;
+  flushChange();
+  const answers = await callEach('workspaceSymbols', { query });
+  const list = unique(answers.flatMap(({ r }) => r), (s) => s.name + s.uri + rangeKey(s.range));
+  if (!list.length) { showNotification('info', `No symbols matching "${query}".`, []); return; }
+  const chosen = await quickPick({
+    placeholder: 'Go to symbol in workspace',
+    items: list.map((s) => ({ label: s.name, description: [SYMBOL_KINDS[s.kind] || '', s.container].filter(Boolean).join(' · '), detail: pathFor(s.uri) })),
+  });
+  if (chosen != null) await revealLocation(list[chosen]);
+}
+
+/** Format Selection (⌘K ⌘F): the selected lines by the extension's range formatter. */
+export async function formatSelection(view = app && app.view) {
+  if (!view || !hosts.length || !app.current()) return false;
+  flushChange();
+  const { state } = view;
+  const { from, to } = state.selection.main;
+  const start = state.doc.lineAt(from).from;
+  const end = state.doc.lineAt(to).to;
+  const range = { start: positionAt(state.doc, start), end: positionAt(state.doc, end) };
+  const edits = await call('rangeFormat', { uri: uriFor(app.current()), range, options: { tabSize: state.tabSize, insertSpaces: true } }).catch(() => null);
+  if (edits && edits.length) applyToView(edits);
+  else if (edits === null) { showNotification('info', 'No extension can format a selection in this file.', []); return false; }
+  return true;
+}
+
 // MARK: - Decorations (TextEditor.setDecorations)
 
 // Workbench colours extensions use for decorations, in VS Code's dark theme.
@@ -940,6 +1413,7 @@ export function hostExtensions() {
     hover,
     extensionLint,
     decorationLayer,
+    languageFeatureExtensions,
     EditorView.baseTheme({
       '.cm-ext-unnecessary': { opacity: '.6', backgroundImage: 'none !important' },
       '.cm-ext-deprecated': { textDecoration: 'line-through' },

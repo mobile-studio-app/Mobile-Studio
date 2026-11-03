@@ -12,7 +12,7 @@ import { toggleBreakpointAtCursor } from './debug.js';
 import { settings, updateSettings, settingsEffects } from './settings.js';
 import { contributions } from './ext/registry.js';
 import { loadExtensionTheme } from './ext/themes.js';
-import { extensionCommands, runCommand, formatDocument, documentSymbols } from './ext/host.js';
+import { extensionCommands, runCommand, formatDocument, documentSymbols, formatSelection, goToLocation, goToWorkspaceSymbol, triggerSignatureHelp } from './ext/host.js';
 import { goToDefinition, findReferences, renameSymbol } from './navigate.js';
 import { quickFix, peekDefinition } from './langfeatures.js';
 import { toggleOutput } from './ext/output.js';
@@ -128,6 +128,12 @@ export function builtinCommands(getView) {
   const v = (fn) => () => { const view = getView(); fn(view); view.focus(); return true; };
   return [
     { command: 'editor.action.formatDocument', title: 'Format Document', keybinding: '⇧⌥F', run: () => formatDocument(getView()) },
+    { command: 'editor.action.formatSelection', title: 'Format Selection', keybinding: '⌘K ⌘F', run: () => formatSelection(getView()) },
+    { command: 'editor.action.goToTypeDefinition', title: 'Go to Type Definition', run: () => goToLocation('typeDefinition') },
+    { command: 'editor.action.goToImplementation', title: 'Go to Implementations', keybinding: '⌘F12', run: () => goToLocation('implementation') },
+    { command: 'editor.action.revealDeclaration', title: 'Go to Declaration', run: () => goToLocation('declaration') },
+    { command: 'workbench.action.showAllSymbols', title: 'Go to Symbol in Workspace...', keybinding: '⌘T', run: () => goToWorkspaceSymbol() },
+    { command: 'editor.action.triggerParameterHints', title: 'Trigger Parameter Hints', keybinding: '⇧⌘Space', run: () => triggerSignatureHelp(getView()) },
     { command: 'editor.action.revealDefinition', title: 'Go to Definition', keybinding: 'F12', run: () => goToDefinition() },
     { command: 'editor.action.goToReferences', title: 'Find All References', keybinding: '⇧F12', run: () => findReferences() },
     { command: 'editor.action.rename', title: 'Rename Symbol', keybinding: 'F2', run: () => renameSymbol() },

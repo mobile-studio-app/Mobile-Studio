@@ -25,7 +25,7 @@ import { loadExtensionTheme, forgetExtensionThemes } from './ext/themes.js';
 import { setSnippetContext, resetSnippets } from './ext/snippets.js';
 import { prepareLanguage, forgetExtensionLanguages, languageIdFor } from './languages.js';
 import { applyChrome, chromeColors } from './theme.js';
-import { startHost, setConfiguration, hoverAt, outputLog, formatDocument, hostExtensions, didOpen, didChange, didSave, didSelect } from './ext/host.js';
+import { startHost, setConfiguration, hoverAt, outputLog, formatDocument, hostExtensions, didOpen, didChange, didSave, didSelect, foldingChanged, formatSelection, goToWorkspaceSymbol, goToLocation } from './ext/host.js';
 import { showCommandPalette, showQuickOpen, noteOpenedFile, builtinCommands, pickColorTheme } from './palette.js';
 import { closeQuickInput, notify as showNotification } from './ext/ui.js';
 import { gitGutter, loadOriginal } from './gitgutter.js';
@@ -125,7 +125,7 @@ function baseExtensions(path) {
     highlightActiveLineGutter(),
     highlightSpecialChars(),
     history(),
-    foldGutter(),
+    foldGutter({ foldingChanged }),
     drawSelection(),
     dropCursor(),
     EditorState.allowMultipleSelections.of(true),
@@ -168,6 +168,9 @@ function baseExtensions(path) {
       { key: 'Mod-Shift-v', run: () => { setPreview('toggle'); return true; } },
       { key: 'Mod-k Mod-t', run: () => { pickColorTheme(() => view); return true; } },
       { key: 'Mod-k v', run: () => { setPreview('side'); return true; } },
+      { key: 'Mod-k Mod-f', run: (v) => { formatSelection(v); return true; } },
+      { key: 'Mod-t', run: () => { goToWorkspaceSymbol(); return true; } },
+      { key: 'Mod-F12', run: () => { goToLocation('implementation'); return true; } },
       { key: 'Mod-Shift-o', run: () => { quickOpen('@'); return true; } },
       { key: 'Ctrl-g', run: () => { quickOpen(':'); return true; } },
       { key: 'F1', run: () => { commandPalette(); return true; } },
