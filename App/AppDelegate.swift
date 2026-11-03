@@ -8,6 +8,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         Diagnostics.shared.start()
         ProjectStore.shared.bootstrap()
         RuntimeManager.shared.discover()
+        AIModelCatalog.removeRetired()
         ModelDownloadManager.shared.reconnect()
         AICompletionService.shared.start()
         AutomationServer.shared.applySetting()

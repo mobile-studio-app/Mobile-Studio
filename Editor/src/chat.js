@@ -125,17 +125,16 @@ function systemPrompt() {
     + toolHelp(false) + files + thinkingNote();
 }
 
-// Qwen3 and DeepSeek-R1 reason by themselves, in <think> tags; Qwen3 stops when told /no_think (DeepSeek-R1
-// always reasons). Other models are asked to reason the same way when thinking is on.
-const REASONS_ITSELF = /^(qwen3|deepseek-r1)/;
+// Qwen3.5, Gemma 4 and SmolLM3 reason by themselves; the app opens their thinking, or skips it, as their
+// templates do. Other models are asked to reason in <think> tags when thinking is on.
+const REASONS_ITSELF = /^(qwen3\.5|gemma4|smollm3)/;
 
 function thinkingNote() {
-  if (thinkingOn()) {
-    return REASONS_ITSELF.test(settings.selected) ? ''
-      : '\n\nThink before you answer: first reason step by step inside <think></think> tags (what is asked, what to look at, the plan), '
-        + 'then write your answer and any tool blocks after </think>.';
+  if (thinkingOn() && !REASONS_ITSELF.test(settings.selected)) {
+    return '\n\nThink before you answer: first reason step by step inside <think></think> tags (what is asked, what to look at, the plan), '
+      + 'then write your answer and any tool blocks after </think>.';
   }
-  return /^qwen3/.test(settings.selected) ? '\n\n/no_think' : '';
+  return '';
 }
 
 /** A reply's reasoning, if it has any. */
@@ -412,7 +411,7 @@ async function runSubagents(tasks) {
 
 async function subagent(task, model) {
   const chat = [
-    { role: 'system', content: 'You are a research subagent of a coding agent. Answer the task by reading and searching the project; you can\'t change anything. Answer briefly with what you found, naming files and lines.\n\n' + toolHelp(true) + (/^qwen3/.test(model) ? '\n\n/no_think' : '') },
+    { role: 'system', content: 'You are a research subagent of a coding agent. Answer the task by reading and searching the project; you can\'t change anything. Answer briefly with what you found, naming files and lines.\n\n' + toolHelp(true) },
     { role: 'user', content: task },
   ];
   for (let step = 0; step < 6 && !stopped; step++) {
@@ -839,7 +838,7 @@ function renderSettings() {
   // Subagents only where the agent is: they use tools too.
   if (!canAgent()) {
     panel.append(element('div', 'chat-setting-note', `${info.name || 'This model'} only answers questions: it's too small to use the agent's `
-      + 'tools reliably. For the agent (and subagents and Think), pick Qwen3 4B, Qwen2.5-Coder 3B or 7B Instruct, Phi-4 mini, or a cloud model.'));
+      + 'tools reliably. For the agent (and subagents and Think), pick Qwen3.5 4B or 9B, Gemma 4 E4B, Phi-4 mini, or a cloud model.'));
   } else {
     const agents = settings.models.filter((m) => m.ready && m.agent);
     row('Subagent model', select([['', 'Same as Chat'], ...agents.map((m) => [m.id, m.name])], canAgent(settings.subagentModel) ? settings.subagentModel : '',
@@ -873,14 +872,14 @@ function updateControls() {
   if (!pane) return;
   $('chat-send').textContent = busy ? 'Stop' : 'Send';
   const name = modelInfo(settings.selected).name || 'This model';
-  // Think: only for models that reason well; DeepSeek-R1 always does.
+  // Think: only for models that reason well.
   const think = $('chat-think');
   const r = reasoning();
   think.classList.toggle('on', thinkingOn());
   think.setAttribute('aria-pressed', String(thinkingOn()));
   think.disabled = r !== 'optional';
   think.title = r === 'always' ? `${name} always reasons before it answers`
-    : r === 'none' ? `${name} doesn't reason well, so Think is off. Qwen3, DeepSeek-R1 and cloud models can think.`
+    : r === 'none' ? `${name} doesn't reason well, so Think is off. Qwen3.5, Gemma 4, SmolLM3 and cloud models can think.`
       : 'Thinking: the agent reasons before it answers (slower, better at harder tasks)';
   // The agent's modes: only for models that can be the agent; the others just chat.
   const mode = $('chat-mode');
@@ -1082,7 +1081,7 @@ function render() {
         ? 'Ask about your code, or tell the agent what to change: it reads, searches and edits the project, runs commands and sends research to subagents. '
           + 'The mode below says what it may do without asking. '
         : `Ask about your code: the open file goes with each question. ${modelInfo(settings.selected).name || 'This model'} only answers; for the agent, `
-          + 'which reads, edits and runs your project, pick a bigger model (Qwen3 4B, Qwen2.5-Coder 3B or 7B Instruct, Phi-4 mini, or a cloud model). ')
+          + 'which reads, edits and runs your project, pick a bigger model (Qwen3.5 4B or 9B, Gemma 4 E4B, Phi-4 mini, or a cloud model). ')
       + (modelInfo(settings.selected).cloud
         ? 'This is a cloud model: your messages and the files the agent reads are sent to its provider.'
         : 'Everything runs on this device.')));

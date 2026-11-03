@@ -26,7 +26,7 @@ struct LocalModel {
     /// The longest context with YaRN scaling, which the model's makers support past its trained
     /// length (Qwen's 128K); nil when it has none.
     var yarnContext: Int? = nil
-    /// Sliding-window attention (Gemma 3): most layers only keep the last `slidingWindow` tokens,
+    /// Sliding-window attention (Gemma 4): most layers only keep the last `slidingWindow` tokens,
     /// and `fullAttentionShare` of them the whole context.
     var slidingWindow = 0
     var fullAttentionShare = 1.0
@@ -34,11 +34,23 @@ struct LocalModel {
     /// tools wrongly, so they only answer questions.
     var agent = false
     var reasoning: Reasoning = .none
+    /// How its prompts are written.
+    var format: PromptFormat = .template
+
+    enum PromptFormat {
+        /// The model's own chat template (llama.cpp's built-in version of it).
+        case template
+        /// The template, with the start of the answer written for it: "<think>\n" to reason, or an
+        /// empty thought to answer straight away, as Qwen3.5's and SmolLM3's templates do.
+        case thinkPrefill
+        /// Gemma 4's turns (<|turn>user … <turn|>), which llama.cpp's templates don't know.
+        case gemma4
+    }
 
     enum Reasoning: String {
         /// No thinking: it answers straight away.
         case none
-        /// Reasons first when Think is on (Qwen3).
+        /// Reasons first when Think is on (Qwen3.5, Gemma 4, SmolLM3).
         case optional
         /// Always reasons (DeepSeek-R1).
         case always
@@ -64,7 +76,7 @@ struct LocalModel {
 
     var sizeText: String { ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
     var requirementText: String {
-        let gigabytes = minimumMemory > 6_000_000_000 ? 8 : minimumMemory > 4_000_000_000 ? 6 : 4
+        let gigabytes = minimumMemory > 9_000_000_000 ? 12 : minimumMemory > 6_000_000_000 ? 8 : minimumMemory > 4_000_000_000 ? 6 : 4
         return "Needs a device with \(gigabytes) GB of memory."
     }
     var uses: String {
@@ -119,69 +131,87 @@ enum AIModelCatalog {
                    url: hf("mradermacher/Qwen2.5-Coder-1.5B-GGUF/resolve/main/Qwen2.5-Coder-1.5B.Q4_K_M.gguf"),
                    sha256: "b5fa4d99dd9aa4d5c36f2bd9c60eb189d10809d547a336e6cba8a4f45d178dc8",
                    bytes: 986_048_960, minimumMemory: 3_500_000_000, completes: true, license: "Apache 2.0", trainedContext: 32768, kvBytesPerToken: 28672),
-        LocalModel(id: "qwen2.5-coder-1.5b-instruct", name: "Qwen2.5-Coder 1.5B Instruct", detail: "Small coding assistant",
-                   fileName: "Qwen2.5-Coder-1.5B-Instruct-Q4_K_M.gguf",
-                   url: hf("bartowski/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-1.5B-Instruct-Q4_K_M.gguf"),
-                   sha256: "f530705d447660a4336c329981af164b471b60b974b1d808d57e8ec9fe23b239",
-                   bytes: 986_048_800, minimumMemory: 3_500_000_000, chats: true, license: "Apache 2.0", trainedContext: 32768, kvBytesPerToken: 28672),
-        LocalModel(id: "qwen2.5-coder-3b-instruct", name: "Qwen2.5-Coder 3B Instruct", detail: "Coding assistant",
-                   fileName: "Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf",
-                   url: hf("bartowski/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf"),
-                   sha256: "3da3afe6cf5c674ac195803ea0dd6fee7e1c228c2105c1ce8c66890d1d4ab460",
-                   bytes: 1_929_903_360, minimumMemory: 5_000_000_000, chats: true, license: "Qwen Research License", trainedContext: 32768, kvBytesPerToken: 36864, agent: true),
-        LocalModel(id: "qwen2.5-coder-7b-instruct", name: "Qwen2.5-Coder 7B Instruct", detail: "Best coding assistant here",
-                   fileName: "Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf",
-                   url: hf("bartowski/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"),
-                   sha256: "1664fccab734674a50763490a8c6931b70e3f2f8ec10031b54806d30e5f956b6",
-                   bytes: 4_683_074_336, minimumMemory: 7_000_000_000, chats: true, license: "Apache 2.0", trainedContext: 32768, kvBytesPerToken: 57344, yarnContext: 131072, agent: true),
-        LocalModel(id: "qwen3-1.7b", name: "Qwen3 1.7B", detail: "General assistant that reasons first",
-                   fileName: "Qwen3-1.7B-Q8_0.gguf",
-                   url: hf("Qwen/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q8_0.gguf"),
-                   sha256: "061b54daade076b5d3362dac252678d17da8c68f07560be70818cace6590cb1a",
-                   bytes: 1_834_426_016, minimumMemory: 4_500_000_000, chats: true, license: "Apache 2.0", trainedContext: 32768, kvBytesPerToken: 114688, reasoning: .optional),
-        LocalModel(id: "qwen3-4b", name: "Qwen3 4B", detail: "General assistant that reasons first",
-                   fileName: "Qwen3-4B-Q4_K_M.gguf",
-                   url: hf("Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf"),
-                   sha256: "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
-                   bytes: 2_497_280_256, minimumMemory: 6_000_000_000, chats: true, license: "Apache 2.0", trainedContext: 32768, kvBytesPerToken: 147456, yarnContext: 131072, agent: true, reasoning: .optional),
-        LocalModel(id: "llama3.2-1b", name: "Llama 3.2 1B", detail: "Meta's small assistant",
-                   fileName: "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
-                   url: hf("bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf"),
-                   sha256: "6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83",
-                   bytes: 807_694_464, minimumMemory: 3_000_000_000, chats: true, license: "Llama 3.2 Community License", trainedContext: 131072, kvBytesPerToken: 32768),
-        LocalModel(id: "llama3.2-3b", name: "Llama 3.2 3B", detail: "Meta's assistant",
-                   fileName: "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
-                   url: hf("bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf"),
-                   sha256: "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
-                   bytes: 2_019_377_696, minimumMemory: 5_000_000_000, chats: true, license: "Llama 3.2 Community License", trainedContext: 131072, kvBytesPerToken: 114688),
-        LocalModel(id: "gemma3-1b", name: "Gemma 3 1B", detail: "Google's small assistant",
-                   fileName: "google_gemma-3-1b-it-Q4_K_M.gguf",
-                   url: hf("bartowski/google_gemma-3-1b-it-GGUF/resolve/main/google_gemma-3-1b-it-Q4_K_M.gguf"),
-                   sha256: "12bf0fff8815d5f73a3c9b586bd8fee8e7b248c935de70dec367679873d0f29d",
-                   bytes: 806_058_496, minimumMemory: 3_000_000_000, chats: true, license: "Gemma Terms of Use", trainedContext: 32768, kvBytesPerToken: 26624, slidingWindow: 512, fullAttentionShare: 1.0 / 6),
-        LocalModel(id: "gemma3-4b", name: "Gemma 3 4B", detail: "Google's assistant",
-                   fileName: "google_gemma-3-4b-it-Q4_K_M.gguf",
-                   url: hf("bartowski/google_gemma-3-4b-it-GGUF/resolve/main/google_gemma-3-4b-it-Q4_K_M.gguf"),
-                   sha256: "4996030242583a40aa151ff93f49ed787ac8c25e4120c3ae4588b2e2a7d1ae94",
-                   bytes: 2_489_758_112, minimumMemory: 6_000_000_000, chats: true, license: "Gemma Terms of Use", trainedContext: 131072, kvBytesPerToken: 139264, slidingWindow: 1024, fullAttentionShare: 1.0 / 6),
+        // Qwen3.5: three of every four layers keep a fixed-size state instead of a cache, so the cache
+        // per token is a quarter of a plain model's (kvBytesPerToken counts the other layers).
+        LocalModel(id: "qwen3.5-0.8b", name: "Qwen3.5 0.8B", detail: "Tiny assistant for older devices",
+                   fileName: "Qwen3.5-0.8B-Q8_0.gguf",
+                   url: hf("unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q8_0.gguf"),
+                   sha256: "0ad885ffd4bb022fc4f0d33a3308fa108ef8613159d3b3a67e23abca056b7a6c",
+                   bytes: 811_843_840, minimumMemory: 3_000_000_000, chats: true, license: "Apache 2.0", trainedContext: 262144, kvBytesPerToken: 12288,
+                   reasoning: .optional, format: .thinkPrefill),
+        LocalModel(id: "qwen3.5-2b", name: "Qwen3.5 2B", detail: "Small assistant",
+                   fileName: "Qwen3.5-2B-Q4_K_M.gguf",
+                   url: hf("unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf"),
+                   sha256: "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
+                   bytes: 1_280_835_840, minimumMemory: 4_000_000_000, chats: true, license: "Apache 2.0", trainedContext: 262144, kvBytesPerToken: 12288,
+                   reasoning: .optional, format: .thinkPrefill),
+        LocalModel(id: "qwen3.5-4b", name: "Qwen3.5 4B", detail: "Coding agent that can think first",
+                   fileName: "Qwen3.5-4B-Q4_K_M.gguf",
+                   url: hf("unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf"),
+                   sha256: "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+                   bytes: 2_740_937_888, minimumMemory: 6_000_000_000, chats: true, license: "Apache 2.0", trainedContext: 262144, kvBytesPerToken: 32768,
+                   agent: true, reasoning: .optional, format: .thinkPrefill),
+        LocalModel(id: "qwen3.5-9b", name: "Qwen3.5 9B", detail: "Best coding agent here",
+                   fileName: "Qwen3.5-9B-Q4_K_M.gguf",
+                   url: hf("unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf"),
+                   sha256: "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+                   bytes: 5_680_522_464, minimumMemory: 10_000_000_000, chats: true, license: "Apache 2.0", trainedContext: 262144, kvBytesPerToken: 32768,
+                   agent: true, reasoning: .optional, format: .thinkPrefill),
+        // Gemma 4: most layers attend over the last 512 tokens, and later layers share earlier ones' cache.
+        LocalModel(id: "gemma4-e2b", name: "Gemma 4 E2B", detail: "Google's small assistant",
+                   fileName: "gemma-4-E2B-it-Q4_K_M.gguf",
+                   url: hf("unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf"),
+                   sha256: "740185b21d22ceb83a11c3aa62ad5842ef32c70f6096d756bbee85a1e4ec34b8",
+                   bytes: 3_106_738_272, minimumMemory: 6_000_000_000, chats: true, license: "Gemma Terms of Use", trainedContext: 131072, kvBytesPerToken: 15360,
+                   slidingWindow: 512, fullAttentionShare: 0.4, reasoning: .optional, format: .gemma4),
+        LocalModel(id: "gemma4-e4b", name: "Gemma 4 E4B", detail: "Google's assistant",
+                   fileName: "gemma-4-E4B-it-Q4_K_M.gguf",
+                   url: hf("unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_K_M.gguf"),
+                   sha256: "85a896a047553e842f25297ee5b031d64ff30147d9c4af17b1e4b394cd1fab87",
+                   bytes: 4_977_171_584, minimumMemory: 10_000_000_000, chats: true, license: "Gemma Terms of Use", trainedContext: 131072, kvBytesPerToken: 49152,
+                   slidingWindow: 512, fullAttentionShare: 0.42, agent: true, reasoning: .optional, format: .gemma4),
         LocalModel(id: "phi4-mini", name: "Phi-4 mini", detail: "Microsoft's assistant, good at reasoning",
                    fileName: "microsoft_Phi-4-mini-instruct-Q4_K_M.gguf",
                    url: hf("bartowski/microsoft_Phi-4-mini-instruct-GGUF/resolve/main/microsoft_Phi-4-mini-instruct-Q4_K_M.gguf"),
                    sha256: "01999f17c39cc3074afae5e9c539bc82d45f2dd7faa3917c66cbef76fce8c0c2",
                    bytes: 2_491_874_688, minimumMemory: 6_000_000_000, chats: true, license: "MIT", trainedContext: 131072, kvBytesPerToken: 131072, agent: true),
-        LocalModel(id: "deepseek-r1-1.5b", name: "DeepSeek-R1 Distill 1.5B", detail: "Reasons step by step",
-                   fileName: "DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf",
-                   url: hf("bartowski/DeepSeek-R1-Distill-Qwen-1.5B-GGUF/resolve/main/DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf"),
-                   sha256: "1741e5b2d062b07acf048bf0d2c514dadf2a48f94e2b4aa0cfe069af3838ee2f",
-                   bytes: 1_117_320_800, minimumMemory: 3_500_000_000, chats: true, license: "MIT", trainedContext: 131072, kvBytesPerToken: 28672, reasoning: .always),
-        LocalModel(id: "smollm2-1.7b", name: "SmolLM2 1.7B", detail: "Hugging Face's small assistant",
-                   fileName: "SmolLM2-1.7B-Instruct-Q4_K_M.gguf",
-                   url: hf("bartowski/SmolLM2-1.7B-Instruct-GGUF/resolve/main/SmolLM2-1.7B-Instruct-Q4_K_M.gguf"),
-                   sha256: "77665ea4815999596525c636fbeb56ba8b080b46ae85efef4f0d986a139834d7",
-                   bytes: 1_055_609_824, minimumMemory: 3_500_000_000, chats: true, license: "Apache 2.0", trainedContext: 8192, kvBytesPerToken: 196608),
+        LocalModel(id: "smollm3-3b", name: "SmolLM3 3B", detail: "Hugging Face's assistant that can think first",
+                   fileName: "SmolLM3-3B-Q4_K_M.gguf",
+                   url: hf("unsloth/SmolLM3-3B-GGUF/resolve/main/SmolLM3-3B-Q4_K_M.gguf"),
+                   sha256: "4de907d2d388a5508fb7cb443a06effe14cce3518b0a78d3bdd9e74d9edce989",
+                   bytes: 1_915_306_528, minimumMemory: 5_000_000_000, chats: true, license: "Apache 2.0", trainedContext: 65536, kvBytesPerToken: 73728,
+                   reasoning: .optional, format: .thinkPrefill),
     ]
 
     static let all = [fast, regular] + extras
+
+    /// Models the catalog used to have, replaced by newer ones (Qwen3.5 for Qwen3 and Qwen2.5-Coder
+    /// Instruct, Gemma 4 for Gemma 3, SmolLM3 for SmolLM2; Qwen3.5 reasons as DeepSeek-R1 Distill
+    /// did, and outdoes Llama 3.2): their files, deleted at launch.
+    private static let retired: [(id: String, fileName: String)] = [
+        ("qwen2.5-coder-1.5b-instruct", "Qwen2.5-Coder-1.5B-Instruct-Q4_K_M.gguf"),
+        ("qwen2.5-coder-3b-instruct", "Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf"),
+        ("qwen2.5-coder-7b-instruct", "Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"),
+        ("qwen3-1.7b", "Qwen3-1.7B-Q8_0.gguf"),
+        ("qwen3-4b", "Qwen3-4B-Q4_K_M.gguf"),
+        ("llama3.2-1b", "Llama-3.2-1B-Instruct-Q4_K_M.gguf"),
+        ("llama3.2-3b", "Llama-3.2-3B-Instruct-Q4_K_M.gguf"),
+        ("gemma3-1b", "google_gemma-3-1b-it-Q4_K_M.gguf"),
+        ("gemma3-4b", "google_gemma-3-4b-it-Q4_K_M.gguf"),
+        ("deepseek-r1-1.5b", "DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf"),
+        ("smollm2-1.7b", "SmolLM2-1.7B-Instruct-Q4_K_M.gguf"),
+    ]
+
+    /// Deletes retired models' files and moves settings that named one to a model still here.
+    static func removeRetired() {
+        for model in retired {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(model.fileName))
+        }
+        let ids = Set(retired.map(\.id))
+        let settings = AppSettings.shared
+        if ids.contains(settings.chatModel.rawValue) { settings.chatModel = .appleIntelligence }
+        if let sub = settings.subagentModel, ids.contains(sub.rawValue) { settings.subagentModel = nil }
+    }
 
     static func model(for choice: AIModelChoice) -> LocalModel? {
         all.first { $0.choice == choice }
@@ -192,9 +222,9 @@ enum AIModelCatalog {
 
     /// Chat models suggested before any are downloaded, best first, with why.
     static let suggestedChat: [(id: String, why: String)] = [
-        ("qwen2.5-coder-3b-instruct", "A quick coding agent for most devices"),
-        ("qwen3-4b", "Thinks before it answers; up to 128K context"),
-        ("qwen2.5-coder-7b-instruct", "The best coding agent here; up to 128K context"),
+        ("qwen3.5-4b", "A quick coding agent for most devices; can think first"),
+        ("qwen3.5-9b", "The best coding agent here, for devices with 12 GB"),
+        ("gemma4-e4b", "Google's agent, for devices with 12 GB"),
     ]
 
     /// Why a model is suggested for Chat, if it is.

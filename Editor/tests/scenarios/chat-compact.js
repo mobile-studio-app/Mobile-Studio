@@ -5,8 +5,8 @@ scenario(async () => {
   const sent = [];
   window.__files['big.lua'] = '-- a long file\n' + 'local x = 1\n'.repeat(300);
   mockNative((m) => {
-    if (m.cmd === 'aiChatModels') return { selected: 'qwen3-4b', mode: 'auto', thinking: false, contextSize: 4096, kvBits: 8,
-      models: [{ id: 'qwen3-4b', name: 'Qwen3 4B', detail: '', ready: true, agent: true, reasoning: 'optional', contexts: [{ tokens: 4096, bytes: 1e9, fits: true }] }] };
+    if (m.cmd === 'aiChatModels') return { selected: 'qwen3.5-4b', mode: 'auto', thinking: false, contextSize: 4096, kvBits: 8,
+      models: [{ id: 'qwen3.5-4b', name: 'Qwen3.5 4B', detail: '', ready: true, agent: true, reasoning: 'optional', contexts: [{ tokens: 4096, bytes: 1e9, fits: true }] }] };
     if (m.cmd === 'aiChat') {
       sent.push(m);
       const summarising = /You summarise conversations/.test(m.messages[0].content);

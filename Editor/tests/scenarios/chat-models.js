@@ -3,8 +3,8 @@ scenario(async () => {
   mockNative((m) => {
     if (m.cmd === 'aiChatModels') return { selected: 'apple', mode: 'edit', contextSize: 4096,
       models: [{ id: 'apple', name: 'Apple Intelligence', detail: '', ready: true, contexts: [{ tokens: 4096, bytes: 0, fits: true }] },
-        { id: 'qwen2.5-coder-3b-instruct', name: 'Qwen2.5-Coder 3B Instruct', detail: 'Best for coding on most devices · 1.9 GB', ready: false, suggested: true, contexts: [] },
-        { id: 'qwen3-4b', name: 'Qwen3 4B', detail: 'Thinks before it answers · 2.5 GB', ready: false, suggested: true, contexts: [] }] };
+        { id: 'qwen3.5-4b', name: 'Qwen3.5 4B', detail: 'A quick coding agent for most devices · 2.7 GB', ready: false, suggested: true, contexts: [] },
+        { id: 'qwen3.5-9b', name: 'Qwen3.5 9B', detail: 'The best coding agent here · 5.7 GB', ready: false, suggested: true, contexts: [] }] };
     return undefined;
   });
   document.getElementById('chat-toggle').click();
@@ -12,7 +12,7 @@ scenario(async () => {
   await until(() => select.querySelector('optgroup'), 3000);
   const group = select.querySelector('optgroup');
   check('suggested models are grouped', group && group.label === 'Suggested (download)');
-  check('each suggestion says why', group && group.children.length === 2 && group.children[1].textContent.includes('Thinks before it answers'));
+  check('each suggestion says why', group && group.children.length === 2 && group.children[1].textContent.includes('The best coding agent here'));
   check('the chosen model stays shown', select.selectedOptions[0].textContent === 'Apple Intelligence');
   const unlabelled = [...document.querySelectorAll('#chat-pane button, #chat-pane select, #chat-pane textarea')]
     .filter((el) => !el.getAttribute('aria-label') && !el.closest('label') && !el.textContent.trim().match(/^[\w ]+$/))

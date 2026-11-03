@@ -23,13 +23,13 @@ scenario(async () => {
   window.__files['big.lua'] = '-- a long file\n' + 'local x = 1\n'.repeat(300);
   const models = [
     { id: 'apple', name: 'Apple Intelligence', detail: '', ready: true, agent: false, reasoning: 'none', contexts: [{ tokens: 4096, bytes: 0, fits: true }] },
-    { id: 'qwen3-4b', name: 'Qwen3 4B', detail: '', ready: true, agent: true, reasoning: 'optional',
+    { id: 'qwen3.5-4b', name: 'Qwen3.5 4B', detail: '', ready: true, agent: true, reasoning: 'optional',
       contexts: [{ tokens: 4096, bytes: 1e9, fits: true }, { tokens: 8192, bytes: 2e9, fits: true }] },
     { id: 'cloud:anthropic', name: 'claude-sonnet-5-5 (Anthropic)', detail: '', ready: true, cloud: true, agent: true, reasoning: 'optional',
       contexts: [{ tokens: 200000, bytes: 0, fits: true }] },
   ];
   mockNative((m) => {
-    if (m.cmd === 'aiChatModels') return { selected: 'qwen3-4b', mode: 'auto', thinking: false, contextSize: 8192, kvBits: 8, models };
+    if (m.cmd === 'aiChatModels') return { selected: 'qwen3.5-4b', mode: 'auto', thinking: false, contextSize: 8192, kvBits: 8, models };
     if (m.cmd === 'programConsole') return 'line a\nline b';
     if (m.cmd === 'runProgram') return { output: 'hello\n', exitCode: null, stillRunning: true };
     if (m.cmd === 'aiChat') {
@@ -60,7 +60,7 @@ scenario(async () => {
   const system = sent[0].messages[0].content;
   check('the instructions list the project\'s files', /The project's files \(\d+\)/.test(system) && system.includes('lib/util.lua'));
   check('the instructions describe the new tools', ['read_files', 'find_files', 'read_console', 'read_terminal', 'read_output', 'run_program'].every((t) => system.includes(t)));
-  check('Qwen3 is told not to think while Think is off', system.includes('/no_think'));
+  check('a model that reasons by itself isn\'t told how to think while Think is off', !system.includes('<think>') && !system.includes('/no_think'));
   check('the open file goes with the question', /The open file is main\.lua/.test(sent[0].messages[1].content));
   check('the question is marked to keep when room runs out', sent[2].messages[1].keep === true && sent[2].messages.slice(2).every((m) => !m.keep));
 
@@ -81,7 +81,7 @@ scenario(async () => {
   const answers = [...document.querySelectorAll('.chat-message.assistant .chat-body > p')];
   check('the final answer shows', (answers.pop() || {}).textContent === 'Fixed: it was a typo.');
 
-  // Think on: saved, Qwen3 reasons by itself (no /no_think), with a bigger answer budget.
+  // Think on: saved, Qwen3.5 reasons by itself (the app opens its thinking), with a bigger answer budget.
   think.click();
   await wait(100);
   check('Think turns on', think.classList.contains('on'));
@@ -91,7 +91,7 @@ scenario(async () => {
   box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
   await until(() => sent.length >= 5, 4000);
   const next = sent[4];
-  check('with Think on Qwen3 isn\'t told /no_think', !next.messages[0].content.includes('/no_think'));
+  check('with Think on, a model that reasons by itself isn\'t told how', !next.messages[0].content.includes('/no_think') && !next.messages[0].content.includes('inside <think>'));
   check('with Think on answers can be longer, and the app is told', next.maxTokens === 3072 && next.thinking === true, next.maxTokens);
   check('an earlier question\'s reasoning is left out', next.messages.filter((x) => x.role === 'assistant').every((x) => !x.content.includes('<think>')));
   check('older tool results are cut short', next.messages.some((x) => /cut short to save room/.test(x.content)) || sent[3].messages.some((x) => /cut short to save room/.test(x.content)));

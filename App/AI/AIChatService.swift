@@ -226,6 +226,12 @@ final class LlamaChatEngine {
     private var vocab: OpaquePointer?
     private var template: String?
     private var cached: [llama_token] = []
+    /// Models whose cache can't be cut back to a shorter prompt (Qwen3.5's fixed-size state, Gemma 4's
+    /// sliding window): the state after the last prompt is kept, and a prompt that starts with that
+    /// one goes on from it instead of being read again from the start.
+    private var snapshots = false
+    private var snapshot: [UInt8] = []
+    private var snapshotTokens: [llama_token] = []
 
     init(model: LocalModel, contextSize: Int, kvBits: Int = 8) {
         self.model = model
@@ -263,9 +269,9 @@ final class LlamaChatEngine {
         let threads = Int32(max(2, min(4, ProcessInfo.processInfo.activeProcessorCount - 2)))
         var contextParams = llama_context_default_params()
         // No more than the model was trained for, or past that with YaRN where its makers support
-        // it (Qwen's 128K: the RoPE stretched by the ratio, only when it's needed, since it costs a
-        // little quality on short texts). The KV cache is kept at 8 bits, half the memory of 16, or
-        // 4; either needs flash attention for the V half. Sliding-window layers (Gemma 3) keep only
+        // it (YaRN: the RoPE stretched by the ratio, only when it's needed, since it costs a little
+        // quality on short texts). The KV cache is kept at 8 bits, half the memory of 16, or V at 4;
+        // either needs flash attention for the V half. Sliding-window layers (Gemma 4) keep only
         // their window, not the whole context.
         let trained = Int(llama_model_n_ctx_train(loaded))
         let longest = max(trained, model.yarnContext ?? 0)
@@ -295,12 +301,46 @@ final class LlamaChatEngine {
         vocab = llama_model_get_vocab(loaded)
         template = llama_model_chat_template(loaded, nil).map { String(cString: $0) }
         cached = []
+        snapshots = llama_model_is_recurrent(loaded) || llama_model_is_hybrid(loaded) || model.slidingWindow > 0
+        snapshot = []
+        snapshotTokens = []
     }
 
     // MARK: - Prompt
 
     /// The conversation in the model's chat format, ending where the assistant's answer starts.
-    private func format(_ messages: [ChatMessage]) -> String {
+    private func format(_ messages: [ChatMessage], thinking: Bool) -> String {
+        switch model.format {
+        case .gemma4: return Self.gemma4(messages, thinking: thinking)
+        case .template: return applyTemplate(messages)
+        case .thinkPrefill:
+            // Earlier answers start as this one does (an empty thought unless they kept theirs), so the
+            // prompt goes on from the last one's tokens.
+            let turns = messages.map { m in
+                m.role == "assistant" && !m.content.hasPrefix("<think>") ? ChatMessage(role: m.role, content: "<think>\n\n</think>\n\n" + m.content, keep: m.keep) : m
+            }
+            return applyTemplate(turns) + (thinking ? "<think>\n" : "<think>\n\n</think>\n\n")
+        }
+    }
+
+    /// Gemma 4: <|turn>role … <turn|>, the system turn first (opening with <|think|> to reason), and
+    /// earlier thoughts as its thought channel.
+    private static func gemma4(_ messages: [ChatMessage], thinking: Bool) -> String {
+        var out = ""
+        let system = messages.filter { $0.role == "system" }.map(\.content).joined(separator: "\n\n")
+        if thinking || !system.isEmpty { out += "<|turn>system\n" + (thinking ? "<|think|>\n" : "") + system + "<turn|>\n" }
+        for m in messages where m.role != "system" {
+            var content = m.content
+            if m.role == "assistant" {
+                content = content.replacingOccurrences(of: "<think>\n", with: "<|channel>thought\n").replacingOccurrences(of: "<think>", with: "<|channel>thought\n")
+                    .replacingOccurrences(of: "\n</think>", with: "<channel|>").replacingOccurrences(of: "</think>", with: "<channel|>")
+            }
+            out += "<|turn>\(m.role == "assistant" ? "model" : m.role)\n\(content)<turn|>\n"
+        }
+        return out + "<|turn>model\n"
+    }
+
+    private func applyTemplate(_ messages: [ChatMessage]) -> String {
         let roles = messages.map { strdup($0.role) }
         let contents = messages.map { strdup($0.content) }
         defer {
@@ -343,12 +383,12 @@ final class LlamaChatEngine {
         // a turn marked keep (the question being worked on), so the model doesn't lose its task.
         let budget = Int(llama_n_ctx(ctx)) - maxTokens - 8
         var turns = messages
-        var prompt = tokenize(format(turns))
+        var prompt = tokenize(format(turns, thinking: thinking))
         var dropped = 0
         while prompt.count > budget, let oldest = turns.indices.dropLast().first(where: { turns[$0].role != "system" && !turns[$0].keep }) {
             turns.remove(at: oldest)
             dropped += 1
-            prompt = tokenize(format(turns))
+            prompt = tokenize(format(turns, thinking: thinking))
         }
         if prompt.count > budget { prompt = Array(prompt.suffix(budget)) }
         let promptTokens = prompt.count
@@ -366,11 +406,26 @@ final class LlamaChatEngine {
         while common < cached.count, common < prompt.count, cached[common] == prompt[common] { common += 1 }
         if common == prompt.count { common -= 1 }
         if common < cached.count {
-            if !llama_memory_seq_rm(memory, 0, Int32(common), -1) {
+            if snapshots {
+                // The cache can't be cut back: go on from the last prompt's state if this prompt starts
+                // with it, otherwise from the start.
                 llama_memory_clear(memory, true)
+                cached = []
                 common = 0
+                if !snapshot.isEmpty, snapshotTokens.count < prompt.count, Array(prompt.prefix(snapshotTokens.count)) == snapshotTokens,
+                   snapshot.withUnsafeBufferPointer({ llama_state_seq_set_data(ctx, $0.baseAddress, $0.count, 0) }) > 0 {
+                    cached = snapshotTokens
+                    common = snapshotTokens.count
+                } else {
+                    llama_memory_clear(memory, true)
+                }
+            } else {
+                if !llama_memory_seq_rm(memory, 0, Int32(common), -1) {
+                    llama_memory_clear(memory, true)
+                    common = 0
+                }
+                cached.removeSubrange(common...)
             }
-            cached.removeSubrange(common...)
         }
         var index = common
         while index < prompt.count {
@@ -386,20 +441,42 @@ final class LlamaChatEngine {
             cached += chunk
             index += count
         }
+        // The state after this prompt, for the next one to go on from (if it isn't too big to keep).
+        if snapshots {
+            let size = llama_state_seq_get_size(ctx, 0)
+            if size > 0, Int64(size) < Int64(os_proc_available_memory()) / 4 {
+                var data = [UInt8](repeating: 0, count: size)
+                let written = data.withUnsafeMutableBufferPointer { llama_state_seq_get_data(ctx, $0.baseAddress, size, 0) }
+                snapshot = written > 0 ? Array(data.prefix(written)) : []
+                snapshotTokens = written > 0 ? prompt : []
+            } else {
+                snapshot = []
+                snapshotTokens = []
+            }
+        }
 
         // Reasoning models sample as their makers suggest (Qwen3: top-k 20; top-p 0.95 and
         // temperature 0.6 when thinking, 0.8 and 0.7 when not), with a presence penalty against
         // the endless repeats they can fall into; others as before.
-        let reasons = model.reasoning != .none
+        let gemma = model.format == .gemma4
+        let reasons = model.reasoning != .none && !gemma
         let sampler = llama_sampler_chain_init(llama_sampler_chain_default_params())
-        llama_sampler_chain_add(sampler, llama_sampler_init_top_k(reasons ? 20 : 40))
-        if reasons {
-            llama_sampler_chain_add(sampler, llama_sampler_init_penalties(llama_vocab_n_tokens(vocab), 256, 1.0, 0, 1.0))
+        if gemma {
+            // Gemma 4: temperature 1, top-k 64, top-p 0.95.
+            llama_sampler_chain_add(sampler, llama_sampler_init_top_k(64))
+            llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.95, 1))
+            llama_sampler_chain_add(sampler, llama_sampler_init_temp(1.0))
+            llama_sampler_chain_add(sampler, llama_sampler_init_dist(UInt32.random(in: 0...UInt32.max - 1)))
+        } else {
+            llama_sampler_chain_add(sampler, llama_sampler_init_top_k(reasons ? 20 : 40))
+            if reasons {
+                llama_sampler_chain_add(sampler, llama_sampler_init_penalties(llama_vocab_n_tokens(vocab), 256, 1.0, 0, 1.0))
+            }
+            llama_sampler_chain_add(sampler, llama_sampler_init_top_p(reasons && !thinking ? 0.8 : 0.95, 1))
+            llama_sampler_chain_add(sampler, llama_sampler_init_min_p(reasons ? 0 : 0.05, 1))
+            llama_sampler_chain_add(sampler, llama_sampler_init_temp(reasons && thinking ? 0.6 : 0.7))
+            llama_sampler_chain_add(sampler, llama_sampler_init_dist(UInt32.random(in: 0...UInt32.max - 1)))
         }
-        llama_sampler_chain_add(sampler, llama_sampler_init_top_p(reasons && !thinking ? 0.8 : 0.95, 1))
-        llama_sampler_chain_add(sampler, llama_sampler_init_min_p(reasons ? 0 : 0.05, 1))
-        llama_sampler_chain_add(sampler, llama_sampler_init_temp(reasons && thinking ? 0.6 : 0.7))
-        llama_sampler_chain_add(sampler, llama_sampler_init_dist(UInt32.random(in: 0...UInt32.max - 1)))
         defer { llama_sampler_free(sampler) }
 
         var output: [UInt8] = []
@@ -408,7 +485,7 @@ final class LlamaChatEngine {
             var token = llama_sampler_sample(sampler, ctx, -1)
             if llama_vocab_is_eog(vocab, token) { break }
             output += piece(token)
-            onText(Self.text(output))
+            onText(shown(output))
             let rc = llama_decode(ctx, llama_batch_get_one(&token, 1))
             guard rc == 0 else {
                 llama_memory_clear(memory, true)
@@ -418,7 +495,15 @@ final class LlamaChatEngine {
             }
             cached.append(token)
         }
-        return ChatReply(text: Self.text(output), promptTokens: promptTokens, dropped: dropped)
+        return ChatReply(text: shown(output), promptTokens: promptTokens, dropped: dropped)
+    }
+
+    /// The answer as Chat shows it: Gemma 4's thought channel as <think> … </think>, without its other markers.
+    private func shown(_ bytes: [UInt8]) -> String {
+        let text = Self.text(bytes)
+        guard model.format == .gemma4 else { return text }
+        return text.replacingOccurrences(of: "<|channel>thought\n", with: "<think>\n").replacingOccurrences(of: "<|channel>thought", with: "<think>")
+            .replacingOccurrences(of: "<channel|>", with: "\n</think>\n").replacingOccurrences(of: "<turn|>", with: "")
     }
 
     /// The answer so far; a character split across tokens shows once it's complete.
@@ -443,10 +528,12 @@ final class LlamaChatEngine {
 
     private func piece(_ token: llama_token) -> [UInt8] {
         var buffer = [CChar](repeating: 0, count: 64)
-        var n = llama_token_to_piece(vocab, token, &buffer, Int32(buffer.count), 0, false)
+        // Gemma 4's thought markers are special tokens: kept, to be shown as <think>.
+        let special = model.format == .gemma4
+        var n = llama_token_to_piece(vocab, token, &buffer, Int32(buffer.count), 0, special)
         if n < 0 {
             buffer = [CChar](repeating: 0, count: Int(-n))
-            n = llama_token_to_piece(vocab, token, &buffer, Int32(buffer.count), 0, false)
+            n = llama_token_to_piece(vocab, token, &buffer, Int32(buffer.count), 0, special)
         }
         return buffer.prefix(Int(max(n, 0))).map { UInt8(bitPattern: $0) }
     }
