@@ -76,6 +76,8 @@ scenario(async () => {
   check('with a "…" for the rest', titleButtons().some((b) => b.title === 'More Actions...'));
   check('an item whose when is false doesn\'t show', !titleButtons().some((b) => b.title === 'Gated Thing'));
 
+  // The buttons show as soon as extensions load; the extension runs once its host has started.
+  await until(async () => Array.isArray(await run('menus.ran')), 8000);
   titleButtons().find((b) => b.title === 'Open Lua Preview').click();
   check('its command runs with the file\'s Uri', await until(async () => ((await run('menus.ran')) || []).includes('preview main.lua')), JSON.stringify(await run('menus.ran')));
 
