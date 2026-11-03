@@ -513,6 +513,10 @@ async function send() {
       // The reasoning shows folded; it goes back to the model only while this question is worked on,
       // and tool blocks in it don't run.
       const answer = withoutThinking(reply.text);
+      if (!answer && !thinkingOf(reply.text) && !stopped) {
+        messages.push({ role: 'assistant', content: '', kind: 'error', shown: `${modelInfo(settings.selected).name || 'The model'} gave an empty answer. Try again, or a smaller context or another model.` });
+        break;
+      }
       const calls = canAgent() ? toolCalls(answer) : [];
       messages.push({ role: 'assistant', content: answer, shown: reply.text, thinking: thinkingOf(reply.text), calls: calls.map((c) => c.tool + (c.path ? ' ' + c.path : '')) });
       render();
@@ -785,7 +789,7 @@ function contextSelect(modelId, current, onChange) {
   }
   const effective = effectiveContext(modelId, current);
   for (const c of contexts) {
-    const o = element('option', null, `${k(c.tokens)} · ≈${gb(c.bytes)}${c.fits ? '' : ' (won\'t fit)'}`);
+    const o = element('option', null, `${k(c.tokens)} · ≈${gb(c.bytes)}${c.fits ? '' : settings.memoryAvailable ? ` (won't fit: ${gb(settings.memoryAvailable * 0.9)} usable)` : ' (won\'t fit)'}`);
     o.value = String(c.tokens);
     o.disabled = !c.fits;
     o.selected = c.tokens === effective;
@@ -821,9 +825,16 @@ function renderSettings() {
     'Tokens the model reads at once: the conversation, files and answer. Bigger remembers more but needs more memory and takes longer to read. Each size shows its estimated memory; ones that won\'t fit this device are greyed out.');
   const info = modelInfo(settings.selected);
   if (!info.cloud && settings.selected !== 'apple') {
-    row('Cache precision', select([[8, '8-bit (best)'], [4, '4-bit (twice the context)']], settings.kvBits,
+    row('Cache precision', select([[8, '8-bit (best)'], [4, 'Smaller (about 1.3× the context)']], settings.kvBits,
       (v) => saveSetting({ kvBits: Number(v) })),
-      'How precisely the model remembers what it has read. 4-bit fits about twice the context in the same memory, a little less accurately.');
+      'How precisely the model remembers what it has read. Smaller keeps half of it at 4 bits, fitting about a third more context, a little less accurately.');
+    // iOS gives an app only part of the device's memory unless the app keeps its increased memory
+    // limit when it's installed (some sideloading tools drop it).
+    if (settings.memoryAvailable && settings.physicalMemory && settings.memoryAvailable < settings.physicalMemory * 0.55) {
+      panel.append(element('div', 'chat-setting-note', `iOS lets Mobile Studio use about ${(settings.memoryAvailable / 1e9).toFixed(1)} GB of this device's `
+        + `${Math.round(settings.physicalMemory / 1e9)} GB, which limits the context. Installing with a tool that keeps the app's entitlements `
+        + '(its increased memory limit) gives it more.'));
+    }
   }
   // Subagents only where the agent is: they use tools too.
   if (!canAgent()) {

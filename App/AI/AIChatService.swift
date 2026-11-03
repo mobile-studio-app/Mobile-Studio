@@ -63,11 +63,14 @@ final class AIChatService {
     static let contextSizes = [2048, 4096, 8192, 16384, 32768, 65536, 131072]
 
     /// A context's memory: the model, its KV cache (8 bits: about 53% of the 16-bit size with the
-    /// scales; 4 bits: about 28%) and room for the computation.
+    /// scales; "4 bits": K stays at 8 and V goes to 4, about 40%) and room for the computation.
     static func memory(of model: LocalModel, context: Int, kvBits: Int = AppSettings.shared.chatKVBits) -> Int64 {
-        let share = kvBits == 4 ? 0.28 : 0.53
+        let share = kvBits == 4 ? 0.405 : 0.53
         return model.bytes + Int64(model.kvBytes(context: context) * share) + 300_000_000
     }
+
+    /// What a chat model can use (for the Chat panel's context sizes to say why one won't fit).
+    var availableMemory: Int64 { memoryForChat }
 
     /// Memory the app can still use, plus what loaded chat models already take (they'd be replaced).
     private var memoryForChat: Int64 {
@@ -274,7 +277,9 @@ final class LlamaChatEngine {
             contextParams.yarn_orig_ctx = UInt32(trained)
         }
         contextParams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED
-        contextParams.type_k = kvBits == 4 ? GGML_TYPE_Q4_0 : GGML_TYPE_Q8_0
+        // K stays at 8 bits either way: at 4, models whose keys have large values (Qwen's) lose the
+        // thread and write nonsense. V takes 4 bits well.
+        contextParams.type_k = GGML_TYPE_Q8_0
         contextParams.type_v = kvBits == 4 ? GGML_TYPE_Q4_0 : GGML_TYPE_Q8_0
         contextParams.swa_full = false
         contextParams.n_batch = 512
@@ -404,9 +409,11 @@ final class LlamaChatEngine {
             if llama_vocab_is_eog(vocab, token) { break }
             output += piece(token)
             onText(Self.text(output))
-            guard llama_decode(ctx, llama_batch_get_one(&token, 1)) == 0 else {
+            let rc = llama_decode(ctx, llama_batch_get_one(&token, 1))
+            guard rc == 0 else {
                 llama_memory_clear(memory, true)
                 cached = []
+                if output.isEmpty && !cancel.isCancelled { throw Self.error("\(model.name) failed while answering (\(rc)).") }
                 break
             }
             cached.append(token)

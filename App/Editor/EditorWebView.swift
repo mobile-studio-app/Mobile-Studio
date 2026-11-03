@@ -430,7 +430,9 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                               },
                               "subagentContextSize": s.subagentContextSize,
                               "contextSize": s.chatContextSize, "subagentModel": s.subagentModel?.rawValue ?? "",
-                              "subagentParallel": s.subagentParallel, "mode": s.chatMode, "thinking": s.chatThinking, "kvBits": s.chatKVBits], nil)
+                              "subagentParallel": s.subagentParallel, "mode": s.chatMode, "thinking": s.chatThinking, "kvBits": s.chatKVBits,
+                              "memoryAvailable": AIChatService.shared.availableMemory,
+                              "physicalMemory": Int64(ProcessInfo.processInfo.physicalMemory)], nil)
             case "aiChatSelect":
                 if let raw = body["id"] as? String, let choice = AIModelChoice(rawValue: raw) { AppSettings.shared.chatModel = choice }
                 replyHandler(true, nil)
