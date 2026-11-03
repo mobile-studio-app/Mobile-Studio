@@ -68,6 +68,11 @@
   /* Markdown preview (mdpreview.js), in VS Code's preview styles */
   .palette-button.on { color: var(--fg); }
   .palette-button[hidden] { display: none; }
+  .ext-title-actions { display: inline-flex; align-items: center; }
+  #tabbar .palette-button.ext-title-text { width: auto; padding: 0 8px; font-size: 13px; white-space: nowrap; }
+  .ext-status-item .codicon, .cm-codelens .codicon { font-size: 1.05em; vertical-align: -2px; }
+  .codicon-spin { display: inline-block; animation: codicon-spin 1.5s linear infinite; }
+  @keyframes codicon-spin { to { transform: rotate(360deg); } }
   .md-preview { position: absolute; inset: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; background: var(--bg); color: var(--text); z-index: 5; }
   .md-preview[hidden] { display: none; }
   /* langfeatures.js: the Quick Fix light bulb, inlay hints and the peek box. */

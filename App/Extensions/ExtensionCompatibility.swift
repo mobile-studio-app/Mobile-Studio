@@ -31,7 +31,7 @@ struct ExtensionCompatibility: Equatable {
     /// Contribution points DuoCode implements.
     static let supportedContributions: Set<String> = [
         "themes", "grammars", "snippets", "languages", "configuration", "configurationDefaults",
-        "commands", "keybindings", "menus", "jsonValidation", "iconThemes",
+        "commands", "keybindings", "menus", "iconThemes",
         "views", "viewsContainers", "viewsWelcome", "customEditors", "taskDefinitions",
     ]
 

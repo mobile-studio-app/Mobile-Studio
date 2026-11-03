@@ -18,6 +18,10 @@ final class LeftSidebarView: UIView, UITableViewDataSource, UITableViewDelegate 
     var onOpenToSide: ((String) -> Void)?
     /// Open a file with a range selected: path, 1-based line, UTF-16 column and length.
     var onOpenMatch: ((String, Int, Int, Int) -> Void)?
+    /// Runs JavaScript in the editor page: extensions' Explorer menu items and file decorations come from there.
+    var callEditor: ((String, [String: Any], @escaping (Any?) -> Void) -> Void)?
+    /// Posted (by the editor bridge) when an extension's file decorations changed.
+    static let fileDecorationsDidChange = Notification.Name("LeftSidebarView.fileDecorationsDidChange")
     var onOpenDiff: ((DiffRequest) -> Void)?
     var onProjectChanged: (() -> Void)?
     /// Writes the editor's unsaved edits to disk, then calls back. Git and Search read files from disk.
@@ -52,6 +56,8 @@ final class LeftSidebarView: UIView, UITableViewDataSource, UITableViewDelegate 
     private var projectExpanded = true
     /// Git status letters for the Explorer, as VS Code decorates changed files.
     private var decorations: [String: GitFileStatus] = [:]
+    /// Extensions' file decorations (FileDecorationProvider): a badge and a colour, by path.
+    private var extensionDecorations: [String: ExtensionDecoration] = [:]
 
     private let searchPanel = SearchPanelView()
     private let scmPanel = SourceControlPanelView()
@@ -130,6 +136,8 @@ final class LeftSidebarView: UIView, UITableViewDataSource, UITableViewDelegate 
         }
         NotificationCenter.default.addObserver(self, selector: #selector(projectFilesChanged),
                                                name: ProjectStore.filesDidChange, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(refreshExtensionDecorations),
+                                               name: Self.fileDecorationsDidChange, object: nil)
     }
 
     private func wirePanels() {
@@ -300,6 +308,26 @@ final class LeftSidebarView: UIView, UITableViewDataSource, UITableViewDelegate 
         explorerRows = []
         if projectExpanded { appendRows(of: root, prefix: "", depth: 0) }
         filesTableView.reloadData()
+        refreshExtensionDecorations()
+    }
+
+    /// Asks the extensions for the shown rows' decorations; redraws if they changed.
+    @objc func refreshExtensionDecorations() {
+        guard let callEditor else { return }
+        let paths = explorerRows.map(\.path)
+        callEditor("return await window.duocode.fileDecorations(paths)", ["paths": paths]) { [weak self] result in
+            guard let self else { return }
+            var map: [String: ExtensionDecoration] = [:]
+            for (path, value) in result as? [String: Any] ?? [:] {
+                guard let d = value as? [String: Any] else { continue }
+                let decoration = ExtensionDecoration(badge: d["badge"] as? String ?? "", color: d["color"] as? String ?? "",
+                                                     tooltip: d["tooltip"] as? String ?? "")
+                if !decoration.badge.isEmpty || !decoration.color.isEmpty { map[path] = decoration }
+            }
+            guard map != self.extensionDecorations else { return }
+            self.extensionDecorations = map
+            self.filesTableView.reloadData()
+        }
     }
 
     /// Folders first, then files, each sorted the way VS Code does; expanded folders recurse.
@@ -551,11 +579,23 @@ final class LeftSidebarView: UIView, UITableViewDataSource, UITableViewDelegate 
         } else {
             let (icon, color) = VS.fileIcon(row.name)
             let status = decorations[row.path]
+            // Git's decoration first; otherwise an extension's (its colour and badge).
+            let decoration = status == nil ? extensionDecorations[row.path] : nil
+            let decorationColor = decoration.flatMap { ExtensionDecoration.color($0.color) }
             // A leaf keeps the twistie's space, so file icons line up under their folder's name.
             cell.configure(depth: row.depth, twistie: nil, icon: icon, iconColor: color, title: row.name,
-                           titleColor: status.map(VS.color(for:)) ?? VS.foreground)
+                           titleColor: status.map(VS.color(for:)) ?? decorationColor ?? VS.foreground)
             cell.useThemeIcon(file: row.name)
             if let status { cell.setTrailing([VSListCell.statusLetter(status)]) }
+            else if let decoration, !decoration.badge.isEmpty {
+                let badge = UILabel()
+                badge.text = String(decoration.badge.prefix(2))
+                badge.font = VS.font(12, .semibold)
+                badge.textColor = decorationColor ?? VS.foreground
+                badge.textAlignment = .center
+                badge.accessibilityLabel = decoration.tooltip.isEmpty ? decoration.badge : decoration.tooltip
+                cell.setTrailing([badge])
+            }
             cell.isMarked = row.path == activeFile
         }
         return cell
@@ -600,8 +640,22 @@ final class LeftSidebarView: UIView, UITableViewDataSource, UITableViewDelegate 
             let open: [UIMenuElement] = row.isFolder ? [] : [
                 UIAction(title: "Open to the Side", image: Codicon.image(named: "split-horizontal")) { _ in self?.onOpenToSide?(row.path) },
             ]
+            // Extensions' commands for it (explorer/context), whose `when` the editor page evaluates.
+            let extensionItems = UIDeferredMenuElement.uncached { complete in
+                guard let callEditor = self?.callEditor else { return complete([]) }
+                callEditor("return window.duocode.explorerMenu(path, isFolder)", ["path": row.path, "isFolder": row.isFolder]) { result in
+                    complete((result as? [[String: Any]] ?? []).compactMap { item -> UIAction? in
+                        guard let command = item["command"] as? String else { return nil }
+                        let image = (item["icon"] as? String).flatMap { $0.isEmpty ? nil : Codicon.image(named: $0) }
+                        return UIAction(title: item["title"] as? String ?? command, image: image) { _ in
+                            callEditor("return await window.duocode.runForResource(command, path)", ["command": command, "path": row.path]) { _ in }
+                        }
+                    })
+                }
+            }
             return UIMenu(children: [
                 UIMenu(options: .displayInline, children: open),
+                UIMenu(options: .displayInline, children: [extensionItems]),
                 UIMenu(options: .displayInline, children: [
                     UIAction(title: "New File...", image: Codicon.newFile.image()) { _ in self?.promptNewFile(in: folder) },
                     UIAction(title: "New Folder...", image: Codicon.newFolder.image()) { _ in self?.promptNewFolder(in: folder) },
@@ -614,6 +668,24 @@ final class LeftSidebarView: UIView, UITableViewDataSource, UITableViewDelegate 
                 ]),
             ])
         }
+    }
+}
+
+/// An extension's decoration of a file: a short badge, a colour (CSS: "#rrggbb" or "rgba(...)") and a tooltip.
+private struct ExtensionDecoration: Equatable {
+    let badge: String
+    let color: String
+    let tooltip: String
+
+    static func color(_ css: String) -> UIColor? {
+        let text = css.trimmingCharacters(in: .whitespaces)
+        if text.hasPrefix("#"), let value = UInt32(text.dropFirst().prefix(6), radix: 16), text.count >= 7 { return VS.hex(value) }
+        if text.hasPrefix("rgb") {
+            let parts = text.drop { $0 != "(" }.dropFirst().prefix { $0 != ")" }.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+            guard parts.count >= 3 else { return nil }
+            return UIColor(red: parts[0] / 255, green: parts[1] / 255, blue: parts[2] / 255, alpha: parts.count > 3 ? parts[3] : 1)
+        }
+        return nil
     }
 }
 

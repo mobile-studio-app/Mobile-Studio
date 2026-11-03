@@ -53,7 +53,7 @@ import { nodeAddress, nodeJob, hostDiagnostics, checkNodeHost, didChangeFile, di
 import { addCommands } from './palette.js';
 import { customEditorsFor } from './ext/registry.js';
 import { quickPick } from './ext/ui.js';
-import { openCustomEditor, openWebviewView, viewChildren, viewInvoke, viewMenu, viewExpand, viewCheck } from './ext/host.js';
+import { openCustomEditor, openWebviewView, viewChildren, viewInvoke, viewMenu, viewExpand, viewCheck, explorerMenu, runForResource, fileDecorations } from './ext/host.js';
 import { breakpointGutterHandlers, toggleBreakpointAtCursor, debugExtensions, showBreakpoints, showPausedLine, showInlineValues, debugValueAt } from './debug.js';
 
 const native = (msg) => window.webkit.messageHandlers.duocode.postMessage(msg);
@@ -773,6 +773,10 @@ window.duocode = {
   viewMenu: (viewId, handle, command) => (handle ? viewMenu(viewId, handle, command) : runCommand(command)),
   viewExpand: (viewId, handle, expanded) => viewExpand(viewId, handle, expanded),
   viewCheck: (viewId, handle, checked) => viewCheck(viewId, handle, checked),
+  // The Explorer: extensions' commands for a file or folder (explorer/context), and their badges.
+  explorerMenu: (path, isFolder) => explorerMenu(path, isFolder),
+  runForResource: (command, path) => runForResource(command, path),
+  fileDecorations: (paths) => fileDecorations(paths || []),
   openWebviewView: (viewId, title) => openWebviewView(viewId, title),
   // The panel under the editor (panel.js): 'problems', 'output', 'debug' or 'terminal'.
   showPanel: (tab) => showPanel(tab),

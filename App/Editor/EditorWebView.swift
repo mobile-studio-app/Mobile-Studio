@@ -348,6 +348,10 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 // setContext from an extension, for its menus' `when` clauses.
                 if let key = body["key"] as? String { ExtensionViewsPanelView.contextKeys[key] = body["value"] ?? NSNull() }
                 replyHandler(true, nil)
+            case "extFileDecorationsChanged":
+                // An extension's file decorations changed: the Explorer asks for them again.
+                NotificationCenter.default.post(name: LeftSidebarView.fileDecorationsDidChange, object: nil)
+                replyHandler(true, nil)
             case "filesChanged":
                 // npm or a task changed the project's files.
                 NotificationCenter.default.post(name: ProjectStore.filesDidChange, object: store)

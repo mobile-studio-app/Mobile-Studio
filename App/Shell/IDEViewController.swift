@@ -273,6 +273,10 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
             guard let self else { return completion(nil) }
             self.editor.call(body, arguments, completion: completion)
         }
+        sidebarView.callEditor = { [weak self] body, arguments, completion in
+            guard let self else { return completion(nil) }
+            self.editor.call(body, arguments, completion: completion)
+        }
         // The file icon theme's icons are drawn by the editor page (they're SVG or font characters).
         // The Chat agent runs the project and reads its console (run_program).
         ProgramRunCapture.shared.startRun = { [weak self] in self?.run() }

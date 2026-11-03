@@ -16,6 +16,8 @@ import { relativeRequires, candidates } from './modules.js';
 import { quickPick, inputBox, closeQuickInput, notify as showNotification } from './ui.js';
 import { showWebview, postToWebview, retitleWebview, closeWebview, reveal as revealWebview } from './webviews.js';
 import { channelOutput } from './output.js';
+import { evaluateWhen } from './when.js';
+import CODICONS from '../../../App/Resources/Editor/codicon-names.json';
 
 let hosts = [];           // { name: 'web' | 'node', port: { postMessage, onmessage, terminate } }
 let nodePort = null;      // the Node.js host's connection, kept across restarts (Node starts once)
@@ -257,6 +259,7 @@ export async function startHost(api) {
   try { init = (await app.native({ cmd: 'extHostInit' })) || {}; } catch (e) { init = {}; }
   // The project's real folder, so Node.js extensions' file access works on the paths they see.
   root = init.projectPath || '/' + (init.project || 'workspace');
+  configurationValues = init.configuration || {};
   if (node.length) {
     const port = await connectNode();
     if (port) {
@@ -284,6 +287,7 @@ export async function startHost(api) {
     hosts.push(host);
     port.postMessage({ type: 'init', host: 'web', workspaceRoot: root, configuration: init.configuration || {}, state: init.state || {}, themeKind: themeKind(), extensions });
   }
+  renderEditorTitle();
   if (!hosts.length) return;
   const path = app.current();
   if (path) didOpen(path, app.view.state.doc.toString());
@@ -363,6 +367,7 @@ function onNotify(method, params, host) {
     renderStatus();
   }
   if (method === 'webview') showWebview(params);
+  if (method === 'fileDecorationsChanged') app.native({ cmd: 'extFileDecorationsChanged' }).catch(() => {});
   if (method === 'webviewPost') postToWebview(params);
   if (method === 'webviewTitle') retitleWebview(params);
   if (method === 'webviewReveal') { app.showWebviewTab && app.showWebviewTab(params.id); revealWebview(params.id); }
@@ -402,7 +407,7 @@ function renderStatus() {
   for (const item of sorted) {
     const el = document.createElement('button');
     el.className = 'ext-status-item';
-    el.textContent = item.text.replace(/\$\(([\w-]+)(~spin)?\)/g, (_, icon) => ICON_TEXT[icon] || '');
+    el.append(...iconText(item.text));
     el.title = item.tooltip || '';
     const color = themeColor(item.color);
     if (color) el.style.color = color;
@@ -543,7 +548,12 @@ const requests = {
     if (builtin) return builtin.run(...(args || []));
     if (name === 'vscode.open' && args?.[0]) { await app.openFile(pathFor(args[0].path ? 'file://' + args[0].path : String(args[0]))); return true; }
     // Context keys decide which of an extension's view menu items show (`when` clauses).
-    if (name === 'setContext' && typeof args?.[0] === 'string') { app.native({ cmd: 'extSetContext', key: args[0], value: args[1] ?? null }).catch(() => {}); return null; }
+    if (name === 'setContext' && typeof args?.[0] === 'string') {
+      contextKeys.set(args[0], args[1] ?? null);
+      renderEditorTitle();
+      app.native({ cmd: 'extSetContext', key: args[0], value: args[1] ?? null }).catch(() => {});
+      return null;
+    }
     return null;   // other workbench internals have nothing to do here
   },
 };
@@ -553,6 +563,7 @@ const requests = {
 let changeTimer = 0;
 let version = 1;
 export function didOpen(path, text) {
+  renderEditorTitle();
   if (!hosts.length) return;
   post({ type: 'docOpen', uri: uriFor(path), languageId: app.languageIdFor(path), text, version: ++version });
 }
@@ -1044,7 +1055,7 @@ class LensWidget extends WidgetType {
       if (i) dom.append(' | ');
       const el = document.createElement('span');
       el.className = 'cm-codelens-item';
-      el.textContent = lens.title.replace(/\$\(([\w-]+)(~spin)?\)/g, (_, icon) => ICON_TEXT[icon] || '');
+      el.append(...iconText(lens.title));
       el.title = lens.tooltip || '';
       el.onmousedown = (e) => { e.preventDefault(); callHost(lens.host, 'runCodeLens', { id: lens.id }).catch(() => {}); };
       dom.append(el);
@@ -1308,6 +1319,203 @@ export async function formatSelection(view = app && app.view) {
   return true;
 }
 
+// MARK: - Menus: the editor's title bar and context menu, the Explorer's, and the Command Palette
+
+const contextKeys = new Map();   // setContext's keys
+let configurationValues = {};    // settings, for "config.x" in when clauses
+
+/** Codicons by name ("$(refresh)"), as the font's characters. */
+export function iconChar(name) {
+  const code = CODICONS[String(name).replace(/^\$\(|\)$/g, '').split('~')[0]];
+  return code ? String.fromCodePoint(code) : '';
+}
+/** Text with "$(icon)"s, as DOM nodes: the icons in the codicon font. */
+function iconText(text) {
+  const out = [];
+  let last = 0;
+  for (const m of String(text).matchAll(/\$\(([\w-]+)(~spin)?\)/g)) {
+    if (m.index > last) out.push(document.createTextNode(text.slice(last, m.index)));
+    const ch = iconChar(m[1]);
+    if (ch) {
+      const icon = document.createElement('span');
+      icon.className = 'codicon' + (m[2] ? ' codicon-spin' : '');
+      icon.textContent = ch;
+      out.push(icon);
+    } else if (ICON_TEXT[m[1]]) out.push(document.createTextNode(ICON_TEXT[m[1]]));
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push(document.createTextNode(text.slice(last)));
+  return out;
+}
+
+/** Context keys for a file of the project (or the open one), for `when`. */
+function resourceKeys(path, extra = {}) {
+  const name = path ? path.split('/').pop() : '';
+  const dot = name.lastIndexOf('.');
+  const languageId = path && app ? app.languageIdFor(path) : '';
+  return {
+    resource: path ? uriFor(path) : '', resourcePath: path ? root + '/' + path : '', resourceFilename: name,
+    resourceExtname: dot > 0 ? name.slice(dot) : '', resourceDirname: path ? root + '/' + path.split('/').slice(0, -1).join('/') : '',
+    resourceBasename: dot > 0 ? name.slice(0, dot) : name, resourceScheme: path ? 'file' : '', resourceLangId: languageId,
+    isFileSystemResource: !!path, resourceSet: !!path,
+    ...extra,
+  };
+}
+
+function editorKeys() {
+  const path = app && app.current();
+  const view = app && app.view;
+  return resourceKeys(path, {
+    editorLangId: path ? app.languageIdFor(path) : '', editorIsOpen: !!path, activeEditor: path ? 'workbench.editors.files.textFileEditor' : '',
+    editorTextFocus: !!path, editorFocus: !!path, textInputFocus: !!path, inputFocus: !!path,
+    editorReadonly: !path, editorHasSelection: !!(view && path && !view.state.selection.main.empty),
+    editorHasMultipleSelections: !!(view && view.state.selection.ranges.length > 1),
+  });
+}
+
+function whenHolds(when, keys) {
+  return evaluateWhen(when, (key) => {
+    if (key in keys) return keys[key];
+    if (contextKeys.has(key)) return contextKeys.get(key);
+    if (key.startsWith('config.')) return configurationValues[key.slice(7)];
+    return PLATFORM_KEYS[key];
+  });
+}
+const PLATFORM_KEYS = { isMac: true, isIOS: true, isWeb: false, isLinux: false, isWindows: false, isMobile: true, workspaceFolderCount: 1, workbenchState: 'folder' };
+
+/** A command's title and icon, from the extension that contributes it. */
+function commandInfo(command) {
+  for (const ext of contributions.extensions) {
+    const c = (ext.manifest.contributes?.commands || []).find((x) => x.command === command);
+    if (c) {
+      const title = typeof c.title === 'string' ? c.title : c.title?.value || command;
+      const icon = typeof c.icon === 'string' && c.icon.startsWith('$(') ? c.icon : null;
+      return { title, category: typeof c.category === 'string' ? c.category : c.category?.value || '', icon, enablement: c.enablement };
+    }
+  }
+  return null;
+}
+
+/** The items of a contributed menu ('editor/title', 'editor/context', 'explorer/context') whose
+ * `when` holds: [{ command, title, icon, group, alt }], in their groups' order. */
+function menuItems(menu, keys) {
+  const out = [];
+  for (const ext of contributions.extensions) {
+    for (const entry of ext.manifest.contributes?.menus?.[menu] || []) {
+      if (!entry.command || !whenHolds(entry.when, keys)) continue;
+      const info = commandInfo(entry.command);
+      if (!info) continue;
+      if (info.enablement && !whenHolds(info.enablement, keys)) continue;
+      const [group, order] = String(entry.group || '').split('@');
+      out.push({ command: entry.command, title: info.title, icon: info.icon, group: group || '', order: Number(order) || 0, alt: entry.alt });
+    }
+  }
+  // VS Code's order: "navigation" first, then the other groups by name, "z_" ones last.
+  const rank = (g) => (g === 'navigation' ? '0' : g ? '1' + g : '2');
+  return out.sort((a, b) => rank(a.group).localeCompare(rank(b.group)) || a.order - b.order);
+}
+
+/** A command run for a file (an editor title or Explorer item): it's given the file's Uri, as VS Code does. */
+export function runForResource(command, path) {
+  return runCommand(command, ...(path ? [{ $uri: uriFor(path) }] : []));
+}
+
+/** The menu of the open file's extension commands (editor/title's other items, then editor/context's). */
+async function editorMenu(view, title) {
+  const keys = editorKeys();
+  const path = app.current();
+  const items = [
+    ...(title ? menuItems('editor/title', keys).filter((i, n, all) => i.group !== 'navigation' || all.filter((x) => x.group === 'navigation').indexOf(i) >= 3) : []),
+    ...menuItems('editor/context', keys),
+  ];
+  if (!items.length) return false;
+  const list = [];
+  let group = null;
+  for (const item of items) {
+    if (list.length && item.group !== group) list.push({ separator: true, label: '' });
+    group = item.group;
+    list.push({ label: item.title, item });
+  }
+  const chosen = await quickPick({ placeholder: path ? path.split('/').pop() : 'Editor', items: list.map(({ label, separator }) => (separator ? { separator, label } : { label })) });
+  if (chosen != null && list[chosen].item) runForResource(list[chosen].item.command, path);
+  return true;
+}
+
+// editor/title: the "navigation" group's icons in the tab bar, the rest under "…".
+let titleRender = 0;
+export function renderEditorTitle() {
+  cancelAnimationFrame(titleRender);
+  titleRender = requestAnimationFrame(() => {
+    const palette = document.getElementById('palette');
+    if (!palette) return;
+    let bar = document.getElementById('ext-title-actions');
+    if (!bar) {
+      bar = document.createElement('span');
+      bar.id = 'ext-title-actions';
+      bar.className = 'ext-title-actions';
+      palette.before(bar);
+    }
+    bar.textContent = '';
+    if (!app || !app.current()) return;
+    const keys = editorKeys();
+    const title = menuItems('editor/title', keys);
+    const path = app.current();
+    // Navigation items as buttons (their icon, or their title when they have none).
+    const shown = title.filter((i) => i.group === 'navigation').slice(0, 3);
+    for (const item of shown) {
+      const button = document.createElement('button');
+      const icon = item.icon && iconChar(item.icon);
+      button.className = icon ? 'palette-button codicon ext-title-action' : 'palette-button ext-title-action ext-title-text';
+      button.textContent = icon || item.title;
+      button.title = item.title;
+      button.setAttribute('aria-label', item.title);
+      button.onclick = () => runForResource(item.command, path);
+      bar.append(button);
+    }
+    const more = title.some((i) => !shown.includes(i)) || menuItems('editor/context', keys).length;
+    if (more) {
+      const button = document.createElement('button');
+      button.className = 'palette-button codicon ext-title-action';
+      button.textContent = iconChar('ellipsis');
+      button.title = 'More Actions...';
+      button.setAttribute('aria-label', 'More Actions');
+      button.onclick = () => editorMenu(app.view, true);
+      bar.append(button);
+    }
+  });
+}
+
+// editor/context: right-click (a trackpad or mouse) opens the extensions' commands for the file.
+const editorContextMenu = EditorView.domEventHandlers({
+  contextmenu(e, view) {
+    if (!app || view !== app.view || !app.current() || !menuItems('editor/context', editorKeys()).length) return false;
+    e.preventDefault();
+    editorMenu(view, false);
+    return true;
+  },
+});
+
+/** The Explorer's extension commands for a file or folder: [{ command, title, icon, group }]. */
+export function explorerMenu(path, isFolder) {
+  return menuItems('explorer/context', resourceKeys(path, { explorerResourceIsFolder: !!isFolder, explorerViewletFocus: true, filesExplorerFocus: true }))
+    .map(({ command, title, icon, group }) => ({ command, title, icon: icon ? icon.slice(2, -1) : '', group }));
+}
+
+/** Extensions' file decorations (badges and colours) for project paths: { path: { badge, color, tooltip } }. */
+export async function fileDecorations(paths) {
+  if (!hosts.length || !paths.length) return {};
+  const answers = await callEach('fileDecorations', { uris: paths.map(uriFor) });
+  const out = {};
+  for (const { r } of answers) {
+    for (const [uri, d] of Object.entries(r || {})) {
+      const path = pathFor(uri);
+      const existing = out[path] || {};
+      out[path] = { badge: existing.badge || d.badge || '', tooltip: existing.tooltip || d.tooltip || '', color: existing.color || themeColor(d.color) || '' };
+    }
+  }
+  return out;
+}
+
 // MARK: - Decorations (TextEditor.setDecorations)
 
 // Workbench colours extensions use for decorations, in VS Code's dark theme.
@@ -1317,6 +1525,14 @@ const THEME_COLORS = {
   'editorError.foreground': '#f14c4c', 'editorWarning.foreground': '#cca700', 'editorInfo.foreground': '#3794ff',
   'editorCodeLens.foreground': '#999999', 'editorLineNumber.foreground': '#858585', 'editorGhostText.foreground': 'rgba(255, 255, 255, .34)',
   errorForeground: '#f48771', descriptionForeground: 'rgba(204, 204, 204, .7)', 'textLink.foreground': '#3794ff',
+  'gitDecoration.modifiedResourceForeground': '#e2c08d', 'gitDecoration.addedResourceForeground': '#81b88b',
+  'gitDecoration.deletedResourceForeground': '#c74e39', 'gitDecoration.untrackedResourceForeground': '#73c991',
+  'gitDecoration.ignoredResourceForeground': '#8c8c8c', 'gitDecoration.conflictingResourceForeground': '#e4676b',
+  'list.errorForeground': '#f88070', 'list.warningForeground': '#cca700', 'list.highlightForeground': '#2aaaff',
+  'charts.red': '#f14c4c', 'charts.blue': '#3794ff', 'charts.yellow': '#cca700', 'charts.orange': '#d18616',
+  'charts.green': '#89d185', 'charts.purple': '#b180d7', 'terminal.ansiRed': '#cd3131', 'terminal.ansiGreen': '#0dbc79',
+  'terminal.ansiYellow': '#e5e510', 'terminal.ansiBlue': '#2472c8', 'statusBarItem.errorForeground': '#ffffff',
+  'statusBarItem.warningForeground': '#ffffff', 'editorOverviewRuler.errorForeground': '#ff1212',
   'diffEditor.insertedTextBackground': 'rgba(156, 204, 44, .2)', 'diffEditor.removedTextBackground': 'rgba(255, 0, 0, .2)',
   'merge.currentContentBackground': 'rgba(64, 200, 174, .2)', 'merge.incomingContentBackground': 'rgba(64, 166, 255, .2)',
 };
@@ -1414,6 +1630,7 @@ export function hostExtensions() {
     extensionLint,
     decorationLayer,
     languageFeatureExtensions,
+    editorContextMenu,
     EditorView.baseTheme({
       '.cm-ext-unnecessary': { opacity: '.6', backgroundImage: 'none !important' },
       '.cm-ext-deprecated': { textDecoration: 'line-through' },
@@ -1430,7 +1647,15 @@ export function hostExtensions() {
 /** Extension commands for the Command Palette. */
 export async function extensionCommands() {
   if (!hosts.length) return [];
-  return (await call('commandList', {}).catch(() => [])) || [];
+  const list = (await call('commandList', {}).catch(() => [])) || [];
+  const keys = editorKeys();
+  const hidden = new Set();
+  for (const ext of contributions.extensions) {
+    for (const entry of ext.manifest.contributes?.menus?.commandPalette || []) {
+      if (entry.command && !whenHolds(entry.when, keys)) hidden.add(entry.command);
+    }
+  }
+  return list.filter((c) => !hidden.has(c.command));
 }
 
 export async function runCommand(name, ...args) {
@@ -1450,7 +1675,11 @@ export async function runCommand(name, ...args) {
   return callHost(target, 'executeCommand', { name, args }).catch((e) => { log('error', `${name}: ${e.message}`); return null; });
 }
 
-export function setConfiguration(values) { post({ type: 'configuration', values }); }
+export function setConfiguration(values) {
+  configurationValues = values || {};
+  post({ type: 'configuration', values });
+  renderEditorTitle();
+}
 
 /** For webviews: messages to the worker. */
 export const postToHost = (message) => {

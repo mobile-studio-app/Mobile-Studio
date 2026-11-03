@@ -572,6 +572,11 @@ function configurationDefaults() {
       }
     }
   }
+  for (const ext of extensions.values()) {
+    for (const [key, value] of Object.entries(ext.manifest.contributes?.configurationDefaults || {})) {
+      if (!key.startsWith('[')) values[key] = value;
+    }
+  }
   return values;
 }
 let userConfiguration = {};
@@ -1229,6 +1234,7 @@ const api = {
     },
     createQuickPick,
     createInputBox,
+    registerFileDecorationProvider,
     async showOpenDialog(options = {}) {
       const folders = options.canSelectFolders && !options.canSelectFiles;
       const files = (await request('findFiles', { pattern: '**/*' }).catch(() => [])) || [];
@@ -1970,6 +1976,14 @@ function plainText(content) {
 }
 
 let codeActionList = [];   // the last codeActions answer's actions, by id
+const fileDecorationProviders = new Set();
+
+function registerFileDecorationProvider(provider) {
+  fileDecorationProviders.add(provider);
+  const changes = provider.onDidChangeFileDecorations && provider.onDidChangeFileDecorations(() => notify('fileDecorationsChanged', {}));
+  notify('fileDecorationsChanged', {});
+  return new Disposable(() => { fileDecorationProviders.delete(provider); if (changes) changes.dispose(); notify('fileDecorationsChanged', {}); });
+}
 let completionItems = [];  // the last completion answer's items, by id
 let codeLensList = [];     // code lenses' commands, by id
 let linkList = [];         // document links, by id
@@ -2257,7 +2271,24 @@ const callHandlers = {
     }
     return [];
   },
-  executeCommand: ({ name, args }) => executeCommand(name, args || []),
+  executeCommand: ({ name, args }) => executeCommand(name, (args || []).map((a) => (a && typeof a === 'object' && typeof a.$uri === 'string' ? Uri.parse(a.$uri) : a))),
+  // File decorations (badges and colours in the Explorer): { uri: { badge, tooltip, color } }.
+  async fileDecorations({ uris }) {
+    const out = {};
+    if (!fileDecorationProviders.size) return out;
+    await Promise.all(uris.map(async (text) => {
+      const uri = Uri.parse(text);
+      for (const provider of fileDecorationProviders) {
+        try {
+          const d = await provider.provideFileDecoration(uri, noCancel);
+          if (!d) continue;
+          const prev = out[text] || {};
+          out[text] = { badge: prev.badge || d.badge || '', tooltip: prev.tooltip || d.tooltip || '', color: prev.color || (d.color && (d.color.id || d.color)) || '' };
+        } catch (e) { /* ignore */ }
+      }
+    }));
+    return out;
+  },
 
   // Quick Fix and refactorings for a range: [{ id, title, kind, isPreferred }]; runCodeAction runs one.
   async codeActions({ uri, range, invoked }) {
