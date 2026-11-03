@@ -103,6 +103,48 @@ static void end_tracking_game_window(void) {
     [dc_love_container().window makeKeyWindow];
 }
 
+// MARK: - Frames
+
+/// Resumes the boot coroutine once per screen refresh. Between frames the main run loop runs as
+/// it normally does (waiting, with UIKit's observers), so touches and the IDE keep working; the
+/// tight loop this replaces left UIKit no time to deliver events.
+@interface DCLoveFrameDriver : NSObject
+@property (nonatomic) lua_State *coroutine;
+@property (nonatomic) int status;
+@property (nonatomic) BOOL done;
+@end
+
+@implementation DCLoveFrameDriver
+- (void)tick:(CADisplayLink *)link {
+    if (self.done) return;
+    int status = lua_resume(self.coroutine, 0);
+    if (status == LUA_YIELD) {
+        lua_settop(self.coroutine, 0);
+        return;
+    }
+    self.status = status;
+    self.done = YES;
+    CFRunLoopStop(CFRunLoopGetMain());
+}
+@end
+
+/// Runs the boot coroutine to its end, a frame per display refresh; returns its last status.
+static int run_frames(lua_State *co) {
+    DCLoveFrameDriver *driver = [DCLoveFrameDriver new];
+    driver.coroutine = co;
+    CADisplayLink *link = [CADisplayLink displayLinkWithTarget:driver selector:@selector(tick:)];
+    // As fast as the screen goes (the game's vsync and love.timer pace it within that).
+    link.preferredFrameRateRange = CAFrameRateRangeMake(30, 120, 120);
+    [link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    while (!driver.done) {
+        @autoreleasepool {
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, false);
+        }
+    }
+    [link invalidate];
+    return driver.status;
+}
+
 // MARK: - Lua hooks
 
 /// print() replacement: tab-joined tostring() of each argument, sent to the host console.
@@ -319,10 +361,7 @@ static BootResult boot_love(const char *project_dir, int enable_jit, int &retval
     lua_pushvalue(L, -2);
     lua_xmove(L, co, 1);
     attach_debugger(L, debugger, co);
-    int status;
-    while ((status = lua_resume(co, 0)) == LUA_YIELD) {
-        lua_settop(co, 0);
-    }
+    int status = run_frames(co);
 
     BootResult result = BootResult::quit;
     retval = 0;
@@ -343,6 +382,8 @@ static BootResult boot_love(const char *project_dir, int enable_jit, int &retval
 
 static int love12_run_game(const char *project_dir, int enable_jit) {
     SDL_SetMainReady();
+    // The run loop runs between frames (run_frames), so SDL needn't spin it itself in love.event.pump.
+    SDL_SetiOSEventPump(false);
     // Without this SDL locks orientation to the game's window shape, rotating the whole IDE.
     SDL_SetHintWithPriority(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight Portrait PortraitUpsideDown", SDL_HINT_OVERRIDE);
 
@@ -355,6 +396,7 @@ static int love12_run_game(const char *project_dir, int enable_jit) {
     } while (result == BootResult::restart);
 
     end_tracking_game_window();
+    SDL_SetiOSEventPump(true);
     SDL_Quit();
     return result == BootResult::failed ? 1 : retval;
 }
