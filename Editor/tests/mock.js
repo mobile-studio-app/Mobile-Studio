@@ -45,6 +45,27 @@ window.webkit = { messageHandlers: { duocode: { postMessage: async (m) => {
   if (m.cmd === 'stat') { if (m.path in f) return { size: f[m.path].length }; throw new Error('not found'); }
   if (m.cmd === 'write') { f[m.path] = m.contents; return true; }
   if (m.cmd === 'list') return Object.keys(f);
+  if (m.cmd === 'fs') {
+    // workspace.fs and the Chat agent's file tools: folders are the files' paths' prefixes.
+    const p = m.path || '';
+    const inside = (k) => k === p || k.startsWith(p + '/');
+    if (m.op === 'stat') {
+      if (p in f) return { type: 1, size: f[p].length };
+      if (Object.keys(f).some((k) => k.startsWith(p + '/')) || (window.__folders || []).includes(p)) return { type: 2, size: 0 };
+      throw new Error('not found');
+    }
+    if (m.op === 'delete') { for (const k of Object.keys(f)) if (inside(k)) delete f[k]; return true; }
+    if (m.op === 'rename') {
+      for (const k of Object.keys(f)) if (inside(k)) { f[m.to + k.slice(p.length)] = f[k]; delete f[k]; }
+      return true;
+    }
+    if (m.op === 'mkdir') { (window.__folders = window.__folders || []).push(p); return true; }
+    if (m.op === 'read') {
+      if (!(p in f)) throw new Error('not found');
+      return btoa(String.fromCharCode(...new TextEncoder().encode(f[p])));
+    }
+    if (m.op === 'write') { f[p] = new TextDecoder().decode(Uint8Array.from(atob(m.base64 || ''), (c) => c.charCodeAt(0))); return true; }
+  }
   if (m.cmd === 'extList') return [];
   return true;
 } } } };

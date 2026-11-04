@@ -56,8 +56,16 @@ enum AppleIntelligenceEngine {
             let instructions = messages.first { $0.role == "system" }?.content ?? ""
             let turns = messages.filter { $0.role != "system" }
             let session = LanguageModelSession(instructions: instructions)
-            var history = turns.dropLast().map { "\($0.role == "user" ? "User" : "Assistant"): \($0.content)" }.joined(separator: "\n\n")
-            if history.count > 6000 { history = String(history.suffix(6000)) }
+            // The first turn (the question, or a subagent's task) always stays; of the rest, the newest
+            // that fit in about 6,000 characters.
+            let earlier = turns.dropLast().map { "\($0.role == "user" ? "User" : "Assistant"): \($0.content)" }
+            var history = ""
+            if let first = earlier.first {
+                var rest = earlier.dropFirst().joined(separator: "\n\n")
+                let room = max(0, 6000 - first.count)
+                if rest.count > room { rest = room > 0 ? "…\n" + String(rest.suffix(room)) : "" }
+                history = rest.isEmpty ? first : first + "\n\n" + rest
+            }
             let question = turns.last?.content ?? ""
             let prompt = history.isEmpty ? question : "The conversation so far:\n\n\(history)\n\nUser: \(question)"
             return try await session.respond(to: prompt).content

@@ -425,7 +425,7 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 replyHandler(["selected": s.chatModel.rawValue,
                               "models": AIChatService.shared.options.map {
                                   ["id": $0.choice.rawValue, "name": $0.name, "detail": $0.detail, "ready": $0.ready, "suggested": $0.suggested, "cloud": $0.cloud,
-                                   "agent": $0.agent, "reasoning": $0.reasoning.rawValue,
+                                   "agent": $0.agent, "subagent": $0.subagent, "reasoning": $0.reasoning.rawValue,
                                    "contexts": $0.contexts.map { ["tokens": $0.tokens, "bytes": $0.bytes, "fits": $0.fits] }]
                               },
                               "subagentContextSize": s.subagentContextSize,
@@ -464,7 +464,8 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 let maxTokens = body["maxTokens"] as? Int ?? 1536
                 let contextSize = body["contextSize"] as? Int
                 AIChatService.shared.respond(id: id, choice: choice, contextSize: contextSize, messages, maxTokens: maxTokens,
-                                             thinking: body["thinking"] as? Bool ?? false, onText: { [weak self] text in
+                                             thinking: body["thinking"] as? Bool ?? false, stop: body["stop"] as? [String] ?? [],
+                                             onText: { [weak self] text in
                     self?.emit("aiChatText", ["id": id, "text": text])
                 }, completion: { [weak self] result in
                     switch result {

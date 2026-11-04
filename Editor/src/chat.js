@@ -5,15 +5,19 @@
 //   edit:   edits files, asks before commands
 //   auto:   edits and runs commands, asks before risky ones (deleting, pushing, ...)
 //   turbo:  never asks
-// The model calls tools by writing a ```tool block with JSON, which works for every model. The
+// The model calls tools by writing them out (<tool_call><function=…>, Qwen's own format, whose values
+// need no escaping), which works for every model; calls written in the other usual formats are
+// read too (toolcalls.js), and ones that can't be read go back to the model to make again. The
 // header shows how full the model's context is; /compact (or near the limit) summarises the
 // conversation into one message.
 import { renderMarkdown } from './markdown.js';
 import { forEachDiagnostic } from '@codemirror/lint';
 import { terminalText } from './terminal.js';
 import { channelText, outputChannels } from './ext/output.js';
+import { readToolCalls, withoutToolCalls, cutInventedResults, usage, STOP_AT } from './toolcalls.js';
 
-// { native, view, current, openURL, appCommand, openFile, runCommand(command, onOutput) → exit code, problems() }
+// { native, view, current, openURL, appCommand, openFile, runCommand(command, onOutput) → exit code,
+//   problems(), save() (the open file, to disk), pathMoved(from, to?) (tabs follow a move or delete) }
 let api = null;
 const $ = (id) => document.getElementById(id);
 let pane = null;
@@ -29,8 +33,9 @@ let nextId = 1;
 let frame = 0;
 let liveText = null;                 // the answer being written, for the pending bubble
 
-const MAX_STEPS = 24;
+const MAX_STEPS = 50;
 const MAX_REPEATS = 3;           // the same tool call again this many times: the agent is going in circles
+const MAX_TROUBLES = 3;          // replies in a row whose calls couldn't be read: the model can't manage the format
 const KEPT_TOOL_RESULTS = 2;     // the latest tool results go in full; older ones are cut short
 const MAX_TOOL_OUTPUT = 4000;
 const MODES = [
@@ -76,35 +81,96 @@ const canAgent = (id = settings.selected) => !!modelInfo(id).agent;
 /** 'none', 'optional' (Think turns it on) or 'always'. */
 const reasoning = (id = settings.selected) => modelInfo(id).reasoning || 'none';
 const thinkingOn = () => reasoning() === 'always' || (settings.thinking && reasoning() !== 'none');
-const subagentModel = () => (settings.subagentModel && canAgent(settings.subagentModel) ? settings.subagentModel : settings.selected);
-const subagentsOn = () => settings.subagentParallel > 0 && canAgent(subagentModel());
-/** Room kept for the answer. */
-const answerTokens = () => (thinkingOn() ? 3072 : 1536);
+/** Whether a model can be a subagent: they only read and search, so smaller models (Apple
+ * Intelligence) manage it too. */
+const canSubagent = (id) => !!(modelInfo(id).subagent || modelInfo(id).agent) && modelInfo(id).ready !== false;
+const subagentModel = () => (settings.subagentModel && canSubagent(settings.subagentModel) ? settings.subagentModel : settings.selected);
+const subagentsOn = () => settings.subagentParallel > 0 && canSubagent(subagentModel());
+/** Room kept for the answer: a quarter of the context, so a whole file can be written in one call
+ * (thinking needs more). */
+const answerTokens = () => {
+  const base = canAgent() ? Math.max(1536, Math.min(6144, Math.floor(contextLimit() / 4))) : 1536;
+  return thinkingOn() ? Math.min(8192, base + 1536) : base;
+};
 
-function toolHelp(subagents) {
+// MARK: - The tools
+
+// Other names models give the arguments.
+const PATH = ['file_path', 'filepath', 'file', 'filename', 'file_name', 'target_file', 'relative_path', 'uri', 'dir', 'directory', 'folder'];
+const TEXT = ['contents', 'text', 'code', 'file_text', 'body', 'data', 'new_content', 'source', 'lines', 'new_text'];
+const START = ['start', 'line_start', 'startline', 'from_line', 'first_line', 'begin', 'start_line_number', 'line'];
+const END = ['end', 'line_end', 'endline', 'to_line', 'last_line', 'end_line_number'];
+const FROM = ['source', 'src', 'old_path', 'from_path', 'oldpath', 'source_path', 'path', 'file_path'];
+const TO = ['destination', 'dest', 'target', 'new_path', 'to_path', 'newpath', 'new_name', 'target_path', 'destination_path'];
+const LINES = ['count', 'n', 'limit', 'tail'];
+const param = (name, type = 'string', aliases = [], extra = {}) => ({ name, type, aliases, ...extra });
+const optional = (name, type, aliases, extra = {}) => param(name, type, aliases, { optional: true, ...extra });
+const PATH_PARAM = param('path', 'string', PATH);
+
+// kind: read (runs without asking; subagents have these), edit, delete, run, delegate.
+const TOOLS = [
+  { name: 'read_file', kind: 'read', params: [PATH_PARAM, optional('start_line', 'int', START), optional('end_line', 'int', END)],
+    help: 'the file with line numbers. A long file comes in parts, each saying how to read on.' },
+  { name: 'read_files', kind: 'read', params: [param('paths', 'array', ['files', 'file_paths', 'path'], { splitCommas: true })], help: 'several files at once.' },
+  { name: 'list_files', kind: 'read', params: [optional('path', 'string', PATH)], help: 'the project\'s files (or a folder\'s).' },
+  { name: 'find_files', kind: 'read', params: [param('pattern', 'string', ['glob', 'query', 'name'])], help: 'files whose path matches a glob, like **/*.lua or src/*.js.' },
+  { name: 'search', kind: 'read', params: [param('query', 'string', ['pattern', 'text', 'q', 'term', 'keyword', 'search', 'regex_pattern']),
+    optional('path', 'string', PATH), optional('regex', 'bool', ['is_regex', 'use_regex'])],
+  help: 'the lines containing the text (any case; a regular expression when regex is true), as path:line: text.' },
+  { name: 'get_problems', kind: 'read', params: [], help: 'the errors and warnings in the project.' },
+  { name: 'read_console', kind: 'read', params: [optional('lines', 'int', LINES)], help: 'the program console\'s last lines (what the program printed when it last ran).' },
+  { name: 'read_terminal', kind: 'read', params: [optional('lines', 'int', LINES)], help: 'what the Terminal panel shows.' },
+  { name: 'read_output', kind: 'read', params: [optional('channel', 'string', ['name'])], help: 'an Output panel channel (without one, the list of channels).' },
+
+  { name: 'edit_file', kind: 'edit', params: [PATH_PARAM, param('old', 'text', ['old_string', 'old_str', 'old_text', 'search', 'find', 'original', 'before']),
+    param('new', 'text', ['new_string', 'new_str', 'new_text', 'replace', 'replacement', 'after']), optional('replace_all', 'bool', ['all', 'replace_every'])],
+  help: 'replaces the text old, copied from the file with enough lines to appear only once, with new (every place it appears with replace_all true).' },
+  { name: 'replace_lines', kind: 'edit', params: [PATH_PARAM, param('start_line', 'int', START), param('end_line', 'int', END), param('content', 'text', TEXT)],
+    help: 'replaces lines start_line to end_line with content.' },
+  { name: 'insert_lines', kind: 'edit', params: [PATH_PARAM, param('line', 'int', ['line_number', 'at_line', 'at', 'position', 'before_line', 'insert_line', 'start_line'],
+    { from: { after_line: (v) => Number(v) + 1, after: (v) => Number(v) + 1 } }), param('content', 'text', TEXT)],
+  help: 'inserts content so that it starts at that line (1: the top; the line count + 1: the end).' },
+  { name: 'delete_lines', kind: 'edit', params: [PATH_PARAM, param('start_line', 'int', START), param('end_line', 'int', END)], help: 'deletes lines start_line to end_line.' },
+  { name: 'write_file', kind: 'edit', params: [PATH_PARAM, param('content', 'text', TEXT)], help: 'creates a file, or replaces all of one (making its folders).' },
+  { name: 'append_file', kind: 'edit', params: [PATH_PARAM, param('content', 'text', TEXT)], help: 'adds content to the end of a file (or creates it).' },
+  { name: 'create_folder', kind: 'edit', params: [PATH_PARAM], help: 'makes a folder.' },
+  { name: 'copy_file', kind: 'edit', params: [param('from', 'string', FROM), param('to', 'string', TO)], help: 'copies a file.' },
+  { name: 'move_file', kind: 'edit', params: [param('from', 'string', FROM), param('to', 'string', TO)], help: 'moves or renames a file or folder.' },
+  { name: 'delete_file', kind: 'delete', params: [PATH_PARAM], help: 'deletes a file or folder.' },
+
+  { name: 'run_command', kind: 'run', params: [param('command', 'string', ['cmd', 'script', 'shell_command', 'commands'])],
+    help: 'runs a shell command in the project folder (ls, cat, grep, git, node, npm, python, lua) and returns its output.' },
+  { name: 'run_program', kind: 'run', params: [optional('seconds', 'int', ['timeout', 'duration', 'time']), optional('keep_running', 'bool', ['keep_open'])],
+    help: 'runs the project as the Run button does and returns what it printed and how it ended. Games keep running: their output is collected for seconds (8 unless given), then they stop unless keep_running is true.' },
+  { name: 'delegate', kind: 'delegate', params: [param('tasks', 'array', ['task', 'questions', 'prompts', 'queries'])],
+    help: 'gives self-contained research questions to subagents, which read and search (they can\'t change anything) and answer each one. Use it to look into several things at once.' },
+];
+const TOOL = Object.fromEntries(TOOLS.map((t) => [t.name, t]));
+
+const EDIT_EXAMPLE = '<tool_call>\n<function=edit_file>\n<parameter=path>\nmain.lua\n</parameter>\n<parameter=old>\n    print("hi")\n</parameter>\n'
+  + '<parameter=new>\n    print("hello")\n</parameter>\n</function>\n</tool_call>';
+const READ_EXAMPLE = '<tool_call>\n<function=read_file>\n<parameter=path>\nmain.lua\n</parameter>\n</function>\n</tool_call>';
+
+function toolHelp(subagent) {
+  const show = TOOLS.filter((t) => (subagent ? t.kind === 'read' : t.kind !== 'delegate' || subagentsOn()));
+  const line = (t) => `- ${usage(t.name, TOOL)}: ${t.help}`;
+  const group = (title, kinds) => {
+    const list = show.filter((t) => kinds.includes(t.kind));
+    return list.length ? [title, ...list.map(line)] : [];
+  };
   return [
-    'Tools: to use one, write a fenced block whose language is tool, holding JSON, like',
-    '```tool\n{"tool": "read_file", "path": "src/main.lua"}\n```',
-    'You can write several tool blocks in one reply. Their results come back in the next message.',
-    '- read_file {path, start_line?, end_line?}: a file, with line numbers.',
-    '- read_files {paths: [...]}: several files at once.',
-    '- list_files {path?}: the project\'s files (or a folder\'s).',
-    '- find_files {pattern}: files whose path matches a glob, like **/*.lua or src/*.js.',
-    '- search {query, path?}: lines containing the text (any case), as path:line: text.',
-    '- read_console {lines?}: the program console\'s last lines (what the program printed when it last ran).',
-    '- read_terminal {lines?}: what the Terminal panel shows.',
-    '- read_output {channel?}: an Output panel channel (without one, the list of channels).',
-    ...(subagents ? [] : [
-      '- edit_file {path, old, new}: replaces the exact text old, which must appear once, with new. Read the file first; copy old exactly, with enough lines to be unique.',
-      '- write_file {path, content}: creates or replaces a whole file.',
-      '- run_command {command}: runs a shell command in the project folder (ls, cat, grep, git, node, npm, python, lua); returns its output.',
-      '- get_problems {}: the errors and warnings in the project.',
-      '- run_program {seconds?, keep_running?}: runs the project as the Run button does and returns what it printed and how it ended. Games keep running: their output is collected for seconds (8 unless given), then they stop unless keep_running is true.',
+    'Tools: call one by writing exactly this, with one <parameter> for each argument. Write each value as it is, code included: no quotes, no escaping.',
+    subagent ? READ_EXAMPLE : EDIT_EXAMPLE,
+    'You can make several calls in one reply: they run in order, and their results come back in the next message (never write the results yourself). '
+      + 'Arguments marked ? can be left out. When you\'re finished, answer normally, with no call.',
+    ...group('Looking:', ['read']),
+    ...group('Changing files (each change shows the changed lines with their new numbers):', ['edit', 'delete']),
+    ...group('Running:', ['run', 'delegate']),
+    ...(subagent ? [] : [
+      'Look before you change anything: read a file before you edit it. For small changes use edit_file, or the line tools with line numbers from your '
+        + 'latest read; use write_file for new files and rewrites, and write a long file in parts (write_file, then append_file). After changing code, '
+        + 'check it with get_problems or run_program.',
     ]),
-    ...(subagents || !subagentsOn() ? [] : [
-      '- delegate {tasks: ["...", ...]}: gives self-contained research questions to subagents, which read and search (they can\'t edit) and answer each one. Use it to look into several things at once.',
-    ]),
-    'Look before you change anything. When you\'re finished, answer normally, with no tool block.',
   ].join('\n');
 }
 
@@ -153,12 +219,13 @@ function withoutThinking(text) {
 }
 
 /** Asks the model; `onText` gets the answer as it's written. Resolves with { text, error, stopped,
- * promptTokens, dropped }: how long the prompt really was, and how many old turns didn't fit. */
-function ask(chat, { model, maxTokens, onText, contextSize, thinking = false } = {}) {
+ * promptTokens, dropped }: how long the prompt really was, and how many old turns didn't fit.
+ * `stop`: texts the answer ends before (where a model starts writing a tool's results itself). */
+function ask(chat, { model, maxTokens, onText, contextSize, thinking = false, stop } = {}) {
   const id = 'c' + nextId++;
   return new Promise((resolve) => {
     requests.set(id, { resolve, onText });
-    api.native({ cmd: 'aiChat', id, messages: chat, model: model || undefined, maxTokens: maxTokens || 1536, contextSize: contextSize || settings.contextSize, thinking })
+    api.native({ cmd: 'aiChat', id, messages: chat, model: model || undefined, maxTokens: maxTokens || 1536, contextSize: contextSize || settings.contextSize, thinking, stop })
       .catch((e) => { requests.delete(id); resolve({ error: String(e && e.message ? e.message : e) }); });
   });
 }
@@ -176,27 +243,22 @@ export function chatEvent(name, payload) {
 
 // MARK: - Tool calls
 
-/** The tool calls in a reply: ```tool blocks (or ```json ones naming a tool). */
-function toolCalls(text) {
-  const calls = [];
-  const re = /```(?:tool|json)?\s*\n([\s\S]*?)```/g;
-  for (let m = re.exec(text); m; m = re.exec(text)) {
-    try {
-      const call = JSON.parse(m[1].trim());
-      if (call && typeof call.tool === 'string') calls.push(call);
-    } catch (e) { /* not a tool call */ }
+const NO_CALLS = { calls: [], errors: [], spans: [], attempted: false, cutOff: false };
+
+/** What to tell the model when its calls couldn't be read. */
+function callTrouble(parsed, maxTokens) {
+  const lines = [...parsed.errors];
+  if (parsed.cutOff) {
+    lines.push(`Your reply was cut off in the middle of a tool call (a reply can be about ${maxTokens} tokens), so it wasn't run. Make it again in `
+      + 'smaller parts: write a long file with write_file for its first part and append_file for the rest, or change just the lines that change.');
+  } else {
+    lines.push('Write each call like this, with nothing after the last one:\n' + EDIT_EXAMPLE);
   }
-  return calls;
+  return lines.join('\n');
 }
 
-/** A reply without its tool blocks, for showing (the calls show as chips). */
-function withoutToolBlocks(text) {
-  return text.replace(/```(?:tool|json)?\s*\n[\s\S]*?(```|$)/g, (block) => (/"tool"\s*:/.test(block) ? '' : block)).trim();
-}
-
-const READ_ONLY = new Set(['read_file', 'read_files', 'list_files', 'find_files', 'search', 'get_problems', 'delegate',
-  'read_console', 'read_terminal', 'read_output']);
-const CHANGES_FILES = new Set(['edit_file', 'write_file', 'run_command']);
+const READ_ONLY = new Set(TOOLS.filter((t) => t.kind === 'read' || t.kind === 'delegate').map((t) => t.name));
+const CHANGES_FILES = new Set(TOOLS.filter((t) => t.kind === 'edit' || t.kind === 'delete').map((t) => t.name).concat('run_command'));
 const RISKY = /(^|[\s;&|])(rm|rmdir|mv|chmod|kill|curl|wget|dd)\b|git\s+(push|reset|clean|checkout|rebase|branch\s+-D)|npm\s+(publish|uninstall)|>\s*\S/;
 
 /** Whether a call runs without asking, in the current mode. */
@@ -204,19 +266,21 @@ function allowedWithoutAsking(call) {
   if (READ_ONLY.has(call.tool) || allowedThisChat.has(call.tool)) return true;
   const mode = settings.mode;
   if (mode === 'turbo') return true;
-  if (call.tool === 'edit_file' || call.tool === 'write_file') return mode !== 'manual';
+  const kind = TOOL[call.tool] && TOOL[call.tool].kind;
+  if (kind === 'edit') return mode !== 'manual';
   if (call.tool === 'run_command') return mode === 'auto' && !RISKY.test(String(call.command || ''));
   if (call.tool === 'run_program') return mode === 'auto';
+  // Deleting asks, but in Turbo.
   return false;
 }
 
 const clip = (text, max = MAX_TOOL_OUTPUT) => (text.length > max ? text.slice(0, max) + `\n… (${text.length - max} more characters)` : text);
-const cleanPath = (path) => String(path || '').replace(/^\.?\/+/, '').replace(/\/+$/, '');
+const cleanPath = (p) => String(p || '').trim().replace(/^["'`]|["'`]$/g, '').replace(/\\/g, '/').replace(/^\.?\/+/, '').replace(/\/+$/, '').replace(/^\.$/, '');
 
-async function readText(path) {
-  const p = cleanPath(path);
-  if (p === api.current()) return api.view.state.doc.toString();
-  return api.native({ cmd: 'read', path: p });
+async function readText(p) {
+  const clean = cleanPath(p);
+  if (clean === api.current()) return api.view.state.doc.toString();
+  return api.native({ cmd: 'read', path: clean });
 }
 
 async function projectFiles() {
@@ -224,10 +288,21 @@ async function projectFiles() {
   return Array.isArray(list) ? list : [];
 }
 
+/** 'file', 'folder' or null. */
+async function pathKind(p) {
+  if (p && p === api.current()) return 'file';
+  try {
+    const stat = await api.native({ cmd: 'fs', op: 'stat', path: p });
+    return stat && stat.type === 2 ? 'folder' : 'file';
+  } catch (e) {
+    return null;
+  }
+}
+
 /** Writes a file: into the editor when it's the open one (so undo works), else to disk. */
-async function writeText(path, text) {
-  const p = cleanPath(path);
-  if (p === api.current()) {
+async function writeText(p, text) {
+  const clean = cleanPath(p);
+  if (clean === api.current()) {
     const { view } = api;
     const old = view.state.doc.toString();
     let start = 0;
@@ -237,7 +312,15 @@ async function writeText(path, text) {
     view.dispatch({ changes: { from: start, to: endOld, insert: text.slice(start, endNew) }, userEvent: 'input.agent' });
     return;
   }
-  await api.native({ cmd: 'write', path: p, contents: text });
+  await api.native({ cmd: 'write', path: clean, contents: text });
+}
+
+/** Why a path can't be read, with the files it may have meant. */
+async function missing(p) {
+  const files = await projectFiles();
+  const name = p.split('/').pop().toLowerCase();
+  const near = files.filter((f) => f.split('/').pop().toLowerCase() === name || f.toLowerCase().endsWith('/' + p.toLowerCase())).slice(0, 5);
+  return `Error: ${p || 'that path'} doesn't exist.` + (near.length ? ` Did you mean ${near.join(', ')}?` : ' list_files or find_files shows the files.');
 }
 
 /** A short +/- view of a change, for the approval card. */
@@ -252,29 +335,154 @@ function changePreview(before, after) {
   return { line: start + 1, text: clip(lines.join('\n'), 1500) };
 }
 
-/** Runs one tool call: { summary (for the chip), output (for the model), preview? }. */
+// Text as lines: a final newline ends the last line rather than starting another.
+const linesOf = (text) => { const body = text.endsWith('\n') ? text.slice(0, -1) : text; return body === '' ? [] : body.split('\n'); };
+const joinLines = (lines, finalNewline) => (lines.length ? lines.join('\n') + (finalNewline ? '\n' : '') : '');
+const lineAt = (text, offset) => text.slice(0, offset).split('\n').length;
+const numbered = (lines, first) => lines.map((l, i) => `${first + i}\t${l.length > 1000 ? l.slice(0, 1000) + ' …' : l}`).join('\n');
+
+/** The lines around a change, with their numbers, so the model knows the file as it now is. */
+function changedLines(path, after, first, last) {
+  const lines = linesOf(after);
+  if (!lines.length) return `${path} is now empty.`;
+  const from = Math.max(1, first - 2);
+  const to = Math.min(lines.length, Math.max(last, first) + 2);
+  let shown = numbered(lines.slice(from - 1, to), from);
+  if (to - from > 40) shown = numbered(lines.slice(from - 1, from + 14), from) + '\n…\n' + numbered(lines.slice(to - 15, to), to - 14);
+  return `Lines ${from}-${to} now read:\n${shown}\n(${path} has ${lines.length} lines.)`;
+}
+
+/** A file to change, without its \r\n (written back as it was). */
+async function loadFile(p) {
+  const raw = await readText(p);
+  if (typeof raw !== 'string') throw new Error(`${p} isn't a text file`);
+  return { text: raw.replace(/\r\n/g, '\n'), crlf: raw.includes('\r\n') };
+}
+const restore = (text, crlf) => (crlf ? text.replace(/\n/g, '\r\n') : text);
+
+/** A change to a file, for approval and then writing. */
+function fileChange(p, before, after, crlf, ask, output, summary) {
+  return { summary, output, ask, path: p, preview: changePreview(before, after), apply: () => writeText(p, restore(after, crlf)) };
+}
+
+/** Where `old` is in `text`: exactly; without line numbers copied from read_file or blank lines at
+ * its ends; then line by line ignoring spaces at line ends, then indentation (new is re-indented to
+ * match). { edits: [{ from, to, insert }] } or { error }. */
+function locate(text, oldText, newText, replaceAll, p) {
+  const strip = (t) => t.split('\n').map((l) => l.replace(/^\s*\d+\t/, '')).join('\n');
+  const tries = [[oldText, newText]];
+  const oldLines = oldText.split('\n').filter((l) => l.trim());
+  if (oldLines.length && oldLines.every((l) => /^\s*\d+\t/.test(l))) tries.push([strip(oldText), strip(newText)]);
+  const last = tries[tries.length - 1];
+  tries.push([last[0].replace(/^\n+|\n+$/g, ''), last[1].replace(/^\n+|\n+$/g, '')]);
+  const many = (count, lines) => ({ error: `the text to replace appears ${count} times in ${p} (lines ${lines.join(', ')}). Include more lines around it so it appears once, or set replace_all to true.` });
+  for (const [o, n] of tries) {
+    if (!o) continue;
+    const at = [];
+    for (let i = text.indexOf(o); i >= 0; i = text.indexOf(o, i + o.length)) at.push(i);
+    if (at.length === 1 || (replaceAll && at.length)) return { edits: at.map((i) => ({ from: i, to: i + o.length, insert: n })) };
+    if (at.length > 1) return many(at.length, at.map((i) => lineAt(text, i)));
+  }
+  const [o, n] = tries[tries.length - 1];
+  if (!o.trim()) return { error: 'old is empty: say which text to replace (or use insert_lines or write_file).' };
+  const file = text.split('\n');
+  const starts = [0];
+  for (const l of file) starts.push(starts[starts.length - 1] + l.length + 1);
+  const want = o.split('\n');
+  const indent = (l) => /^\s*/.exec(l)[0];
+  for (const loose of [(l) => l.trimEnd(), (l) => l.trim()]) {
+    const target = want.map(loose);
+    const hits = [];
+    for (let i = 0; i + want.length <= file.length; i++) {
+      let same = true;
+      for (let j = 0; j < want.length && same; j++) same = loose(file[i + j]) === target[j];
+      if (same) hits.push(i);
+    }
+    if (hits.length > 1 && !replaceAll) return many(hits.length, hits.map((i) => i + 1));
+    if (hits.length) {
+      return {
+        edits: hits.map((i) => {
+          const k = want.findIndex((l) => l.trim());
+          const was = indent(want[k]);
+          const is = indent(file[i + k]);
+          const insert = was === is ? n : n.split('\n').map((l) => (l.trim() && l.startsWith(was) ? is + l.slice(was.length) : l)).join('\n');
+          return { from: starts[i], to: starts[i + want.length - 1] + file[i + want.length - 1].length, insert };
+        }),
+      };
+    }
+  }
+  // Not there: the lines that look closest, to copy from.
+  const words = (l) => new Set(l.toLowerCase().match(/\w+/g) || []);
+  const first = words(want.find((l) => l.trim()) || '');
+  let best = -1;
+  let score = 0;
+  file.forEach((l, i) => {
+    const w = words(l);
+    let shared = 0;
+    for (const x of first) if (w.has(x)) shared++;
+    if (shared > score) { score = shared; best = i; }
+  });
+  const near = best >= 0 && score > 0
+    ? ` The closest lines are:\n${numbered(file.slice(Math.max(0, best - 3), best + want.length + 3), Math.max(1, best - 2))}\n`
+    : ' ';
+  return { error: `the text to replace isn't in ${p}.${near}Copy old exactly as the file has it (read_file shows it), or use replace_lines with line numbers.` };
+}
+
+/** read_file's room: about a third of the context, so a long file comes in parts. */
+const readRoom = (subagent) => {
+  // Apple Intelligence's 4K context keeps the task and a part of a file.
+  if (subagent && subagentModel() === 'apple') return 1800;
+  const context = subagent ? effectiveContext(subagentModel(), settings.subagentContextSize) : contextLimit();
+  return Math.max(2500, Math.min(60000, Math.floor(context * 3.5 * 0.3)));
+};
+
+/** Runs one tool call: { summary (for the chip), output (for the model), apply? (after approval),
+ * ask? (the approval's question), preview?, path? }. */
 async function runTool(call, { subagent = false } = {}) {
   const t = call.tool;
+  const def = TOOL[t];
+  if (!def) return { summary: t, output: `Error: there's no tool called ${t}.` };
+  if (subagent && def.kind !== 'read') return { summary: t, output: `Error: subagents can only read and search; ${t} isn't available.` };
   try {
+    const p = cleanPath(call.path);
     if (t === 'read_file') {
-      const text = await readText(call.path);
-      const lines = text.split('\n');
-      const from = Math.max(1, Number(call.start_line) || 1);
-      const to = Math.min(lines.length, Number(call.end_line) || lines.length);
-      const numbered = lines.slice(from - 1, to).map((l, i) => `${from + i}\t${l}`).join('\n');
-      return { summary: `Read ${cleanPath(call.path)} (${to - from + 1} lines)`, output: clip(numbered, 8000) };
+      let text;
+      try { text = await readText(p); } catch (e) {
+        if (await pathKind(p) === 'folder') return runTool({ tool: 'list_files', path: p }, { subagent });
+        return { summary: `Read ${p} (missing)`, output: await missing(p) };
+      }
+      const lines = text.replace(/\r\n/g, '\n').split('\n');
+      if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+      const from = Math.min(Math.max(1, Number(call.start_line) || 1), Math.max(1, lines.length));
+      let to = Math.min(lines.length, Number(call.end_line) || lines.length);
+      if (to < from) to = from;
+      // As many lines as fit the room.
+      const room = readRoom(subagent);
+      let size = 0;
+      let end = from - 1;
+      while (end < to && size + Math.min(lines[end].length, 1000) + 8 <= room) size += Math.min(lines[end++].length, 1000) + 8;
+      if (end < from) end = from;
+      const more = end < to ? `\n… (lines ${from}-${end} of ${lines.length} shown; read_file with start_line ${end + 1} for the rest)` : '';
+      const whole = from === 1 && end >= lines.length ? ` (all ${lines.length} lines)` : ` (lines ${from}-${end} of ${lines.length})`;
+      return { summary: `Read ${p}${whole}`, output: `${p}${whole}:\n${numbered(lines.slice(from - 1, end), from)}${more}` };
     }
     if (t === 'read_files') {
-      const paths = (Array.isArray(call.paths) ? call.paths : []).slice(0, 8);
+      const paths = (call.paths || []).map(cleanPath).filter(Boolean).slice(0, 8);
+      const room = Math.floor(readRoom(subagent) / Math.max(1, paths.length));
       const parts = [];
-      for (const path of paths) {
-        try { parts.push(`== ${cleanPath(path)} ==\n${clip(await readText(path), 4000)}`); } catch (e) { parts.push(`== ${cleanPath(path)} ==\n(couldn't read it)`); }
+      for (const each of paths) {
+        try {
+          const text = await readText(each);
+          parts.push(`== ${each} ==\n${clip(text, room)}`);
+        } catch (e) {
+          parts.push(`== ${each} ==\n${(await missing(each)).replace(/^Error: /, '')}`);
+        }
       }
       return { summary: `Read ${paths.length} file${paths.length === 1 ? '' : 's'}`, output: parts.join('\n\n') || 'Error: give paths.' };
     }
     if (t === 'find_files') {
       const pattern = String(call.pattern || '*');
-      const re = globToRegExp(pattern.includes('/') ? pattern : '**/' + pattern);
+      const re = globToRegExp(pattern.includes('/') ? pattern.replace(/^\.?\//, '') : '**/' + pattern);
       const files = (await projectFiles()).filter((f) => re.test(f));
       return { summary: `Found ${files.length} file${files.length === 1 ? '' : 's'} for ${pattern}`, output: clip(files.slice(0, 300).join('\n') || 'No files match.') };
     }
@@ -293,23 +501,33 @@ async function runTool(call, { subagent = false } = {}) {
       return { summary: `Read Output: ${call.channel}`, output: text == null ? `No channel called ${call.channel}. Channels: ${names.join(', ')}` : clip(text.slice(-12000)) };
     }
     if (t === 'list_files') {
-      const dir = cleanPath(call.path);
-      const files = (await projectFiles()).filter((f) => !dir || f.startsWith(dir + '/'));
-      return { summary: `Listed ${dir || 'the project'} (${files.length} files)`, output: clip(files.slice(0, 400).join('\n') || '(no files)') };
+      const files = (await projectFiles()).filter((f) => !p || f.startsWith(p + '/'));
+      if (p && !files.length && await pathKind(p) === 'file') return { summary: `Listed ${p}`, output: `${p} is a file, not a folder.` };
+      const shown = files.slice(0, 400).join('\n') + (files.length > 400 ? `\n… (${files.length - 400} more: list a folder, or find_files)` : '');
+      return { summary: `Listed ${p || 'the project'} (${files.length} files)`, output: shown || (p ? `${p} has no files (or doesn't exist).` : '(no files)') };
     }
     if (t === 'search') {
-      const query = String(call.query || '').toLowerCase();
-      if (!query) return { summary: 'Search', output: 'Error: query is empty.' };
-      const dir = cleanPath(call.path);
+      const raw = String(call.query || '');
+      if (!raw) return { summary: 'Search', output: 'Error: query is empty.' };
+      let test;
+      if (call.regex) {
+        let re;
+        try { re = new RegExp(raw, 'i'); } catch (e) { return { summary: 'Search (failed)', output: `Error: ${raw} isn't a regular expression: ${e.message}` }; }
+        test = (line) => re.test(line);
+      } else {
+        const query = raw.toLowerCase();
+        test = (line) => line.toLowerCase().includes(query);
+      }
       const found = [];
-      for (const file of (await projectFiles()).filter((f) => !dir || f.startsWith(dir + '/')).slice(0, 400)) {
+      for (const file of (await projectFiles()).filter((f) => !p || f === p || f.startsWith(p + '/')).slice(0, 600)) {
         let text;
         try { text = await readText(file); } catch (e) { continue; }
         if (typeof text !== 'string' || text.length > 500000) continue;
-        text.split('\n').forEach((line, i) => { if (found.length < 80 && line.toLowerCase().includes(query)) found.push(`${file}:${i + 1}: ${line.trim().slice(0, 200)}`); });
-        if (found.length >= 80) break;
+        text.split('\n').forEach((line, i) => { if (found.length < 101 && test(line)) found.push(`${file}:${i + 1}: ${line.trim().slice(0, 200)}`); });
+        if (found.length > 100) break;
       }
-      return { summary: `Searched for "${call.query}" (${found.length} found)`, output: found.join('\n') || 'No matches.' };
+      const more = found.length > 100 ? '\n… (more matches: search a folder with path, or more exactly)' : '';
+      return { summary: `Searched for "${raw}" (${Math.min(100, found.length)}${more ? '+' : ''} found)`, output: (found.slice(0, 100).join('\n') || 'No matches.') + more };
     }
     if (t === 'get_problems') {
       const items = [];
@@ -321,30 +539,125 @@ async function runTool(call, { subagent = false } = {}) {
       }
       return { summary: `Problems (${items.length})`, output: items.slice(0, 100).join('\n') || 'No problems.' };
     }
-    if (subagent) return { summary: t, output: `Error: subagents can only read and search; ${t} isn't available.` };
+
+    // Changing files.
     if (t === 'edit_file') {
-      const path = cleanPath(call.path);
-      const before = await readText(path);
-      const old = String(call.old ?? '');
-      const count = old ? before.split(old).length - 1 : 0;
-      if (count !== 1) {
-        return { summary: `Edit ${path} (failed)`, output: `Error: the text to replace appears ${count} times in ${path}; it must appear exactly once. Read the file and copy more of it.` };
+      let file;
+      try { file = await loadFile(p); } catch (e) {
+        // An empty old on a new file: creating it.
+        if (!call.old && await pathKind(p) == null) return runTool({ tool: 'write_file', path: p, content: call.new }, { subagent });
+        return { summary: `Edit ${p} (failed)`, output: await missing(p) };
       }
-      const after = before.replace(old, () => String(call.new ?? ''));
-      return { summary: `Edited ${path}`, output: `Edited ${path}.`, apply: () => writeText(path, after), preview: changePreview(before, after), path };
+      const found = locate(file.text, String(call.old ?? '').replace(/\r\n/g, '\n'), String(call.new ?? '').replace(/\r\n/g, '\n'), !!call.replace_all, p);
+      if (found.error) return { summary: `Edit ${p} (failed)`, output: `Error: ${found.error}` };
+      let after = file.text;
+      for (const e of [...found.edits].sort((a, b) => b.from - a.from)) after = after.slice(0, e.from) + e.insert + after.slice(e.to);
+      const first = found.edits[0];
+      const firstLine = lineAt(file.text, first.from);
+      const lastLine = firstLine + Math.max(0, first.insert.split('\n').length - 1);
+      const count = found.edits.length > 1 ? ` (${found.edits.length} places)` : '';
+      return fileChange(p, file.text, after, file.crlf, `Edit ${p}?`, `Edited ${p}${count}. ${changedLines(p, after, firstLine, lastLine)}`, `Edited ${p}${count}`);
     }
-    if (t === 'write_file') {
-      const path = cleanPath(call.path);
+    if (t === 'replace_lines' || t === 'delete_lines' || t === 'insert_lines') {
+      let file;
+      try { file = await loadFile(p); } catch (e) {
+        if (t === 'insert_lines' && await pathKind(p) == null) return runTool({ tool: 'write_file', path: p, content: call.content }, { subagent });
+        return { summary: `Edit ${p} (failed)`, output: await missing(p) };
+      }
+      const lines = linesOf(file.text);
+      const finalNewline = file.text.endsWith('\n') || !file.text;
+      const insert = t === 'delete_lines' ? [] : linesOf(String(call.content ?? '').replace(/\r\n/g, '\n'));
+      let start;
+      let removed;
+      if (t === 'insert_lines') {
+        start = Number(call.line);
+        if (start < 1 || start > lines.length + 1) return { summary: `Edit ${p} (failed)`, output: `Error: line ${start} is outside ${p}, which has ${lines.length} lines: use 1 to ${lines.length + 1}.` };
+        if (!insert.length) return { summary: `Edit ${p} (failed)`, output: 'Error: content is empty.' };
+        removed = 0;
+      } else {
+        start = Number(call.start_line);
+        const end = Number(call.end_line);
+        if (start < 1 || end < start || start > lines.length) {
+          return { summary: `Edit ${p} (failed)`, output: `Error: lines ${start}-${end} aren't in ${p}, which has ${lines.length} lines.` };
+        }
+        removed = Math.min(end, lines.length) - start + 1;
+      }
+      const changed = [...lines.slice(0, start - 1), ...insert, ...lines.slice(start - 1 + removed)];
+      const after = joinLines(changed, finalNewline);
+      const what = t === 'insert_lines' ? `Inserted ${insert.length} line${insert.length === 1 ? '' : 's'} at line ${start} of ${p}`
+        : t === 'delete_lines' ? `Deleted lines ${start}-${start + removed - 1} of ${p}`
+          : `Replaced lines ${start}-${start + removed - 1} of ${p}`;
+      return fileChange(p, file.text, after, file.crlf, `Edit ${p}?`, `${what}. ${changedLines(p, after, start, start + insert.length - 1)}`, what);
+    }
+    if (t === 'write_file' || t === 'append_file') {
+      if (!p) return { summary: t, output: 'Error: give a path.' };
+      if (await pathKind(p) === 'folder') return { summary: `Write ${p} (failed)`, output: `Error: ${p} is a folder.` };
       let before = '';
-      try { before = await readText(path); } catch (e) { /* a new file */ }
-      const after = String(call.content ?? '');
-      return { summary: `${before ? 'Rewrote' : 'Created'} ${path}`, output: `Wrote ${path} (${after.split('\n').length} lines).`, apply: () => writeText(path, after), preview: changePreview(before, after), path };
+      let crlf = false;
+      let exists = true;
+      try { ({ text: before, crlf } = await loadFile(p)); } catch (e) { exists = false; }
+      let content = String(call.content ?? '').replace(/\r\n/g, '\n');
+      if (content && !content.endsWith('\n')) content += '\n';
+      let after = content;
+      if (t === 'append_file') after = before + (before && !before.endsWith('\n') ? '\n' : '') + content;
+      const lines = linesOf(after).length;
+      const verb = t === 'append_file' && exists ? 'Added to' : exists ? 'Rewrote' : 'Created';
+      const output = t === 'append_file' && exists
+        ? `Added ${linesOf(content).length} lines to ${p}. ${changedLines(p, after, linesOf(before).length + 1, lines)}`
+        : `${verb} ${p} (${lines} lines).`;
+      return fileChange(p, before, after, crlf, `${verb.replace('Rewrote', 'Rewrite').replace('Created', 'Create').replace('Added to', 'Add to')} ${p}?`, output, `${verb} ${p}`);
+    }
+    if (t === 'create_folder') {
+      if (!p) return { summary: t, output: 'Error: give a path.' };
+      const kind = await pathKind(p);
+      if (kind) return { summary: `Create folder ${p}`, output: kind === 'folder' ? `${p} already exists.` : `Error: ${p} is a file.` };
+      return { summary: `Created folder ${p}`, output: `Created the folder ${p}.`, ask: `Create the folder ${p}?`, apply: () => api.native({ cmd: 'fs', op: 'mkdir', path: p }) };
+    }
+    if (t === 'move_file' || t === 'copy_file') {
+      const from = cleanPath(call.from);
+      const to = cleanPath(call.to);
+      const verb = t === 'move_file' ? 'Move' : 'Copy';
+      if (!from || !to || from === to) return { summary: `${verb} (failed)`, output: 'Error: give from and to, two different paths.' };
+      await api.save?.();
+      const kind = await pathKind(from);
+      if (!kind) return { summary: `${verb} ${from} (failed)`, output: await missing(from) };
+      if (await pathKind(to)) return { summary: `${verb} ${from} (failed)`, output: `Error: ${to} already exists. Delete it first, or pick another path.` };
+      if (t === 'copy_file') {
+        if (kind === 'folder') return { summary: 'Copy (failed)', output: 'Error: copy_file copies files, not folders.' };
+        return {
+          summary: `Copied ${from} to ${to}`, output: `Copied ${from} to ${to}.`, path: to, ask: `Copy ${from} to ${to}?`,
+          apply: async () => api.native({ cmd: 'fs', op: 'write', path: to, base64: await api.native({ cmd: 'fs', op: 'read', path: from }) }),
+        };
+      }
+      return {
+        summary: `Moved ${from} to ${to}`, output: `Moved ${from} to ${to}.`, ask: `Move ${from} to ${to}?`, path: to,
+        apply: async () => {
+          await api.save?.();
+          await api.native({ cmd: 'fs', op: 'rename', path: from, to });
+          api.pathMoved?.(from, to);
+        },
+      };
+    }
+    if (t === 'delete_file') {
+      if (!p) return { summary: 'Delete (failed)', output: 'Error: give a path (deleting the whole project isn\'t allowed).' };
+      const kind = await pathKind(p);
+      if (!kind) return { summary: `Delete ${p} (failed)`, output: await missing(p) };
+      const inside = kind === 'folder' ? (await projectFiles()).filter((f) => f.startsWith(p + '/')).length : 0;
+      const what = kind === 'folder' ? `the folder ${p} (${inside} file${inside === 1 ? '' : 's'})` : p;
+      return {
+        summary: `Deleted ${p}`, output: `Deleted ${what}.`, ask: `Delete ${what}?`,
+        apply: async () => {
+          await api.native({ cmd: 'fs', op: 'delete', path: p });
+          api.pathMoved?.(p, null);
+        },
+      };
     }
     if (t === 'run_command') {
       const command = String(call.command || '');
       return {
-        summary: `Ran ${command.slice(0, 60)}`, command,
+        summary: `Ran ${command.slice(0, 60)}`, ask: `Run \`${command}\`?`,
         apply: async () => {
+          await api.save?.();
           let out = '';
           const code = await api.runCommand(command, (text) => { out += text; });
           return `Exit code ${code}.\n${clip(out)}`;
@@ -354,8 +667,9 @@ async function runTool(call, { subagent = false } = {}) {
     if (t === 'run_program') {
       const seconds = Math.min(60, Math.max(1, Number(call.seconds) || 8));
       return {
-        summary: 'Ran the program', program: true,
+        summary: 'Ran the program', ask: 'Run the program?',
         apply: async () => {
+          await api.save?.();
           const r = await api.native({ cmd: 'runProgram', seconds, keepRunning: !!call.keep_running });
           const ending = r.exitCode != null ? `It ended with exit code ${r.exitCode}.`
             : r.stillRunning ? (call.keep_running ? `It's still running after ${seconds} s.` : `It was still running after ${seconds} s, so it was stopped.`)
@@ -365,7 +679,7 @@ async function runTool(call, { subagent = false } = {}) {
       };
     }
     if (t === 'delegate') {
-      const tasks = (Array.isArray(call.tasks) ? call.tasks : [call.task]).filter(Boolean).map(String).slice(0, 8);
+      const tasks = (call.tasks || []).filter(Boolean).map(String).slice(0, 8);
       if (!tasks.length) return { summary: 'Delegate', output: 'Error: no tasks.' };
       if (!subagentsOn()) return { summary: 'Delegate', output: 'Error: subagents are turned off; do the research yourself.' };
       const answers = await runSubagents(tasks);
@@ -411,19 +725,28 @@ async function runSubagents(tasks) {
 
 async function subagent(task, model) {
   const chat = [
-    { role: 'system', content: 'You are a research subagent of a coding agent. Answer the task by reading and searching the project; you can\'t change anything. Answer briefly with what you found, naming files and lines.\n\n' + toolHelp(true) },
+    { role: 'system', content: 'You are a research subagent of a coding agent. Answer the task by reading and searching the project; you can\'t change anything. '
+      + 'Answer briefly with what you found, naming files and lines.\n\n' + toolHelp(true) },
     { role: 'user', content: task },
   ];
-  for (let step = 0; step < 6 && !stopped; step++) {
-    const reply = await ask(chat, { model, maxTokens: reasoning(model) === 'always' ? 2048 : 768, contextSize: settings.subagentContextSize });
+  // A small model (Apple Intelligence's 4K) gets results that fit it.
+  const room = model === 'apple' ? 2000 : Math.max(1500, Math.min(6000, Math.floor(effectiveContext(model, settings.subagentContextSize) * 3.5 * 0.25)));
+  let troubles = 0;
+  for (let step = 0; step < 8 && !stopped; step++) {
+    const maxTokens = reasoning(model) === 'always' ? 2048 : 768;
+    const reply = await ask(chat, { model, maxTokens, contextSize: settings.subagentContextSize, stop: STOP_AT });
     if (reply.error) return `(failed: ${reply.error})`;
-    const answer = withoutThinking(reply.text);
-    const calls = toolCalls(answer);
+    const answer = cutInventedResults(withoutThinking(reply.text));
+    const parsed = readToolCalls(answer, TOOL);
     chat.push({ role: 'assistant', content: answer });
-    if (!calls.length) return withoutToolBlocks(answer) || '(no answer)';
-    const results = [];
-    for (const call of calls.slice(0, 4)) results.push(`${call.tool}: ${(await runTool(call, { subagent: true })).output}`);
-    chat.push({ role: 'user', content: 'Tool results:\n' + clip(results.join('\n\n'), 3000) });
+    if (!parsed.calls.length && !parsed.errors.length) return withoutToolCalls(answer, TOOL) || '(no answer)';
+    const results = parsed.calls.slice(0, 4).map(async (call) => `${call.tool}: ${(await runTool(call, { subagent: true })).output}`);
+    const lines = await Promise.all(results);
+    if (parsed.errors.length) {
+      lines.push(callTrouble(parsed, maxTokens).replace(EDIT_EXAMPLE, READ_EXAMPLE));
+      if (!parsed.calls.length && ++troubles >= 3) return withoutToolCalls(answer, TOOL) || '(its tool calls couldn\'t be read)';
+    }
+    chat.push({ role: 'user', content: 'Tool results:\n' + clip(lines.join('\n\n'), room) });
   }
   return '(ran out of steps)';
 }
@@ -493,6 +816,7 @@ async function send() {
   updateControls();
   const seen = new Map();   // this question's tool calls, to catch the agent going in circles
   let repeats = 0;
+  let troubles = 0;
   let overflowed = false;
   try {
     for (let step = 0; step < MAX_STEPS && !stopped; step++) {
@@ -501,7 +825,8 @@ async function send() {
       liveText = '';
       render();
       const chat = forModel();
-      const reply = await ask(chat, { maxTokens: answerTokens(), thinking: thinkingOn(), onText: (t) => { liveText = t; scheduleLive(); } });
+      const maxTokens = answerTokens();
+      const reply = await ask(chat, { maxTokens, thinking: thinkingOn(), stop: canAgent() ? STOP_AT : undefined, onText: (t) => { liveText = t; scheduleLive(); } });
       liveText = null;
       if (reply.error) { messages.push({ role: 'assistant', content: '', shown: reply.error, kind: 'error' }); break; }
       if (reply.promptTokens) {
@@ -510,17 +835,31 @@ async function send() {
       }
       overflowed = reply.dropped > 0;
       // The reasoning shows folded; it goes back to the model only while this question is worked on,
-      // and tool blocks in it don't run.
-      const answer = withoutThinking(reply.text);
-      if (!answer && !thinkingOf(reply.text) && !stopped) {
+      // and tool calls in it don't run. What the model wrote as a tool's results is its invention: cut.
+      const thinking = thinkingOf(reply.text);
+      const answer = canAgent() ? cutInventedResults(withoutThinking(reply.text)) : withoutThinking(reply.text);
+      if (!answer && !thinking && !stopped) {
         messages.push({ role: 'assistant', content: '', kind: 'error', shown: `${modelInfo(settings.selected).name || 'The model'} gave an empty answer. Try again, or a smaller context or another model.` });
         break;
       }
-      const calls = canAgent() ? toolCalls(answer) : [];
-      messages.push({ role: 'assistant', content: answer, shown: reply.text, thinking: thinkingOf(reply.text), calls: calls.map((c) => c.tool + (c.path ? ' ' + c.path : '')) });
+      const parsed = canAgent() ? readToolCalls(answer, TOOL) : NO_CALLS;
+      const { calls } = parsed;
+      const shown = answer === withoutThinking(reply.text) ? reply.text : (thinking ? `<think>\n${thinking}\n</think>\n\n` : '') + answer;
+      messages.push({ role: 'assistant', content: answer, shown, thinking, calls: calls.map((c) => c.tool + (c.path ? ' ' + c.path : c.from ? ` ${c.from} → ${c.to}` : '')) });
       render();
-      if (!calls.length || stopped) break;
+      if (stopped || (!calls.length && !parsed.errors.length)) break;
       const results = [];
+      // Calls that couldn't be read go back to the model, to make again, rather than ending the turn.
+      if (parsed.errors.length) {
+        troubles = calls.length ? 0 : troubles + 1;
+        if (troubles >= MAX_TROUBLES) {
+          messages.push({ role: 'assistant', content: '', kind: 'error', shown: `${modelInfo(settings.selected).name || 'The model'} kept writing tool calls that couldn't be read, so it was stopped. Try again, or a bigger model.` });
+          break;
+        }
+        notice(parsed.cutOff ? 'The answer was cut off in a tool call: the agent is asked to make it in smaller parts.' : 'A tool call couldn\'t be read: the agent is asked to make it again.');
+      } else {
+        troubles = 0;
+      }
       for (const call of calls) {
         if (stopped) break;
         const key = JSON.stringify(call);
@@ -535,6 +874,7 @@ async function send() {
         // A change makes earlier reads worth repeating.
         if (CHANGES_FILES.has(call.tool)) seen.clear();
       }
+      if (parsed.errors.length) results.push(callTrouble(parsed, maxTokens));
       messages.push({ role: 'user', kind: 'tool', content: 'Tool results:\n' + results.join('\n\n'), shown: results.length + ' tool result' + (results.length === 1 ? '' : 's') });
       render();
       if (repeats >= MAX_REPEATS) {
@@ -559,9 +899,15 @@ async function perform(call) {
     if (decision === 'deny') { toolCard(result, 'denied'); return `${call.tool}: The user didn't allow this.`; }
     if (decision === 'always') allowedThisChat.add(call.tool);
   }
-  const output = await result.apply();
+  let output;
+  try {
+    output = await result.apply();
+  } catch (e) {
+    const failed = { ...result, summary: `${result.summary} (failed)`, preview: null };
+    toolCard(failed, 'denied failed', String(e && e.message ? e.message : e));
+    return `${call.tool}: Error: ${e && e.message ? e.message : e}`;
+  }
   toolCard(result, 'done', typeof output === 'string' ? output : null);
-  if (result.path && result.path !== api.current() && call.tool !== 'run_command') { /* written to disk; the Explorer refreshes itself */ }
   return `${call.tool}: ${typeof output === 'string' ? output : result.output}`;
 }
 
@@ -840,9 +1186,10 @@ function renderSettings() {
     panel.append(element('div', 'chat-setting-note', `${info.name || 'This model'} only answers questions: it's too small to use the agent's `
       + 'tools reliably. For the agent (and subagents and Think), pick Qwen3.5 4B or 9B, Gemma 4 E4B, Phi-4 mini, or a cloud model.'));
   } else {
-    const agents = settings.models.filter((m) => m.ready && m.agent);
-    row('Subagent model', select([['', 'Same as Chat'], ...agents.map((m) => [m.id, m.name])], canAgent(settings.subagentModel) ? settings.subagentModel : '',
-      (v) => saveSetting({ subagentModel: v })), 'The model subagents use: a small one is quicker, a big one better.');
+    // Subagents only read and search, so models too small to be the agent (Apple Intelligence) can be one.
+    const agents = settings.models.filter((m) => m.ready && !m.suggested && (m.agent || m.subagent));
+    row('Subagent model', select([['', 'Same as Chat'], ...agents.map((m) => [m.id, m.name])], canSubagent(settings.subagentModel) ? settings.subagentModel : '',
+      (v) => saveSetting({ subagentModel: v })), 'The model subagents use: a small one (Apple Intelligence) is quicker and leaves the memory to the agent, a big one is better.');
     row('Subagent context', contextSelect(subagentModel(), settings.subagentContextSize, (v) => saveSetting({ subagentContextSize: v })),
       'Tokens a subagent reads at once. A small subagent model can have a big context.');
     row('Subagents at once', select([[0, 'Off'], [1, '1'], [2, '2'], [3, '3'], [4, '4'], [6, '6'], [8, '8']], settings.subagentParallel,
@@ -939,7 +1286,7 @@ export function chatSelectionChanged() { if (chatOpen()) updateContextLabel(); }
 /** Reasoning models write their thinking in <think>…</think>: shown folded away. */
 function renderAnswer(text) {
   const html = [];
-  let rest = withoutToolBlocks(text);
+  let rest = canAgent() ? withoutToolCalls(text, TOOL) : text;
   // A template that opens <think> itself leaves only the closing tag in the reply.
   if (rest.includes('</think>') && rest.lastIndexOf('<think>', rest.indexOf('</think>')) < 0) rest = '<think>' + rest;
   const open = rest.indexOf('<think>');
@@ -1000,7 +1347,7 @@ const cards = [];   // tool cards and approvals, kept across renders
 
 function toolCard(result, state, output) {
   const card = element('div', `chat-tool ${state}`);
-  card.append(element('div', 'chat-tool-title', (state === 'denied' ? '✕ ' : '✓ ') + result.summary + (state === 'denied' ? ' (not allowed)' : '')));
+  card.append(element('div', 'chat-tool-title', (state === 'done' ? '✓ ' : '✕ ') + result.summary + (state === 'denied' ? ' (not allowed)' : '')));
   if (result.preview && result.preview.text) {
     const details = element('details');
     details.append(element('summary', null, `Changes from line ${result.preview.line}`), element('pre', 'chat-diff', result.preview.text));
@@ -1024,7 +1371,7 @@ function toolCard(result, state, output) {
 function approval(call, result) {
   return new Promise((resolve) => {
     const card = element('div', 'chat-approval');
-    const title = call.tool === 'run_command' ? `Run \`${result.command}\`?` : call.tool === 'run_program' ? 'Run the program?' : `${result.summary.replace(/^(Edited|Created|Rewrote)/, (w) => ({ Edited: 'Edit', Created: 'Create', Rewrote: 'Rewrite' })[w])}?`;
+    const title = result.ask || `${result.summary}?`;
     card.append(element('div', 'chat-tool-title', title));
     if (result.preview) card.append(element('pre', 'chat-diff', result.preview.text));
     const buttons = element('div', 'chat-approval-buttons');

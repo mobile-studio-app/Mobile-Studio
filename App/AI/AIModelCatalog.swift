@@ -33,6 +33,8 @@ struct LocalModel {
     /// Good enough to be the Chat agent (tools, editing, running): small models loop or call
     /// tools wrongly, so they only answer questions.
     var agent = false
+    /// Good enough to be a subagent, which only reads and searches (agents are too).
+    var subagent = false
     var reasoning: Reasoning = .none
     /// How its prompts are written.
     var format: PromptFormat = .template
@@ -144,7 +146,7 @@ enum AIModelCatalog {
                    url: hf("unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf"),
                    sha256: "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
                    bytes: 1_280_835_840, minimumMemory: 4_000_000_000, chats: true, license: "Apache 2.0", trainedContext: 262144, kvBytesPerToken: 12288,
-                   reasoning: .optional, format: .thinkPrefill),
+                   subagent: true, reasoning: .optional, format: .thinkPrefill),
         LocalModel(id: "qwen3.5-4b", name: "Qwen3.5 4B", detail: "Coding agent that can think first",
                    fileName: "Qwen3.5-4B-Q4_K_M.gguf",
                    url: hf("unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf"),
@@ -165,7 +167,7 @@ enum AIModelCatalog {
                    url: hf("unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf"),
                    sha256: "740185b21d22ceb83a11c3aa62ad5842ef32c70f6096d756bbee85a1e4ec34b8",
                    bytes: 3_106_738_272, minimumMemory: 6_000_000_000, chats: true, license: "Gemma Terms of Use", trainedContext: 131072, kvBytesPerToken: 15360,
-                   slidingWindow: 512, fullAttentionShare: 0.4, reasoning: .optional, format: .gemma4),
+                   slidingWindow: 512, fullAttentionShare: 0.4, subagent: true, reasoning: .optional, format: .gemma4),
         LocalModel(id: "gemma4-e4b", name: "Gemma 4 E4B", detail: "Google's assistant",
                    fileName: "gemma-4-E4B-it-Q4_K_M.gguf",
                    url: hf("unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_K_M.gguf"),
@@ -182,7 +184,7 @@ enum AIModelCatalog {
                    url: hf("unsloth/SmolLM3-3B-GGUF/resolve/main/SmolLM3-3B-Q4_K_M.gguf"),
                    sha256: "4de907d2d388a5508fb7cb443a06effe14cce3518b0a78d3bdd9e74d9edce989",
                    bytes: 1_915_306_528, minimumMemory: 5_000_000_000, chats: true, license: "Apache 2.0", trainedContext: 65536, kvBytesPerToken: 73728,
-                   reasoning: .optional, format: .thinkPrefill),
+                   subagent: true, reasoning: .optional, format: .thinkPrefill),
     ]
 
     static let all = [fast, regular] + extras

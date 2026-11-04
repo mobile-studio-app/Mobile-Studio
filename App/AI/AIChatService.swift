@@ -49,6 +49,9 @@ final class AIChatService {
         var cloud = false
         /// Can be the Chat agent (tools, editing); others only answer questions.
         var agent = false
+        /// Can be a subagent, which only reads and searches: agents, and smaller models such as
+        /// Apple Intelligence.
+        var subagent = false
         var reasoning: LocalModel.Reasoning = .none
     }
 
@@ -102,11 +105,12 @@ final class AIChatService {
     var options: [Option] {
         let reason = AppleIntelligenceEngine.unavailableReason
         var list = [Option(choice: .appleIntelligence, name: "Apple Intelligence", detail: reason ?? "Built into iOS",
-                           ready: reason == nil, contexts: [ContextSize(tokens: Self.appleContextSize, bytes: 0, fits: true)])]
+                           ready: reason == nil, contexts: [ContextSize(tokens: Self.appleContextSize, bytes: 0, fits: true)], subagent: reason == nil)]
         for model in AIModelCatalog.all where model.isDownloaded && (model.chats || model.completes) {
             let detail = model.isSupported ? (model.chats ? model.detail : "\(model.detail) · a code model, chats less well") : model.requirementText
             list.append(Option(choice: model.choice, name: model.chats ? model.name : "\(model.name) (\(model.detail))", detail: detail,
-                               ready: model.isSupported, contexts: contexts(for: model), agent: model.agent, reasoning: model.reasoning))
+                               ready: model.isSupported, contexts: contexts(for: model), agent: model.agent,
+                               subagent: model.agent || model.subagent, reasoning: model.reasoning))
         }
         for model in AIModelCatalog.chatModels where !model.isDownloaded && model.isSupported {
             list.append(Option(choice: model.choice, name: model.name,
@@ -116,7 +120,7 @@ final class AIChatService {
         for provider in CloudProvider.allCases where provider.isConfigured {
             list.append(Option(choice: provider.choice, name: provider.displayName, detail: "Cloud · sends your code to \(provider.name)",
                                ready: true, contexts: [ContextSize(tokens: provider.contextSize, bytes: 0, fits: true)], cloud: true,
-                               agent: true, reasoning: .optional))
+                               agent: true, subagent: true, reasoning: .optional))
         }
         return list
     }
@@ -145,14 +149,17 @@ final class AIChatService {
     /// gets the answer so far; both callbacks run on the main queue. Stopping keeps what was written.
     /// `contextSize`: the tokens wanted (Chat's or the subagents' setting); the model gets as many as fit.
     /// `thinking`: Think is on (a reasoning model samples as its makers suggest for that).
+    /// `stop`: the answer ends before any of these (where the agent's model starts writing a tool's
+    /// results itself, which come from the app).
     func respond(id: String, choice: AIModelChoice? = nil, contextSize: Int? = nil, _ messages: [ChatMessage], maxTokens: Int = 1536,
-                 thinking: Bool = false, onText: @escaping (String) -> Void, completion: @escaping (Result<ChatReply, Error>) -> Void) {
+                 thinking: Bool = false, stop: [String] = [], onText: @escaping (String) -> Void,
+                 completion: @escaping (Result<ChatReply, Error>) -> Void) {
         cancel(id)
         let choice = choice ?? AppSettings.shared.chatModel
         if let provider = CloudProvider.from(choice) {
             tasks[id] = Task { @MainActor [weak self] in
                 do {
-                    let text = try await CloudChat.respond(provider, messages: messages, maxTokens: maxTokens) { text in
+                    let text = try await CloudChat.respond(provider, messages: messages, maxTokens: maxTokens, stop: stop) { text in
                         DispatchQueue.main.async { if self?.tasks[id] != nil { onText(text) } }
                     }
                     self?.tasks[id] = nil
@@ -202,7 +209,7 @@ final class AIChatService {
         guard let engine = engines[model.id] else { return }
         let cancel = CompletionCancel()
         cancels[id] = cancel
-        engine.respond(messages, maxTokens: maxTokens, thinking: thinking, cancel: cancel, onText: { text in
+        engine.respond(messages, maxTokens: maxTokens, thinking: thinking, stop: stop, cancel: cancel, onText: { text in
             DispatchQueue.main.async { if !cancel.isCancelled { onText(text) } }
         }, completion: { [weak self] result in
             DispatchQueue.main.async {
@@ -252,10 +259,10 @@ final class LlamaChatEngine {
         if let llamaModel { llama_model_free(llamaModel) }
     }
 
-    func respond(_ messages: [ChatMessage], maxTokens: Int, thinking: Bool = false, cancel: CompletionCancel,
+    func respond(_ messages: [ChatMessage], maxTokens: Int, thinking: Bool = false, stop: [String] = [], cancel: CompletionCancel,
                  onText: @escaping (String) -> Void, completion: @escaping (Result<ChatReply, Error>) -> Void) {
         queue.async {
-            completion(Result { try self.generate(messages, maxTokens: maxTokens, thinking: thinking, cancel: cancel, onText: onText) })
+            completion(Result { try self.generate(messages, maxTokens: maxTokens, thinking: thinking, stop: stop, cancel: cancel, onText: onText) })
         }
     }
 
@@ -381,7 +388,7 @@ final class LlamaChatEngine {
 
     // MARK: - Generation
 
-    private func generate(_ messages: [ChatMessage], maxTokens: Int, thinking: Bool, cancel: CompletionCancel,
+    private func generate(_ messages: [ChatMessage], maxTokens: Int, thinking: Bool, stop: [String], cancel: CompletionCancel,
                           onText: (String) -> Void) throws -> ChatReply {
         try loadIfNeeded()
         guard let ctx = context, let vocab else { throw Self.error("\(model.name) isn't loaded.") }
@@ -488,12 +495,27 @@ final class LlamaChatEngine {
         defer { llama_sampler_free(sampler) }
 
         var output: [UInt8] = []
+        var stopped: String?
         for _ in 0..<maxTokens {
             if cancel.isCancelled { break }
             var token = llama_sampler_sample(sampler, ctx, -1)
             if llama_vocab_is_eog(vocab, token) { break }
             output += piece(token)
-            onText(shown(output))
+            let text = shown(output)
+            // A stop text: the answer ends before it (the token isn't kept, so the next turn's prompt
+            // goes on from the answer as it's shown).
+            // Only the answer can end at one, not the thinking before it (which may mention them).
+            if !stop.isEmpty {
+                let opensThinking = (thinking && model.format == .thinkPrefill) || text.contains("<think>")
+                let answer: Substring? = text.range(of: "</think>", options: .backwards).map { text[$0.upperBound...] }
+                    ?? (opensThinking ? nil : text[...])
+                if let answer, let end = stop.first(where: { answer.suffix(96).contains($0) }),
+                   let at = answer.range(of: end, options: .backwards) {
+                    stopped = String(text[..<at.lowerBound])
+                    break
+                }
+            }
+            onText(text)
             let rc = llama_decode(ctx, llama_batch_get_one(&token, 1))
             guard rc == 0 else {
                 llama_memory_clear(memory, true)
@@ -503,7 +525,7 @@ final class LlamaChatEngine {
             }
             cached.append(token)
         }
-        return ChatReply(text: shown(output), promptTokens: promptTokens, dropped: dropped)
+        return ChatReply(text: stopped ?? shown(output), promptTokens: promptTokens, dropped: dropped)
     }
 
     /// The answer as Chat shows it: Gemma 4's thought channel as <think> … </think>, without its other markers.

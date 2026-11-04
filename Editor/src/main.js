@@ -528,6 +528,10 @@ setupChat({
   // The agent's run_command: the Terminal's shell in Node.js, its output in Output > Chat too.
   runCommand: (command, onOutput) => nodeJob('task', { command }, 'Chat', onOutput),
   problems: () => hostDiagnostics(),
+  // Before the agent moves files or runs something: its edits to the open file are on disk.
+  save: () => save(),
+  // The agent moved or deleted a file: its tabs follow, as when the Explorer does it.
+  pathMoved: (from, to) => pathMoved(from, to),
 });
 addCommands([
   { command: 'workbench.action.chat.open', title: 'Chat: Open Chat', keybinding: '⌃⌘I', run: () => openChat() },

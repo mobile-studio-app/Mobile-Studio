@@ -22,7 +22,8 @@ scenario(async () => {
   window.__files['lib/util.lua'] = 'return {}\n';
   window.__files['big.lua'] = '-- a long file\n' + 'local x = 1\n'.repeat(300);
   const models = [
-    { id: 'apple', name: 'Apple Intelligence', detail: '', ready: true, agent: false, reasoning: 'none', contexts: [{ tokens: 4096, bytes: 0, fits: true }] },
+    { id: 'apple', name: 'Apple Intelligence', detail: '', ready: true, agent: false, subagent: true, reasoning: 'none', contexts: [{ tokens: 4096, bytes: 0, fits: true }] },
+    { id: 'qwen3.5-0.8b', name: 'Qwen3.5 0.8B', detail: '', ready: true, agent: false, reasoning: 'optional', contexts: [{ tokens: 4096, bytes: 1e8, fits: true }] },
     { id: 'qwen3.5-4b', name: 'Qwen3.5 4B', detail: '', ready: true, agent: true, reasoning: 'optional',
       contexts: [{ tokens: 4096, bytes: 1e9, fits: true }, { tokens: 8192, bytes: 2e9, fits: true }] },
     { id: 'cloud:anthropic', name: 'claude-sonnet-5-5 (Anthropic)', detail: '', ready: true, cloud: true, agent: true, reasoning: 'optional',
@@ -81,6 +82,12 @@ scenario(async () => {
   const answers = [...document.querySelectorAll('.chat-message.assistant .chat-body > p')];
   check('the final answer shows', (answers.pop() || {}).textContent === 'Fixed: it was a typo.');
 
+  // Subagents can use Apple Intelligence, which is too small to be the agent; a tiny model can't.
+  const subagentSelect = [...document.querySelectorAll('#chat-settings .chat-setting')].find((r) => /Subagent model/.test(r.textContent))?.querySelector('select');
+  const subagentChoices = subagentSelect ? [...subagentSelect.options].map((o) => o.value) : [];
+  check('Apple Intelligence can be the subagents\' model', subagentChoices.includes('apple'), subagentChoices.join(', '));
+  check('a model that can\'t do either isn\'t offered for subagents', !subagentChoices.includes('qwen3.5-0.8b'));
+
   // Think on: saved, Qwen3.5 reasons by itself (the app opens its thinking), with a bigger answer budget.
   think.click();
   await wait(100);
@@ -92,7 +99,9 @@ scenario(async () => {
   await until(() => sent.length >= 5, 4000);
   const next = sent[4];
   check('with Think on, a model that reasons by itself isn\'t told how', !next.messages[0].content.includes('/no_think') && !next.messages[0].content.includes('inside <think>'));
-  check('with Think on answers can be longer, and the app is told', next.maxTokens === 3072 && next.thinking === true, next.maxTokens);
+  check('the agent\'s answers have room for a whole file (a quarter of the context)', sent[0].maxTokens === 2048, sent[0].maxTokens);
+  check('with Think on answers can be longer, and the app is told', next.maxTokens === 2048 + 1536 && next.thinking === true, next.maxTokens);
+  check('the app is told where the agent\'s answers stop', Array.isArray(sent[0].stop) && sent[0].stop.includes('<tool_response>'));
   check('an earlier question\'s reasoning is left out', next.messages.filter((x) => x.role === 'assistant').every((x) => !x.content.includes('<think>')));
   check('older tool results are cut short', next.messages.some((x) => /cut short to save room/.test(x.content)) || sent[3].messages.some((x) => /cut short to save room/.test(x.content)));
   await until(() => document.getElementById('chat-send').textContent === 'Send', 4000);

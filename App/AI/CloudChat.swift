@@ -115,9 +115,11 @@ enum CloudChat {
     }
 
     /// Streams `provider`'s answer; `onText` gets the answer so far. Cancelling the task stops it.
-    static func respond(_ provider: CloudProvider, messages: [ChatMessage], maxTokens: Int,
+    /// `stop`: texts the answer ends before. Only Anthropic's API is sent them (OpenAI's newer models
+    /// refuse `stop`); for the others Chat cuts the answer itself.
+    static func respond(_ provider: CloudProvider, messages: [ChatMessage], maxTokens: Int, stop: [String] = [],
                         onText: @escaping (String) -> Void) async throws -> String {
-        let request = try makeRequest(provider, messages: messages, maxTokens: maxTokens)
+        let request = try makeRequest(provider, messages: messages, maxTokens: maxTokens, stop: stop)
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else {
@@ -141,7 +143,7 @@ enum CloudChat {
         return text
     }
 
-    private static func makeRequest(_ provider: CloudProvider, messages: [ChatMessage], maxTokens: Int) throws -> URLRequest {
+    private static func makeRequest(_ provider: CloudProvider, messages: [ChatMessage], maxTokens: Int, stop: [String]) throws -> URLRequest {
         let base = provider.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: " /"))
         guard provider.isConfigured else {
             throw Failure(message: "\(provider.name) isn't set up: add a key and model in Settings → AI → Cloud Models.")
@@ -159,6 +161,8 @@ enum CloudChat {
             request.setValue(provider.apiKey, forHTTPHeaderField: "x-api-key")
             request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
             body["max_tokens"] = maxTokens
+            let stops = stop.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            if !stops.isEmpty { body["stop_sequences"] = stops }
             let system = messages.filter { $0.role == "system" }.map(\.content).joined(separator: "\n\n")
             if !system.isEmpty { body["system"] = system }
             body["messages"] = alternating(messages.filter { $0.role != "system" })
