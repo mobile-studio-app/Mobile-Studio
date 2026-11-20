@@ -23,7 +23,7 @@ scenario(async () => {
   check('the mode says Chat only and can\'t be changed', mode.value === 'chat' && mode.disabled);
   const think = document.getElementById('chat-think');
   check('Think is off and can\'t be turned on', think.disabled && !think.classList.contains('on'));
-  check('the empty chat says to pick a bigger model for the agent', /pick a bigger model/.test(document.getElementById('chat-log').textContent));
+  check('the empty chat says which tiers are agents', /pick Light, Standard or Smart/.test(document.getElementById('chat-log').textContent));
 
   const box = document.getElementById('chat-text');
   box.value = 'What is wrong with love.draw?';

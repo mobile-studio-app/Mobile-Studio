@@ -45,6 +45,27 @@ window.webkit = { messageHandlers: { duocode: { postMessage: async (m) => {
   if (m.cmd === 'stat') { if (m.path in f) return { size: f[m.path].length }; throw new Error('not found'); }
   if (m.cmd === 'write') { f[m.path] = m.contents; return true; }
   if (m.cmd === 'list') return Object.keys(f);
+  if (m.cmd === 'memory') {
+    // The Chat agent's long-term memory (ContextCache.swift), in memory: notes and set-aside text.
+    const store = (window.__memory = window.__memory || []);
+    if (m.op === 'save') {
+      const old = m.kind === 'note' ? store.find((e) => e.kind === 'note' && e.title.toLowerCase() === String(m.title).toLowerCase()) : null;
+      const entry = old || { id: 'm' + (store.length + 1), kind: m.kind === 'archive' ? 'archive' : 'note', title: m.title || m.text.slice(0, 60) };
+      entry.text = m.text;
+      if (!old) store.push(entry);
+      return { id: entry.id, replaced: !!old };
+    }
+    const info = (e) => ({ id: e.id, kind: e.kind, title: e.title, length: e.text.length });
+    if (m.op === 'list') return store.map(info);
+    if (m.op === 'read') { const e = store.find((x) => x.id === m.id); if (!e) throw new Error(`There's no memory ${m.id}.`); return { ...info(e), text: e.text }; }
+    if (m.op === 'delete') { const i = store.findIndex((x) => x.id === m.id); if (i < 0) throw new Error(`There's no memory ${m.id}.`); store.splice(i, 1); return true; }
+    if (m.op === 'search') {
+      const words = String(m.query).toLowerCase().split(/\W+/).filter((w) => w.length > 1);
+      return store.map((e) => ({ e, n: words.filter((w) => (e.title + ' ' + e.text).toLowerCase().includes(w)).length }))
+        .filter((x) => x.n).sort((a, b) => b.n - a.n).slice(0, m.limit || 8)
+        .map(({ e }) => ({ ...info(e), passage: e.text.slice(0, 300) }));
+    }
+  }
   if (m.cmd === 'fs') {
     // workspace.fs and the Chat agent's file tools: folders are the files' paths' prefixes.
     const p = m.path || '';

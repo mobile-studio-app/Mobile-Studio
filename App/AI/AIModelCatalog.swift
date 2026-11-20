@@ -38,6 +38,8 @@ struct LocalModel {
     var reasoning: Reasoning = .none
     /// How its prompts are written.
     var format: PromptFormat = .template
+    /// How its answers are sampled.
+    var sampling: Sampling = .standard
 
     enum PromptFormat {
         /// The model's own chat template (llama.cpp's built-in version of it).
@@ -47,12 +49,22 @@ struct LocalModel {
         case thinkPrefill
         /// Gemma 4's turns (<|turn>user … <turn|>), which llama.cpp's templates don't know.
         case gemma4
+        /// LFM3's ChatML, which llama.cpp's templates don't know: answers start "<think>" to reason,
+        /// or "<think></think>" not to, and earlier answers carry an empty thought.
+        case lfm3
+    }
+
+    enum Sampling {
+        /// By the format: Gemma's, Qwen's for reasoning models, otherwise a general mix.
+        case standard
+        /// LFM3's for chat, tools and code: temperature 0.1, top-k 50, repetition penalty 1.1.
+        case lfm
     }
 
     enum Reasoning: String {
         /// No thinking: it answers straight away.
         case none
-        /// Reasons first when Think is on (Qwen3.5, Gemma 4, SmolLM3).
+        /// Reasons first when Think is on (Qwen3.5, LFM3).
         case optional
         /// Always reasons (DeepSeek-R1).
         case always
@@ -73,8 +85,8 @@ struct LocalModel {
     var localURL: URL { AIModelCatalog.directory.appendingPathComponent(fileName) }
     var isDownloaded: Bool { FileManager.default.fileExists(atPath: localURL.path) }
     var isSupported: Bool { ProcessInfo.processInfo.physicalMemory >= minimumMemory }
-    /// Fast AI and Regular AI, which Settings → AI always lists; the rest are listed once downloaded.
-    var isBuiltIn: Bool { id == "fast" || id == "regular" }
+    /// The tier it's the model of.
+    var tier: AITier? { AITier.of(choice) }
 
     var sizeText: String { ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
     var requirementText: String {
@@ -90,158 +102,172 @@ struct LocalModel {
     }
 }
 
+/// The four kinds of AI Mobile Studio offers. Each feature (Chat, its subagents, code suggestions,
+/// merge conflicts) picks a tier, and each tier names the best model of its size for the job: a chat
+/// model that can be the agent, and a code model trained for fill-in-the-middle (which chat models
+/// aren't).
+enum AITier: String, CaseIterable {
+    /// Apple Intelligence: built into iOS, nothing to download. Answers questions; too small for the agent.
+    case nano
+    /// For every phone: quick, about 2.5 GB in all.
+    case light
+    /// For phones with 8 GB.
+    case standard
+    /// For phones with 12 GB.
+    case smart
+
+    var name: String {
+        switch self {
+        case .nano: return "Nano"
+        case .light: return "Light"
+        case .standard: return "Standard"
+        case .smart: return "Smart"
+        }
+    }
+
+    /// What it's for, in Settings.
+    var summary: String {
+        switch self {
+        case .nano: return "Built into iOS, nothing to download"
+        case .light: return "Quick, for every phone"
+        case .standard: return "For phones with 8 GB"
+        case .smart: return "The best answers, for phones with 12 GB"
+        }
+    }
+
+    /// Chat's model.
+    var chatChoice: AIModelChoice {
+        switch self {
+        case .nano: return .appleIntelligence
+        case .light: return AIModelChoice(rawValue: "lfm3-1.7b")!
+        case .standard: return AIModelChoice(rawValue: "qwen3.5-4b")!
+        case .smart: return AIModelChoice(rawValue: "qwen3.5-9b")!
+        }
+    }
+
+    /// Code suggestions' and merge conflicts' model.
+    var codeChoice: AIModelChoice {
+        switch self {
+        case .nano: return .appleIntelligence
+        case .light: return AIModelChoice(rawValue: "qwen2.5-coder-1.5b")!
+        case .standard: return .fast
+        case .smart: return .regular
+        }
+    }
+
+    /// The tier a model belongs to, if any (a cloud model or Off has none).
+    static func of(_ choice: AIModelChoice) -> AITier? {
+        allCases.first { $0.chatChoice == choice || $0.codeChoice == choice }
+    }
+}
+
 enum AIModelCatalog {
     private static func hf(_ path: String) -> URL { URL(string: "https://huggingface.co/\(path)")! }
 
-    // Qwen2.5-Coder base models: trained for fill-in-the-middle, which is what inline completion is.
+    // Code suggestions and merge conflicts: Qwen2.5-Coder base models, trained for fill-in-the-middle,
+    // which is what inline completion is (no newer small model is). Their ids are the settings' old
+    // values: "fast" and "regular" were Fast AI and Regular AI.
+    static let codeLight = LocalModel(
+        id: "qwen2.5-coder-1.5b", name: "Qwen2.5-Coder 1.5B", detail: "Code model",
+        fileName: "Qwen2.5-Coder-1.5B.Q4_K_M.gguf",
+        url: hf("mradermacher/Qwen2.5-Coder-1.5B-GGUF/resolve/main/Qwen2.5-Coder-1.5B.Q4_K_M.gguf"),
+        sha256: "b5fa4d99dd9aa4d5c36f2bd9c60eb189d10809d547a336e6cba8a4f45d178dc8",
+        bytes: 986_048_960, minimumMemory: 3_500_000_000, completes: true, license: "Apache 2.0", trainedContext: 32768, kvBytesPerToken: 28672)
+
     static let fast = LocalModel(
-        id: "fast",
-        name: "Fast AI",
-        detail: "Qwen2.5-Coder 3B",
+        id: "fast", name: "Qwen2.5-Coder 3B", detail: "Code model",
         fileName: "Qwen2.5-Coder-3B-Q4_K_M.gguf",
         url: hf("bartowski/Qwen2.5-Coder-3B-GGUF/resolve/main/Qwen2.5-Coder-3B-Q4_K_M.gguf"),
         sha256: "bf2cee2051affae926e9a9ef4a62ebd197aec86639b075634faf973fcfd8a10c",
-        bytes: 1_929_903_200,
-        minimumMemory: 5_000_000_000,
-        completes: true,
-        license: "Qwen Research License", trainedContext: 32768, kvBytesPerToken: 36864
-    )
+        bytes: 1_929_903_200, minimumMemory: 5_000_000_000, completes: true,
+        license: "Qwen Research License", trainedContext: 32768, kvBytesPerToken: 36864)
 
     static let regular = LocalModel(
-        id: "regular",
-        name: "Regular AI",
-        detail: "Qwen2.5-Coder 7B",
+        id: "regular", name: "Qwen2.5-Coder 7B", detail: "Code model",
         fileName: "Qwen2.5-Coder-7B.Q4_K_M.gguf",
         url: hf("mradermacher/Qwen2.5-Coder-7B-GGUF/resolve/main/Qwen2.5-Coder-7B.Q4_K_M.gguf"),
         sha256: "92b96b6bfe55432605dee9c4757ed52ac9ca0a2a365eeaf782ce4c572bbfac39",
-        bytes: 4_683_074_400,
-        minimumMemory: 7_000_000_000,
-        completes: true,
-        license: "Apache 2.0", trainedContext: 32768, kvBytesPerToken: 57344
-    )
+        bytes: 4_683_074_400, minimumMemory: 7_000_000_000, completes: true,
+        license: "Apache 2.0", trainedContext: 32768, kvBytesPerToken: 57344)
 
-    /// More models for Settings → Advanced → AI Models. Each one downloaded joins the lists it fits:
-    /// code models AI Suggestions and merge conflicts, chat models the Chat panel.
-    static let extras: [LocalModel] = [
-        LocalModel(id: "qwen2.5-coder-0.5b", name: "Qwen2.5-Coder 0.5B", detail: "Tiny code model for older devices",
-                   fileName: "Qwen2.5-Coder-0.5B.Q8_0.gguf",
-                   url: hf("mradermacher/Qwen2.5-Coder-0.5B-GGUF/resolve/main/Qwen2.5-Coder-0.5B.Q8_0.gguf"),
-                   sha256: "88a4073ab5430eb1010c757737eda04ed0557456aa70dc672ea307e09966c141",
-                   bytes: 531_068_576, minimumMemory: 2_500_000_000, completes: true, license: "Apache 2.0", trainedContext: 32768, kvBytesPerToken: 12288),
-        LocalModel(id: "qwen2.5-coder-1.5b", name: "Qwen2.5-Coder 1.5B", detail: "Small code model",
-                   fileName: "Qwen2.5-Coder-1.5B.Q4_K_M.gguf",
-                   url: hf("mradermacher/Qwen2.5-Coder-1.5B-GGUF/resolve/main/Qwen2.5-Coder-1.5B.Q4_K_M.gguf"),
-                   sha256: "b5fa4d99dd9aa4d5c36f2bd9c60eb189d10809d547a336e6cba8a4f45d178dc8",
-                   bytes: 986_048_960, minimumMemory: 3_500_000_000, completes: true, license: "Apache 2.0", trainedContext: 32768, kvBytesPerToken: 28672),
+    // Chat: the best agents of each size (tool calling and coding benchmarks, November 2026). All three
+    // write tool calls in the format Chat's agent uses (<tool_call><function=…>), and can think first.
+    static let chatModels: [LocalModel] = [
+        // LFM3 1.7B (Liquid AI, October 2026): about as good an agent as Qwen3.5 4B at under half the
+        // size (its makers' BFCL v4 71, τ³-bench 68). Convolution layers, and attention layers of which
+        // 5 of 11 keep only the last 256 tokens. Free for commercial use under $10M a year in revenue.
+        LocalModel(id: "lfm3-1.7b", name: "LFM3 1.7B", detail: "Liquid AI's agent",
+                   fileName: "LFM3-1.7B-Q4_K_M.gguf",
+                   url: hf("LiquidAI/LFM3-1.7B-GGUF/resolve/main/LFM3-1.7B-Q4_K_M.gguf"),
+                   sha256: "3793e1e6e2266919d6e015287221b41100175a98eddaba92e111aed3b05c93c4",
+                   bytes: 1_099_627_808, minimumMemory: 4_000_000_000, chats: true, license: "LFM Open License 1.0", trainedContext: 262144,
+                   kvBytesPerToken: 22528, slidingWindow: 256, fullAttentionShare: 6.0 / 11.0, agent: true, subagent: true,
+                   reasoning: .optional, format: .lfm3, sampling: .lfm),
         // Qwen3.5: three of every four layers keep a fixed-size state instead of a cache, so the cache
         // per token is a quarter of a plain model's (kvBytesPerToken counts the other layers).
-        LocalModel(id: "qwen3.5-0.8b", name: "Qwen3.5 0.8B", detail: "Tiny assistant for older devices",
-                   fileName: "Qwen3.5-0.8B-Q8_0.gguf",
-                   url: hf("unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q8_0.gguf"),
-                   sha256: "0ad885ffd4bb022fc4f0d33a3308fa108ef8613159d3b3a67e23abca056b7a6c",
-                   bytes: 811_843_840, minimumMemory: 3_000_000_000, chats: true, license: "Apache 2.0", trainedContext: 262144, kvBytesPerToken: 12288,
-                   reasoning: .optional, format: .thinkPrefill),
-        LocalModel(id: "qwen3.5-2b", name: "Qwen3.5 2B", detail: "Small assistant",
-                   fileName: "Qwen3.5-2B-Q4_K_M.gguf",
-                   url: hf("unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf"),
-                   sha256: "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
-                   bytes: 1_280_835_840, minimumMemory: 4_000_000_000, chats: true, license: "Apache 2.0", trainedContext: 262144, kvBytesPerToken: 12288,
-                   subagent: true, reasoning: .optional, format: .thinkPrefill),
-        LocalModel(id: "qwen3.5-4b", name: "Qwen3.5 4B", detail: "Coding agent that can think first",
+        LocalModel(id: "qwen3.5-4b", name: "Qwen3.5 4B", detail: "Qwen's agent",
                    fileName: "Qwen3.5-4B-Q4_K_M.gguf",
                    url: hf("unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf"),
                    sha256: "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
                    bytes: 2_740_937_888, minimumMemory: 6_000_000_000, chats: true, license: "Apache 2.0", trainedContext: 262144, kvBytesPerToken: 32768,
-                   agent: true, reasoning: .optional, format: .thinkPrefill),
-        LocalModel(id: "qwen3.5-9b", name: "Qwen3.5 9B", detail: "Best coding agent here",
+                   agent: true, subagent: true, reasoning: .optional, format: .thinkPrefill),
+        LocalModel(id: "qwen3.5-9b", name: "Qwen3.5 9B", detail: "Qwen's agent",
                    // IQ4_XS: about Q4's quality in half a gigabyte less, which is what fits a 12 GB phone's
                    // share of memory.
                    fileName: "Qwen3.5-9B-IQ4_XS.gguf",
                    url: hf("unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-IQ4_XS.gguf"),
                    sha256: "7e918aeca06c52bcb528ea6b04b4ec957e75ee8c0a73138854c0dfcf371ea429",
                    bytes: 5_168_653_536, minimumMemory: 10_000_000_000, chats: true, license: "Apache 2.0", trainedContext: 262144, kvBytesPerToken: 32768,
-                   agent: true, reasoning: .optional, format: .thinkPrefill),
-        // Gemma 4: most layers attend over the last 512 tokens, and later layers share earlier ones' cache.
-        LocalModel(id: "gemma4-e2b", name: "Gemma 4 E2B", detail: "Google's small assistant",
-                   fileName: "gemma-4-E2B-it-Q4_K_M.gguf",
-                   url: hf("unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf"),
-                   sha256: "740185b21d22ceb83a11c3aa62ad5842ef32c70f6096d756bbee85a1e4ec34b8",
-                   bytes: 3_106_738_272, minimumMemory: 6_000_000_000, chats: true, license: "Gemma Terms of Use", trainedContext: 131072, kvBytesPerToken: 15360,
-                   slidingWindow: 512, fullAttentionShare: 0.4, subagent: true, reasoning: .optional, format: .gemma4),
-        LocalModel(id: "gemma4-e4b", name: "Gemma 4 E4B", detail: "Google's assistant",
-                   fileName: "gemma-4-E4B-it-Q4_K_M.gguf",
-                   url: hf("unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_K_M.gguf"),
-                   sha256: "85a896a047553e842f25297ee5b031d64ff30147d9c4af17b1e4b394cd1fab87",
-                   bytes: 4_977_171_584, minimumMemory: 10_000_000_000, chats: true, license: "Gemma Terms of Use", trainedContext: 131072, kvBytesPerToken: 49152,
-                   slidingWindow: 512, fullAttentionShare: 0.42, agent: true, reasoning: .optional, format: .gemma4),
-        LocalModel(id: "phi4-mini", name: "Phi-4 mini", detail: "Microsoft's assistant, good at reasoning",
-                   fileName: "microsoft_Phi-4-mini-instruct-Q4_K_M.gguf",
-                   url: hf("bartowski/microsoft_Phi-4-mini-instruct-GGUF/resolve/main/microsoft_Phi-4-mini-instruct-Q4_K_M.gguf"),
-                   sha256: "01999f17c39cc3074afae5e9c539bc82d45f2dd7faa3917c66cbef76fce8c0c2",
-                   bytes: 2_491_874_688, minimumMemory: 6_000_000_000, chats: true, license: "MIT", trainedContext: 131072, kvBytesPerToken: 131072, agent: true),
-        LocalModel(id: "smollm3-3b", name: "SmolLM3 3B", detail: "Hugging Face's assistant that can think first",
-                   fileName: "SmolLM3-3B-Q4_K_M.gguf",
-                   url: hf("unsloth/SmolLM3-3B-GGUF/resolve/main/SmolLM3-3B-Q4_K_M.gguf"),
-                   sha256: "4de907d2d388a5508fb7cb443a06effe14cce3518b0a78d3bdd9e74d9edce989",
-                   bytes: 1_915_306_528, minimumMemory: 5_000_000_000, chats: true, license: "Apache 2.0", trainedContext: 65536, kvBytesPerToken: 73728,
-                   subagent: true, reasoning: .optional, format: .thinkPrefill),
+                   agent: true, subagent: true, reasoning: .optional, format: .thinkPrefill),
     ]
 
-    static let all = [fast, regular] + extras
+    static let all = [codeLight, fast, regular] + chatModels
 
-    /// Models the catalog used to have, replaced by newer ones (Qwen3.5 for Qwen3 and Qwen2.5-Coder
-    /// Instruct, Gemma 4 for Gemma 3, SmolLM3 for SmolLM2; Qwen3.5 reasons as DeepSeek-R1 Distill
-    /// did, and outdoes Llama 3.2): their files, deleted at launch.
-    private static let retired: [(id: String, fileName: String)] = [
-        ("qwen2.5-coder-1.5b-instruct", "Qwen2.5-Coder-1.5B-Instruct-Q4_K_M.gguf"),
-        ("qwen2.5-coder-3b-instruct", "Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf"),
-        ("qwen2.5-coder-7b-instruct", "Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"),
-        ("qwen3-1.7b", "Qwen3-1.7B-Q8_0.gguf"),
-        ("qwen3-4b", "Qwen3-4B-Q4_K_M.gguf"),
-        ("llama3.2-1b", "Llama-3.2-1B-Instruct-Q4_K_M.gguf"),
-        ("llama3.2-3b", "Llama-3.2-3B-Instruct-Q4_K_M.gguf"),
-        ("gemma3-1b", "google_gemma-3-1b-it-Q4_K_M.gguf"),
-        ("gemma3-4b", "google_gemma-3-4b-it-Q4_K_M.gguf"),
-        ("deepseek-r1-1.5b", "DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf"),
-        ("smollm2-1.7b", "SmolLM2-1.7B-Instruct-Q4_K_M.gguf"),
+    /// Models the catalog used to have: their files, deleted at launch, and the model that takes
+    /// over a setting that named one. Before the tiers, Settings → Advanced offered many models;
+    /// each now goes to the tier of its size.
+    private static let retired: [(id: String, fileName: String, replacement: String?)] = [
+        ("qwen2.5-coder-1.5b-instruct", "Qwen2.5-Coder-1.5B-Instruct-Q4_K_M.gguf", nil),
+        ("qwen2.5-coder-3b-instruct", "Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf", nil),
+        ("qwen2.5-coder-7b-instruct", "Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf", nil),
+        ("qwen3-1.7b", "Qwen3-1.7B-Q8_0.gguf", nil),
+        ("qwen3-4b", "Qwen3-4B-Q4_K_M.gguf", nil),
+        ("llama3.2-1b", "Llama-3.2-1B-Instruct-Q4_K_M.gguf", nil),
+        ("llama3.2-3b", "Llama-3.2-3B-Instruct-Q4_K_M.gguf", nil),
+        ("gemma3-1b", "google_gemma-3-1b-it-Q4_K_M.gguf", nil),
+        ("gemma3-4b", "google_gemma-3-4b-it-Q4_K_M.gguf", nil),
+        ("deepseek-r1-1.5b", "DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf", nil),
+        ("smollm2-1.7b", "SmolLM2-1.7B-Instruct-Q4_K_M.gguf", nil),
+        // Replaced by the tiers.
+        ("qwen2.5-coder-0.5b", "Qwen2.5-Coder-0.5B.Q8_0.gguf", "qwen2.5-coder-1.5b"),
+        ("qwen3.5-0.8b", "Qwen3.5-0.8B-Q8_0.gguf", "lfm3-1.7b"),
+        ("qwen3.5-2b", "Qwen3.5-2B-Q4_K_M.gguf", "lfm3-1.7b"),
+        ("gemma4-e2b", "gemma-4-E2B-it-Q4_K_M.gguf", "lfm3-1.7b"),
+        ("smollm3-3b", "SmolLM3-3B-Q4_K_M.gguf", "lfm3-1.7b"),
+        ("gemma4-e4b", "gemma-4-E4B-it-Q4_K_M.gguf", "qwen3.5-4b"),
+        ("phi4-mini", "microsoft_Phi-4-mini-instruct-Q4_K_M.gguf", "qwen3.5-4b"),
     ]
     /// Files of models still here that now download another file (Qwen3.5 9B's Q4_K_M, too big to load).
     private static let replacedFiles = ["Qwen3.5-9B-Q4_K_M.gguf"]
 
-    /// Deletes retired models' files and moves settings that named one to a model still here.
+    /// Deletes retired models' files and moves settings that named one to the model of its tier.
     static func removeRetired() {
         for name in retired.map(\.fileName) + replacedFiles {
             try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
         }
-        let ids = Set(retired.map(\.id))
         let settings = AppSettings.shared
-        if ids.contains(settings.chatModel.rawValue) { settings.chatModel = .appleIntelligence }
-        if let sub = settings.subagentModel, ids.contains(sub.rawValue) { settings.subagentModel = nil }
+        func replacement(_ choice: AIModelChoice?, otherwise: AIModelChoice?) -> AIModelChoice?? {
+            guard let choice, let old = retired.first(where: { $0.id == choice.rawValue }) else { return .none }
+            return .some(old.replacement.flatMap(AIModelChoice.init(rawValue:)) ?? otherwise)
+        }
+        if case .some(let new) = replacement(settings.chatModel, otherwise: .appleIntelligence) { settings.chatModel = new ?? .appleIntelligence }
+        if case .some(let new) = replacement(settings.subagentModel, otherwise: nil) { settings.subagentModel = new }
+        if case .some(let new) = replacement(settings.aiModel, otherwise: .off) { settings.aiModel = new ?? .off }
+        if case .some(let new) = replacement(settings.aiMergeModel, otherwise: nil) { settings.aiMergeModel = new }
     }
 
     static func model(for choice: AIModelChoice) -> LocalModel? {
         all.first { $0.choice == choice }
-    }
-
-    /// Models for AI Suggestions and merge conflicts: Fast and Regular AI, and code models downloaded from Advanced.
-    static var completionModels: [LocalModel] { all.filter { $0.completes && ($0.isBuiltIn || $0.isDownloaded) } }
-
-    /// Chat models suggested before any are downloaded, best first, with why.
-    static let suggestedChat: [(id: String, why: String)] = [
-        ("qwen3.5-4b", "A quick coding agent for most devices; can think first"),
-        ("qwen3.5-9b", "The best coding agent here, for devices with 12 GB"),
-        ("gemma4-e4b", "Google's agent, for devices with 12 GB"),
-    ]
-
-    /// Why a model is suggested for Chat, if it is.
-    static func suggestion(for model: LocalModel) -> String? {
-        suggestedChat.first { $0.id == model.id }?.why
-    }
-
-    /// Chat's models: the suggested ones this device can run (downloaded or not), then other downloaded ones.
-    static var chatModels: [LocalModel] {
-        let suggested = suggestedChat.compactMap { s in all.first { $0.id == s.id } }.filter { $0.isSupported || $0.isDownloaded }
-        return suggested + all.filter { $0.chats && $0.isDownloaded && suggestion(for: $0) == nil }
     }
 
     /// Application Support/Models: hidden from the Files app and excluded from iCloud backup.

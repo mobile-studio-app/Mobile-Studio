@@ -425,7 +425,7 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 replyHandler(["selected": s.chatModel.rawValue,
                               "models": AIChatService.shared.options.map {
                                   ["id": $0.choice.rawValue, "name": $0.name, "detail": $0.detail, "ready": $0.ready, "suggested": $0.suggested, "cloud": $0.cloud,
-                                   "agent": $0.agent, "subagent": $0.subagent, "reasoning": $0.reasoning.rawValue,
+                                   "agent": $0.agent, "subagent": $0.subagent, "reasoning": $0.reasoning.rawValue, "tier": $0.tier ?? "",
                                    "contexts": $0.contexts.map { ["tokens": $0.tokens, "bytes": $0.bytes, "fits": $0.fits] }]
                               },
                               "subagentContextSize": s.subagentContextSize,
@@ -449,6 +449,10 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 // A new precision takes effect when the model next loads.
                 if let bits = body["kvBits"] as? Int { s.chatKVBits = bits; AIChatService.shared.releaseIdleEngine() }
                 replyHandler(true, nil)
+            case "memory":
+                // The Chat agent's long-term memory for this project, in the context cache: save,
+                // search, read, list and delete (chat.js's remember, recall, load_memory and forget).
+                ContextCache.shared.memory(body["op"] as? String ?? "", body, project: store.currentProject, reply: replyHandler)
             case "aiChatCancel":
                 AIChatService.shared.cancel(body["id"] as? String)
                 replyHandler(true, nil)

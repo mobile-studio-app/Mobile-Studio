@@ -144,6 +144,18 @@ const TOOLS = [
     help: 'runs the project as the Run button does and returns what it printed and how it ended. Games keep running: their output is collected for seconds (8 unless given), then they stop unless keep_running is true.' },
   { name: 'delegate', kind: 'delegate', params: [param('tasks', 'array', ['task', 'questions', 'prompts', 'queries'])],
     help: 'gives self-contained research questions to subagents, which read and search (they can\'t change anything) and answer each one. Use it to look into several things at once.' },
+
+  // Long-term memory, in the context cache (App/AI/ContextCache.swift): kept per project, across chats.
+  // recall and load_memory are 'recall' (subagents have them too), remember and forget 'memory'.
+  { name: 'remember', kind: 'memory', params: [param('title', 'string', ['name', 'topic', 'key']), param('content', 'text', TEXT)],
+    help: 'saves a note to long-term memory: what you learned about the project (how it\'s organised, conventions, decisions, what the user wants) '
+      + 'for later chats. A note with the same title is replaced, so keep notes up to date.' },
+  { name: 'recall', kind: 'recall', params: [param('query', 'string', ['q', 'search', 'text', 'topic'])],
+    help: 'searches long-term memory (your notes, and earlier conversations and long results set aside when they left your context): '
+      + 'ids, titles and the passages that match.' },
+  { name: 'load_memory', kind: 'recall', params: [param('id', 'string', ['memory', 'memory_id', 'name']), optional('part', 'int', ['page', 'section'])],
+    help: 'loads a memory into your context (a long one in parts, each saying how to go on).' },
+  { name: 'forget', kind: 'memory', params: [param('id', 'string', ['memory', 'memory_id'])], help: 'deletes a memory that\'s wrong or no longer true.' },
 ];
 const TOOL = Object.fromEntries(TOOLS.map((t) => [t.name, t]));
 
@@ -152,7 +164,7 @@ const EDIT_EXAMPLE = '<tool_call>\n<function=edit_file>\n<parameter=path>\nmain.
 const READ_EXAMPLE = '<tool_call>\n<function=read_file>\n<parameter=path>\nmain.lua\n</parameter>\n</function>\n</tool_call>';
 
 function toolHelp(subagent) {
-  const show = TOOLS.filter((t) => (subagent ? t.kind === 'read' : t.kind !== 'delegate' || subagentsOn()));
+  const show = TOOLS.filter((t) => (subagent ? t.kind === 'read' || t.kind === 'recall' : t.kind !== 'delegate' || subagentsOn()));
   const line = (t) => `- ${usage(t.name, TOOL)}: ${t.help}`;
   const group = (title, kinds) => {
     const list = show.filter((t) => kinds.includes(t.kind));
@@ -166,15 +178,19 @@ function toolHelp(subagent) {
     ...group('Looking:', ['read']),
     ...group('Changing files (each change shows the changed lines with their new numbers):', ['edit', 'delete']),
     ...group('Running:', ['run', 'delegate']),
+    ...group('Long-term memory (this project\'s, kept across chats):', ['memory', 'recall']),
     ...(subagent ? [] : [
       'Look before you change anything: read a file before you edit it. For small changes use edit_file, or the line tools with line numbers from your '
         + 'latest read; use write_file for new files and rewrites, and write a long file in parts (write_file, then append_file). After changing code, '
         + 'check it with get_problems or run_program.',
+      'Your context is small, but nothing in it is lost: what leaves it is kept in long-term memory. When something you need was cut short or '
+        + 'happened earlier, recall it. When you learn something worth knowing next time, remember it.',
     ]),
   ].join('\n');
 }
 
 let projectList = [];   // the project's files, refreshed before each question
+let memoryNotes = [];   // the project's notes in long-term memory ({ id, title }), refreshed before each question
 
 function systemPrompt() {
   if (!canAgent()) {
@@ -185,15 +201,18 @@ function systemPrompt() {
   const files = projectList.length
     ? `\n\nThe project's files (${projectList.length}):\n${projectList.slice(0, 150).join('\n')}${projectList.length > 150 ? '\n… (list_files or find_files for the rest)' : ''}`
     : '';
+  const notes = memoryNotes.length
+    ? `\n\nYour notes about this project in long-term memory (load_memory to read one):\n${memoryNotes.slice(0, 30).map((n) => `- ${n.id}: ${n.title}`).join('\n')}`
+    : '';
   return 'You are the coding agent built into Mobile Studio, a code editor on iPhone and iPad. You work in the user\'s project: '
     + 'you read and change its files, run commands and run the program with the tools below. Look at the files that matter, not '
     + 'just the open one. Be brief and precise. Use Markdown; put code in fenced blocks tagged with the language.\n\n'
-    + toolHelp(false) + files + thinkingNote();
+    + toolHelp(false) + files + notes + thinkingNote();
 }
 
-// Qwen3.5, Gemma 4 and SmolLM3 reason by themselves; the app opens their thinking, or skips it, as their
+// Qwen3.5 and LFM3 (and Gemma 4, SmolLM3) reason by themselves; the app opens their thinking, or skips it, as their
 // templates do. Other models are asked to reason in <think> tags when thinking is on.
-const REASONS_ITSELF = /^(qwen3\.5|gemma4|smollm3)/;
+const REASONS_ITSELF = /^(qwen3\.5|lfm3|gemma4|smollm3)/;
 
 function thinkingNote() {
   if (thinkingOn() && !REASONS_ITSELF.test(settings.selected)) {
@@ -257,7 +276,8 @@ function callTrouble(parsed, maxTokens) {
   return lines.join('\n');
 }
 
-const READ_ONLY = new Set(TOOLS.filter((t) => t.kind === 'read' || t.kind === 'delegate').map((t) => t.name));
+// Run without asking: looking, subagents, and the agent's own memory (it doesn't touch the project).
+const READ_ONLY = new Set(TOOLS.filter((t) => ['read', 'delegate', 'recall', 'memory'].includes(t.kind)).map((t) => t.name));
 const CHANGES_FILES = new Set(TOOLS.filter((t) => t.kind === 'edit' || t.kind === 'delete').map((t) => t.name).concat('run_command'));
 const RISKY = /(^|[\s;&|])(rm|rmdir|mv|chmod|kill|curl|wget|dd)\b|git\s+(push|reset|clean|checkout|rebase|branch\s+-D)|npm\s+(publish|uninstall)|>\s*\S/;
 
@@ -442,7 +462,7 @@ async function runTool(call, { subagent = false } = {}) {
   const t = call.tool;
   const def = TOOL[t];
   if (!def) return { summary: t, output: `Error: there's no tool called ${t}.` };
-  if (subagent && def.kind !== 'read') return { summary: t, output: `Error: subagents can only read and search; ${t} isn't available.` };
+  if (subagent && def.kind !== 'read' && def.kind !== 'recall') return { summary: t, output: `Error: subagents can only read and search; ${t} isn't available.` };
   try {
     const p = cleanPath(call.path);
     if (t === 'read_file') {
@@ -678,6 +698,33 @@ async function runTool(call, { subagent = false } = {}) {
         },
       };
     }
+    // Long-term memory.
+    if (t === 'remember') {
+      const saved = await api.native({ cmd: 'memory', op: 'save', kind: 'note', title: call.title, text: String(call.content || '') });
+      return { summary: `${saved.replaced ? 'Updated' : 'Remembered'} "${call.title}"`, output: `${saved.replaced ? 'Updated the note' : 'Saved a note'} ${saved.id}: ${call.title}.` };
+    }
+    if (t === 'recall') {
+      const found = await api.native({ cmd: 'memory', op: 'search', query: call.query, limit: 8 });
+      const list = Array.isArray(found) ? found : [];
+      const output = list.map((m) => `${m.id} · ${m.kind === 'note' ? 'note' : 'set aside'} · ${m.title} (${m.length} characters)`
+        + (m.passage ? `\n  ${m.passage.replace(/\s+/g, ' ').slice(0, 320)}` : '')).join('\n');
+      return { summary: `Recalled "${call.query}" (${list.length} found)`, output: output ? `${output}\n(load_memory with an id brings one into your context.)` : 'Nothing in memory matches.' };
+    }
+    if (t === 'load_memory') {
+      const entry = await api.native({ cmd: 'memory', op: 'read', id: call.id });
+      const text = String(entry.text || '');
+      const room = readRoom(subagent);
+      const parts = Math.max(1, Math.ceil(text.length / room));
+      const part = Math.min(parts, Math.max(1, Number(call.part) || 1));
+      const more = part < parts ? `\n… (part ${part} of ${parts}; load_memory ${entry.id} part ${part + 1} for the next)` : '';
+      return { summary: `Loaded ${entry.title}${parts > 1 ? ` (part ${part} of ${parts})` : ''}`,
+        output: `${entry.id}: ${entry.title}${parts > 1 ? ` (part ${part} of ${parts})` : ''}\n${text.slice((part - 1) * room, part * room)}${more}` };
+    }
+    if (t === 'forget') {
+      await api.native({ cmd: 'memory', op: 'delete', id: call.id });
+      memoryNotes = memoryNotes.filter((n) => n.id !== call.id);
+      return { summary: `Forgot ${call.id}`, output: `Deleted ${call.id} from memory.` };
+    }
     if (t === 'delegate') {
       const tasks = (call.tasks || []).filter(Boolean).map(String).slice(0, 8);
       if (!tasks.length) return { summary: 'Delegate', output: 'Error: no tasks.' };
@@ -758,21 +805,87 @@ let requestStart = 0;   // where the question being worked on starts in messages
 /** The conversation for the model. The question being worked on and summaries are marked keep, so
  * they're never dropped to make room; old tool results are cut short (the latest are in full); and
  * this question's reasoning goes back in between its tool steps, so the agent keeps its plan
- * (earlier questions' reasoning is left out, as reasoning models expect). */
+ * (earlier questions' reasoning is left out, as reasoning models expect). Messages moved to the
+ * context cache (pageOut) are left out, with a note in their place saying what they were. */
 function forModel() {
-  const toolTurns = messages.map((m, i) => (m.kind === 'tool' ? i : -1)).filter((i) => i >= 0);
+  const toolTurns = messages.map((m, i) => (m.kind === 'tool' && !m.paged ? i : -1)).filter((i) => i >= 0);
   const fullFrom = toolTurns.length > KEPT_TOOL_RESULTS ? toolTurns[toolTurns.length - KEPT_TOOL_RESULTS] : 0;
-  return [{ role: 'system', content: systemPrompt() }, ...messages.map((m, i) => {
+  return [{ role: 'system', content: systemPrompt() }, ...messages.flatMap((m, i) => {
+    if (m.paged) return m.stub ? [{ role: 'user', content: m.stub, keep: true }] : [];
     let content = m.content;
     if (m.kind === 'tool' && i < fullFrom && content.length > 1200) {
-      content = content.slice(0, 1200) + `\n… (cut short to save room: ${content.length - 1200} more characters)`;
+      // The whole result was set aside in long-term memory when it came, to be loaded back.
+      content = content.slice(0, 1200) + `\n… (cut short to save room: ${content.length - 1200} more characters`
+        + (m.archived ? `; load_memory ${m.archived} has all of it)` : ')');
     }
     if (m.role === 'assistant' && m.thinking && i >= requestStart) content = `<think>\n${m.thinking.slice(-2000)}\n</think>\n\n${content}`;
-    return { role: m.role, content, keep: !!m.keep };
+    return [{ role: m.role, content, keep: !!m.keep }];
   })];
 }
 
 const usedTokens = () => forModel().reduce((n, m) => n + tokens(m.content), 0);
+
+const RECENT_KEPT = 4;   // the latest messages (about two steps) never move out of the context
+
+/** Makes room by moving the oldest messages into long-term memory, word for word, until the
+ * conversation takes about half the context. They stay in the chat; the model gets, in their place,
+ * a list of what they were and the memory to load them back from (a step's delay, not a loss).
+ * `overflowed`: the app had to leave turns out, so the estimate was low: at least a third moves.
+ * False when nothing is old enough to move (the current question and latest steps stay), and then
+ * the conversation is summarised instead. */
+async function pageOut(overflowed) {
+  const used = usedTokens();
+  const want = Math.max(used + answerTokens() - contextLimit() * 0.5, overflowed ? used * 0.33 : 0);
+  if (want <= 0) return false;
+  const moving = [];
+  let freed = 0;
+  const last = messages.length - RECENT_KEPT;
+  for (let i = 0; i < last && freed < want; i++) {
+    const m = messages[i];
+    if (m.paged || m.kind === 'summary' || i === requestStart) continue;
+    // An answer goes with its tool results, or not at all.
+    const results = m.role === 'assistant' && messages[i + 1] && messages[i + 1].kind === 'tool' ? i + 1 : -1;
+    if (results >= last) break;
+    for (const j of results > 0 ? [i, results] : [i]) {
+      moving.push(j);
+      // Older tool results are already cut short in the prompt (forModel).
+      freed += tokens(messages[j].kind === 'tool' ? messages[j].content.slice(0, 1300) : messages[j].content);
+    }
+    if (results > 0) i = results;
+  }
+  if (freed < 200) return false;
+  const who = (m) => (m.role === 'assistant' ? 'Agent' : m.kind === 'tool' ? 'Tool results' : 'User');
+  const id = await setAside(`Earlier messages: ${conversationTitle().replace(/^Conversation of /, '')}`,
+    moving.map((i) => `${who(messages[i])}: ${messages[i].content}`).join('\n\n'));
+  if (!id) return false;
+  // What they were, in a line each: enough to know what to load.
+  const gist = moving.map((i) => {
+    const m = messages[i];
+    if (m.kind === 'tool') return null;
+    if (m.role === 'user') return `- User: ${String(m.shown ?? m.content).replace(/\s+/g, ' ').slice(0, 160)}`;
+    const said = withoutToolCalls(m.content, TOOL).replace(/\s+/g, ' ').slice(0, 120);
+    return `- You: ${said}${m.calls && m.calls.length ? `${said ? ' ' : ''}[${m.calls.join(', ')}]` : ''}`;
+  }).filter(Boolean);
+  const list = gist.length > 24 ? [...gist.slice(0, 4), `- … (${gist.length - 20} more)`, ...gist.slice(-20)] : gist;
+  messages[moving[0]].stub = `(To make room, ${moving.length} earlier messages of this chat were moved to long-term memory as ${id}: `
+    + `load_memory ${id} brings them back word for word, and recall searches them. They were:\n${list.join('\n')})`;
+  for (const i of moving) messages[i].paged = id;
+  noteCard(`${moving.length} older messages moved to the context cache to make room; the agent can load them back.`);
+  return true;
+}
+
+/** Sets text aside in long-term memory (the context cache): its id, or null if it couldn't be. */
+async function setAside(title, text) {
+  const saved = await api.native({ cmd: 'memory', op: 'save', kind: 'archive', title: title.slice(0, 120), text }).catch(() => null);
+  return saved && saved.id ? saved.id : null;
+}
+
+/** "Conversation of 4 Nov, 14:02: Fix the typo…", for a conversation set aside. */
+function conversationTitle() {
+  const first = messages.find((m) => m.role === 'user' && !m.kind);
+  const when = new Date().toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  return `Conversation of ${when}: ${String(first ? first.shown || first.content : '').replace(/\s+/g, ' ').slice(0, 80)}`;
+}
 
 /** Summarises the conversation into one message, to free the context. */
 async function compact(reason) {
@@ -790,7 +903,12 @@ async function compact(reason) {
   note.remove();
   if (reply.error || !withoutThinking(reply.text)) { notice('Couldn\'t compact: ' + (reply.error || 'no summary')); return; }
   const summary = withoutThinking(reply.text);
-  messages = [{ role: 'user', kind: 'summary', content: 'Summary of the conversation so far:\n' + summary, shown: summary, reason, keep: true }];
+  // The whole conversation, word for word, is set aside in long-term memory, for the agent to bring
+  // details back from rather than lose them.
+  const archived = canAgent() ? await setAside(conversationTitle(),
+    messages.map((m) => `${m.role === 'user' ? (m.kind === 'tool' ? 'Tool results' : m.kind === 'summary' ? 'Earlier' : 'User') : 'Agent'}: ${m.content}`).join('\n\n')) : null;
+  const where = archived ? `\n\n(The whole conversation is in long-term memory as ${archived}: recall or load_memory brings back details.)` : '';
+  messages = [{ role: 'user', kind: 'summary', content: 'Summary of the conversation so far:\n' + summary + where, shown: summary, reason, keep: true }];
   if (question) messages.push({ ...question, content: 'Carry on with this (the summary above says what has been done):\n' + question.content });
   requestStart = question ? 1 : messages.length;
   render();
@@ -806,6 +924,8 @@ async function send() {
   if (text === '/clear' || text === '/new') { newChat(); return; }
   const context = fileContext();
   projectList = canAgent() ? await projectFiles() : [];
+  const notes = canAgent() ? await api.native({ cmd: 'memory', op: 'list', limit: 200 }).catch(() => []) : [];
+  memoryNotes = (Array.isArray(notes) ? notes : []).filter((n) => n.kind === 'note');
   // Only the new question is kept whatever happens; earlier ones may make way.
   for (const m of messages) if (m.kind !== 'summary') m.keep = false;
   requestStart = messages.length;
@@ -821,7 +941,11 @@ async function send() {
   try {
     for (let step = 0; step < MAX_STEPS && !stopped; step++) {
       // Before the context runs out (with room for the answer), the conversation so far is summarised.
-      if ((overflowed || usedTokens() + answerTokens() > contextLimit() * 0.9) && messages.length > 2) await compact('auto');
+      // Before the context runs out (with room for the answer), the oldest messages move to the
+      // context cache; when nothing is old enough to move, the conversation is summarised.
+      if ((overflowed || usedTokens() + answerTokens() > contextLimit() * 0.9) && messages.length > 2) {
+        if (!(canAgent() && await pageOut(overflowed))) await compact('auto');
+      }
       liveText = '';
       render();
       const chat = forModel();
@@ -845,7 +969,8 @@ async function send() {
       const parsed = canAgent() ? readToolCalls(answer, TOOL) : NO_CALLS;
       const { calls } = parsed;
       const shown = answer === withoutThinking(reply.text) ? reply.text : (thinking ? `<think>\n${thinking}\n</think>\n\n` : '') + answer;
-      messages.push({ role: 'assistant', content: answer, shown, thinking, calls: calls.map((c) => c.tool + (c.path ? ' ' + c.path : c.from ? ` ${c.from} → ${c.to}` : '')) });
+      messages.push({ role: 'assistant', content: answer, shown, thinking, calls: calls.map((c) => c.tool + (c.path ? ' ' + c.path : c.from ? ` ${c.from} → ${c.to}`
+        : c.title ? ` "${c.title}"` : c.query ? ` "${c.query}"` : c.id ? ' ' + c.id : '')) });
       render();
       if (stopped || (!calls.length && !parsed.errors.length)) break;
       const results = [];
@@ -875,7 +1000,11 @@ async function send() {
         if (CHANGES_FILES.has(call.tool)) seen.clear();
       }
       if (parsed.errors.length) results.push(callTrouble(parsed, maxTokens));
-      messages.push({ role: 'user', kind: 'tool', content: 'Tool results:\n' + results.join('\n\n'), shown: results.length + ' tool result' + (results.length === 1 ? '' : 's') });
+      const content = 'Tool results:\n' + results.join('\n\n');
+      // A long result is cut short once newer ones come: it's set aside whole, to be loaded back.
+      const archived = content.length > 1200 && !calls.every((c) => c.tool === 'load_memory' || c.tool === 'recall')
+        ? await setAside(`Results of ${calls.map((c) => c.tool + (c.path ? ' ' + c.path : c.query ? ` "${c.query}"` : '')).join(', ')}`, content) : null;
+      messages.push({ role: 'user', kind: 'tool', content, archived, shown: results.length + ' tool result' + (results.length === 1 ? '' : 's') });
       render();
       if (repeats >= MAX_REPEATS) {
         messages.push({ role: 'assistant', content: '', kind: 'error', shown: 'The agent kept repeating the same steps, so it was stopped. Try asking more specifically, or with a bigger model.' });
@@ -1067,10 +1196,14 @@ async function loadSettings() {
   settings = { ...settings, ...info, models: info.models || [] };
   const select = $('chat-model');
   select.replaceChildren();
-  for (const m of settings.models.filter((x) => !x.suggested && !x.cloud)) {
-    const option = element('option', null, m.ready ? m.name : `${m.name} (${m.detail})`);
-    option.value = m.id;
-    option.disabled = !m.ready;
+  // The four tiers, in order. One not downloaded yet opens Settings → AI, where it downloads (or,
+  // when it's the one picked there, shows it's downloading); one this device can't run is greyed out.
+  for (const m of settings.models.filter((x) => !x.cloud)) {
+    const waiting = m.suggested && m.id === settings.selected;
+    const option = element('option', null, m.ready ? m.name : waiting ? `${m.name} (downloading…)` : `${m.name} (${m.detail})`);
+    option.value = m.suggested && !waiting ? '__get__' : m.id;
+    option.title = m.detail;
+    option.disabled = !m.ready && !m.suggested || waiting;
     option.selected = m.id === settings.selected;
     select.append(option);
   }
@@ -1088,29 +1221,8 @@ async function loadSettings() {
     }
     select.append(group);
   }
-  // Suggested models not downloaded yet: picking one opens Settings → AI, where it downloads.
-  const suggested = settings.models.filter((x) => x.suggested);
-  if (suggested.length) {
-    const group = element('optgroup');
-    group.label = 'Suggested (download)';
-    for (const m of suggested) {
-      const option = element('option', null, `${m.name}: ${m.detail}`);
-      option.value = '__get__';
-      group.append(option);
-    }
-    select.append(group);
-  }
-  // Picked in Settings but still downloading.
-  const waiting = suggested.find((m) => m.id === settings.selected);
-  if (waiting) {
-    const option = element('option', null, `${waiting.name} (downloading…)`);
-    option.value = waiting.id;
-    option.disabled = true;
-    select.prepend(option);
-    select.value = waiting.id;
-  }
-  const more = element('option', null, 'Download More Models…');
-  more.value = '__more__';
+  const more = element('option', null, 'AI Settings…');
+  more.value = '__get__';
   select.append(more);
   $('chat-mode').value = settings.mode || 'edit';
   updateControls();
@@ -1184,7 +1296,7 @@ function renderSettings() {
   // Subagents only where the agent is: they use tools too.
   if (!canAgent()) {
     panel.append(element('div', 'chat-setting-note', `${info.name || 'This model'} only answers questions: it's too small to use the agent's `
-      + 'tools reliably. For the agent (and subagents and Think), pick Qwen3.5 4B or 9B, Gemma 4 E4B, Phi-4 mini, or a cloud model.'));
+      + 'tools reliably. For the agent (and subagents and Think), pick Light, Standard or Smart, or a cloud model.'));
   } else {
     // Subagents only read and search, so models too small to be the agent (Apple Intelligence) can be one.
     const agents = settings.models.filter((m) => m.ready && !m.suggested && (m.agent || m.subagent));
@@ -1226,7 +1338,7 @@ function updateControls() {
   think.setAttribute('aria-pressed', String(thinkingOn()));
   think.disabled = r !== 'optional';
   think.title = r === 'always' ? `${name} always reasons before it answers`
-    : r === 'none' ? `${name} doesn't reason well, so Think is off. Qwen3.5, Gemma 4, SmolLM3 and cloud models can think.`
+    : r === 'none' ? `${name} doesn't reason well, so Think is off. Light, Standard, Smart and cloud models can think.`
       : 'Thinking: the agent reasons before it answers (slower, better at harder tasks)';
   // The agent's modes: only for models that can be the agent; the others just chat.
   const mode = $('chat-mode');
@@ -1367,6 +1479,14 @@ function toolCard(result, state, output) {
   scrollToEnd();
 }
 
+/** A note in the chat that stays where it is when the chat is drawn again. */
+function noteCard(text) {
+  const card = element('div', 'chat-note', text);
+  cards.push({ at: messages.length, el: card });
+  $('chat-log').append(card);
+  scrollToEnd();
+}
+
 /** Asks the user about a call: resolves 'allow', 'always' or 'deny'. */
 function approval(call, result) {
   return new Promise((resolve) => {
@@ -1428,7 +1548,7 @@ function render() {
         ? 'Ask about your code, or tell the agent what to change: it reads, searches and edits the project, runs commands and sends research to subagents. '
           + 'The mode below says what it may do without asking. '
         : `Ask about your code: the open file goes with each question. ${modelInfo(settings.selected).name || 'This model'} only answers; for the agent, `
-          + 'which reads, edits and runs your project, pick a bigger model (Qwen3.5 4B or 9B, Gemma 4 E4B, Phi-4 mini, or a cloud model). ')
+          + 'which reads, edits and runs your project, pick Light, Standard or Smart (or a cloud model). ')
       + (modelInfo(settings.selected).cloud
         ? 'This is a cloud model: your messages and the files the agent reads are sent to its provider.'
         : 'Everything runs on this device.')));

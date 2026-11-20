@@ -139,6 +139,21 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
     }
 
+    /// iOS may close the app while it's in the background: what Chat's model has read goes to the
+    /// context cache first, so the conversation goes on without being read again.
+    func sceneDidEnterBackground(_ scene: UIScene) {
+        var task = UIBackgroundTaskIdentifier.invalid
+        task = UIApplication.shared.beginBackgroundTask(withName: "Save chat state") {
+            UIApplication.shared.endBackgroundTask(task)
+            task = .invalid
+        }
+        AIChatService.shared.saveStates {
+            guard task != .invalid else { return }
+            UIApplication.shared.endBackgroundTask(task)
+            task = .invalid
+        }
+    }
+
     func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
         if let url = URLContexts.first?.url {
             handleIncomingURL(url)

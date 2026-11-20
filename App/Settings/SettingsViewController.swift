@@ -32,10 +32,10 @@ final class SettingsViewController: UITableViewController {
         fileprivate var sections: [Section] {
             switch self {
             case .general: return [.editor, .suggestions]
-            case .ai: return [.ai, .aiMerge, .chat, .cloud]
+            case .ai: return [.chat, .ai, .aiMerge, .cloud, .contextCache]
             case .running: return [.run, .programs]
             case .sourceControl: return [.account]
-            case .advanced: return [.models, .files, .diagnostics, .developer]
+            case .advanced: return [.files, .diagnostics, .developer]
             case .about: return [.about]
             }
         }
@@ -44,17 +44,19 @@ final class SettingsViewController: UITableViewController {
         var searchTerms: [String] {
             switch self {
             case .general: return ["Color Theme", "File Icon Theme", "Icons", "Font Size", "Indent Width", "Tab Size", "Word Wrap", "Auto Save", "Format on Save", "Code Suggestions", "Completion"]
-            case .ai: return ["AI Suggestions", "Apple Intelligence", "Fast AI", "Regular AI", "Download over Mobile Data", "AI Merge Conflicts", "Chat", "Models", "Cloud Models", "API Key", "Anthropic", "Claude", "OpenAI", "OpenRouter", "Ollama", "LM Studio"]
+            case .ai: return ["AI Suggestions", "Apple Intelligence", "Nano", "Light", "Standard", "Smart", "Models", "Download Models", "Qwen", "LFM", "Liquid",
+                              "Download over Mobile Data", "AI Merge Conflicts", "Chat", "Agent", "Context Cache", "Memory", "Storage", "Cloud Models", "API Key", "Anthropic", "Claude",
+                              "OpenAI", "OpenRouter", "Ollama", "LM Studio"]
             case .running: return ["LuaJIT JIT Compiler", "Running Games", "Programs from Extensions", "Signing Certificate"]
             case .sourceControl: return ["GitHub", "Sign in", "Smart Commit"]
-            case .advanced: return ["AI Models", "Download Models", "Ollama", "Llama", "Gemma", "Qwen", "Phi", "DeepSeek", "settings.json", "keybindings.json", "Keyboard Shortcuts", "Diagnostics", "Crash Reports", "Logs", "Test Automation", "Pairing Code", "Developer"]
+            case .advanced: return ["settings.json", "keybindings.json", "Keyboard Shortcuts", "Diagnostics", "Crash Reports", "Logs", "Test Automation", "Pairing Code", "Developer"]
             case .about: return ["Version", "Check for Updates", "What's New", "Runtimes", "Device Memory", "Licences"]
             }
         }
     }
 
     fileprivate enum Section: Int, CaseIterable {
-        case editor, suggestions, ai, aiMerge, chat, cloud, run, programs, account, models, files, diagnostics, developer, about
+        case editor, suggestions, ai, aiMerge, chat, cloud, contextCache, run, programs, account, files, diagnostics, developer, about
     }
 
     /// Posted to open a settings file (userInfo "path") in the editor.
@@ -64,12 +66,12 @@ final class SettingsViewController: UITableViewController {
         case theme, iconTheme, fontSize, tabSize, wordWrap, autoSave, formatOnSave
     }
 
-    /// Off, Apple Intelligence, Fast and Regular AI, and code models downloaded in Advanced → AI Models.
-    private var aiChoices: [AIModelChoice] { [.off, .appleIntelligence] + AIModelCatalog.completionModels.map(\.choice) }
+    /// AI Suggestions' rows: Off, then each tier's code model.
+    private var aiChoices: [AIModelChoice] { [.off] + AITier.allCases.map(\.codeChoice) }
     /// The merge conflict model's rows; nil is "Same as AI Suggestions".
     private var mergeChoices: [AIModelChoice?] { [nil] + aiChoices.map { Optional($0) } }
-    /// Apple Intelligence, the suggested chat models and the other downloaded ones.
-    private var chatChoices: [AIModelChoice] { [.appleIntelligence] + AIModelCatalog.chatModels.map(\.choice) }
+    /// Chat's rows: each tier's chat model (cloud models are their own section).
+    private var chatChoices: [AIModelChoice] { AITier.allCases.map(\.chatChoice) }
     private let settings = AppSettings.shared
     private let page: Page
     private let sections: [Section]
@@ -94,6 +96,7 @@ final class SettingsViewController: UITableViewController {
                                                name: ModelDownloadManager.didChange, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(automationChanged),
                                                name: AutomationServer.didChange, object: nil)
+        if index(.contextCache) != nil { refreshCacheUsage() }
     }
 
     @objc private func doneTapped() {
@@ -118,7 +121,6 @@ final class SettingsViewController: UITableViewController {
         if let section = index(.aiMerge) { lists.append((section, mergeChoices)) }
         if let section = index(.chat) { lists.append((section, chatChoices.map { Optional($0) })) }
         if let section = index(.cloud) { lists.append((section, CloudProvider.allCases.map { Optional($0.choice) })) }
-        if let section = index(.models) { lists.append((section, AIModelCatalog.extras.map { Optional($0.choice) })) }
         return lists
     }
 
@@ -154,7 +156,7 @@ final class SettingsViewController: UITableViewController {
         case .aiMerge: return mergeChoices.count
         case .chat: return chatChoices.count
         case .cloud: return CloudProvider.allCases.count
-        case .models: return AIModelCatalog.extras.count
+        case .contextCache: return 2
         case .run: return 1
         case .programs: return 1
         case .account: return 2
@@ -173,7 +175,7 @@ final class SettingsViewController: UITableViewController {
         case .aiMerge: return "AI Merge Conflicts"
         case .chat: return "Chat"
         case .cloud: return "Cloud Models"
-        case .models: return "AI Models"
+        case .contextCache: return "Context Cache"
         case .run: return "Running Games"
         case .programs: return "Programs from Extensions"
         case .account: return "Source Control"
@@ -193,22 +195,23 @@ final class SettingsViewController: UITableViewController {
         case .ai:
             return """
                 AI suggestions appear as grey text at the end of a line. Tap them or press Tab to accept, keep typing to ignore. \
-                Everything runs on this phone; your code isn't sent anywhere. Models download from Hugging Face, \
-                over Wi-Fi only unless Download over Mobile Data is on, and never while Low Data Mode is on. \
-                Fast AI is Qwen2.5-Coder 3B (Qwen Research License), Regular AI is Qwen2.5-Coder 7B (Apache 2.0). \
-                A local model is unloaded while a game runs and reloads afterwards.
+                Each tier uses a code model made for finishing code: Light is Qwen2.5-Coder 1.5B, Standard 3B (Qwen Research \
+                License), Smart 7B. Models download from Hugging Face, over Wi-Fi only unless Download over Mobile Data is on, \
+                and never while Low Data Mode is on. A local model is unloaded while a game runs and reloads afterwards.
                 """
         case .aiMerge:
             return """
-                The model "Resolve for me" uses in the merge conflict editor. A bigger model merges better. \
-                If it's a different downloaded model from AI Suggestions, the suggestions model is unloaded \
-                while it works, so they don't both fill the phone's memory.
+                The tier "Resolve for me" uses in the merge conflict editor. A bigger one merges better. If it's \
+                different from AI Suggestions', the suggestions model is unloaded while it works, so they don't both \
+                fill the phone's memory.
                 """
         case .chat:
             return """
-                The model the Chat panel (⌃⌘I) answers with. Apple Intelligence is built into iOS; the suggested models \
-                download when you pick them, and more are in Settings → Advanced → AI Models. Chats stay on this \
-                device, unless you pick a cloud model (below).
+                The tier the Chat panel (⌃⌘I) answers with. Nano is Apple Intelligence: it answers questions about your code. \
+                Light, Standard and Smart are agents, which read, change and run your project: Light is LFM3 1.7B \
+                (LFM Open License), Standard Qwen3.5 4B, Smart Qwen3.5 9B. A tier downloads when you pick it; swipe to \
+                delete one. Everything runs on this device, unless you pick a cloud model (below). Chat's settings (⋯ in \
+                the panel) turn on Think, subagents and more where the tier can.
                 """
         case .cloud:
             return """
@@ -217,11 +220,13 @@ final class SettingsViewController: UITableViewController {
                 Chat, and every file the agent reads, goes to that provider, under its terms and pricing. \
                 A Custom Server can be Ollama or LM Studio on your own network (its address ends in /v1).
                 """
-        case .models:
+        case .contextCache:
             return """
-                More models that run on this device, from Hugging Face in GGUF format (the files Ollama and LM Studio run). \
-                Each one downloaded joins the lists it fits: code models in AI Suggestions and AI Merge Conflicts, chat \
-                models in Chat. Swipe to delete one. Bigger models answer better but need more memory and time.
+                Storage the Chat agent uses as slow context. Its long-term memory: notes it keeps about each project, \
+                and conversations and long results set aside when they leave its context, which it searches and \
+                loads back. And what a model has read for a conversation, so going back to it (after a subagent, \
+                another chat, a game, or iOS closing the app) doesn't mean reading it all again. When it's full, the \
+                least recently used model states go first, then set-aside text, then notes.
                 """
         case .run:
             if #available(iOS 26.0, *) {
@@ -290,10 +295,6 @@ final class SettingsViewController: UITableViewController {
             let choice = chatChoices[indexPath.row]
             configureAIRow(choice, selected: settings.chatModel == choice, forMerge: false, cell: cell, content: &content,
                            previousAccessory: previousAccessory)
-            if let model = AIModelCatalog.model(for: choice), let why = AIModelCatalog.suggestion(for: model), !model.isDownloaded,
-               model.isSupported, let detail = content.secondaryText {
-                content.secondaryText = "Suggested · \(why) · " + detail.replacingOccurrences(of: "\(model.detail) · ", with: "")
-            }
         case .cloud:
             content = UIListContentConfiguration.subtitleCell()
             let provider = CloudProvider.allCases[indexPath.row]
@@ -305,12 +306,14 @@ final class SettingsViewController: UITableViewController {
             } else if !provider.isConfigured {
                 cell.accessoryView = accessoryLabel("Set Up", color: .tintColor, reusing: previousAccessory)
             }
-        case .models:
-            content = UIListContentConfiguration.subtitleCell()
-            let model = AIModelCatalog.extras[indexPath.row]
-            configureAIRow(model.choice, selected: false, forMerge: false, cell: cell, content: &content,
-                           previousAccessory: previousAccessory)
-            content.text = "\(model.name) · \(model.uses)"
+        case .contextCache where indexPath.row == 0:
+            content.text = "Storage Limit"
+            content.secondaryText = ByteCountFormatter.string(fromByteCount: settings.contextCacheLimit, countStyle: .file)
+            cell.accessoryType = .disclosureIndicator
+        case .contextCache:
+            content.text = "Clear Context Cache"
+            content.textProperties.color = .systemRed
+            content.secondaryText = cacheUsage.map { "\(ByteCountFormatter.string(fromByteCount: $0, countStyle: .file)) used" } ?? ""
         case .aiMerge:
             content = UIListContentConfiguration.subtitleCell()
             if let choice = mergeChoices[indexPath.row] {
@@ -447,11 +450,9 @@ final class SettingsViewController: UITableViewController {
     }
 
     private static func name(of choice: AIModelChoice) -> String {
-        switch choice {
-        case .off: return "Off"
-        case .appleIntelligence: return "Apple Intelligence"
-        default: return AIModelCatalog.model(for: choice)?.name ?? choice.rawValue
-        }
+        if choice == .off { return "Off" }
+        if let tier = AITier.of(choice) { return tier.name }
+        return AIModelCatalog.model(for: choice)?.name ?? choice.rawValue
     }
 
     private func configureAIRow(_ choice: AIModelChoice, selected: Bool, forMerge: Bool, cell: UITableViewCell,
@@ -465,12 +466,12 @@ final class SettingsViewController: UITableViewController {
             content.text = "Off"
             content.secondaryText = forMerge ? "Resolve conflicts with the editor's buttons" : "Code Suggestions only"
         case .appleIntelligence:
-            content.text = "Apple Intelligence"
+            content.text = AITier.nano.name
             if let reason = AppleIntelligenceEngine.unavailableReason {
-                content.secondaryText = reason
+                content.secondaryText = "Apple Intelligence · \(reason)"
                 enabled = selected   // still let you switch away from it
             } else {
-                content.secondaryText = "Built into iOS · no download"
+                content.secondaryText = "Apple Intelligence · \(AITier.nano.summary.lowercased())"
             }
         default:
             guard let model = AIModelCatalog.model(for: choice) else {
@@ -478,30 +479,32 @@ final class SettingsViewController: UITableViewController {
                 content.secondaryText = "No longer available"
                 break
             }
-            content.text = model.name
+            // The tier's name; its model, size and state beneath.
+            content.text = model.tier?.name ?? model.name
+            let about = model.tier.map { "\(model.name) · \($0.summary)" } ?? model.detail
             if !model.isSupported {
-                content.secondaryText = "\(model.detail) · \(model.requirementText)"
+                content.secondaryText = "\(model.name) · \(model.requirementText)"
                 enabled = selected
             } else {
                 switch ModelDownloadManager.shared.state(for: model) {
                 case .notDownloaded:
-                    content.secondaryText = "\(model.detail) · \(model.sizeText) download"
+                    content.secondaryText = "\(about) · \(model.sizeText) download"
                     cell.accessoryView = accessoryLabel("Get", color: .tintColor, reusing: previousAccessory)
                 case .downloading(let progress):
                     let percent = Int(progress * 100)
                     let status = ModelDownloadManager.shared.waitingReason.map { "\($0) (\(percent)%)" } ?? "Downloading \(percent)%"
-                    content.secondaryText = "\(model.detail) · \(status) · tap to cancel"
+                    content.secondaryText = "\(model.name) · \(status) · tap to cancel"
                     if !selected {
                         let spinner = previousAccessory as? UIActivityIndicatorView ?? UIActivityIndicatorView(style: .medium)
                         spinner.startAnimating()
                         cell.accessoryView = spinner
                     }
                 case .verifying:
-                    content.secondaryText = "\(model.detail) · Checking download…"
+                    content.secondaryText = "\(model.name) · Checking download…"
                 case .downloaded:
-                    content.secondaryText = "\(model.detail) · \(model.sizeText) · swipe to delete"
+                    content.secondaryText = "\(about) · \(model.sizeText) · swipe to delete"
                 case .failed(let message):
-                    content.secondaryText = "\(model.detail) · \(message)"
+                    content.secondaryText = "\(model.name) · \(message)"
                     content.secondaryTextProperties.color = .systemRed
                     cell.accessoryView = accessoryLabel("Retry", color: .tintColor, reusing: previousAccessory)
                 }
@@ -522,8 +525,10 @@ final class SettingsViewController: UITableViewController {
             selectAI(chatChoices[indexPath.row]) { [weak self] choice in self?.settings.chatModel = choice }
         case .cloud:
             setUpCloud(CloudProvider.allCases[indexPath.row], at: indexPath)
-        case .models:
-            selectAI(AIModelCatalog.extras[indexPath.row].choice) { _ in }
+        case .contextCache where indexPath.row == 0:
+            pickCacheLimit(at: indexPath)
+        case .contextCache:
+            clearCache(at: indexPath)
         case .aiMerge:
             if let choice = mergeChoices[indexPath.row] {
                 selectAI(choice) { [weak self] picked in self?.settings.aiMergeModel = picked }
@@ -564,6 +569,52 @@ final class SettingsViewController: UITableViewController {
         default:
             break
         }
+    }
+
+    // MARK: - Context cache
+
+    /// The context cache's size, once it's been measured.
+    private var cacheUsage: Int64?
+
+    private func refreshCacheUsage() {
+        ContextCache.shared.usage { [weak self] bytes in
+            guard let self, let section = self.index(.contextCache) else { return }
+            self.cacheUsage = bytes
+            self.tableView.reconfigureRows(at: [IndexPath(row: 1, section: section)])
+        }
+    }
+
+    private func pickCacheLimit(at indexPath: IndexPath) {
+        let sheet = UIAlertController(title: "Context Cache Limit", message: "The most storage the agent's memory and saved model states may take.",
+                                      preferredStyle: .actionSheet)
+        for limit in ContextCache.limits {
+            let name = ByteCountFormatter.string(fromByteCount: limit, countStyle: .file) + (limit == ContextCache.defaultLimit ? " (default)" : "")
+            sheet.addAction(UIAlertAction(title: name, style: .default) { [weak self] _ in
+                guard let self else { return }
+                self.settings.contextCacheLimit = limit
+                ContextCache.shared.limitChanged()
+                self.tableView.reconfigureRows(at: [indexPath])
+                // Going down may have deleted some.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.refreshCacheUsage() }
+            })
+        }
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        if let cell = tableView.cellForRow(at: indexPath) {
+            sheet.popoverPresentationController?.sourceView = cell
+            sheet.popoverPresentationController?.sourceRect = cell.bounds
+        }
+        present(sheet, animated: true)
+    }
+
+    private func clearCache(at indexPath: IndexPath) {
+        let alert = UIAlertController(title: "Clear Context Cache?",
+                                      message: "The agent forgets its notes about your projects and what it set aside, and models read conversations again from the start.",
+                                      preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Clear", style: .destructive) { [weak self] _ in
+            ContextCache.shared.clear { self?.refreshCacheUsage() }
+        })
+        present(alert, animated: true)
     }
 
     // MARK: - Signing certificate
@@ -749,7 +800,6 @@ final class SettingsViewController: UITableViewController {
         case .ai where indexPath.row < aiChoices.count: choice = aiChoices[indexPath.row]
         case .aiMerge: choice = mergeChoices[indexPath.row]
         case .chat: choice = chatChoices[indexPath.row]
-        case .models: choice = AIModelCatalog.extras[indexPath.row].choice
         default: choice = nil
         }
         guard let choice, let model = AIModelCatalog.model(for: choice), model.isDownloaded else { return nil }

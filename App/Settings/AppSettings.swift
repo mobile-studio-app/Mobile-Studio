@@ -1,7 +1,7 @@
 import Foundation
 
 /// Which AI a feature uses: none, Apple Intelligence, or a model from AIModelCatalog, by its id
-/// (Fast AI and Regular AI are "fast" and "regular"; models from Settings → Advanced have their own).
+/// (Settings shows them as tiers: AITier; "fast" and "regular" are the Standard and Smart code models).
 struct AIModelChoice: Hashable {
     let rawValue: String
 
@@ -55,6 +55,7 @@ final class AppSettings {
             Key.chatMode: "edit",
             Key.chatThinking: false,
             Key.chatKVBits: 8,
+            Key.contextCacheLimit: ContextCache.defaultLimit,
             Key.useJIT: true,
             Key.downloadOverCellular: false,
             Key.smartCommit: false,
@@ -81,6 +82,7 @@ final class AppSettings {
         static let chatMode = "settings.ai.chatMode"
         static let chatThinking = "settings.ai.chatThinking"
         static let chatKVBits = "settings.ai.chatKVBits"
+        static let contextCacheLimit = "settings.ai.contextCacheLimit"
         static let useJIT = "settings.run.jit"
         static let downloadOverCellular = "settings.ai.cellular"
         static let smartCommit = "settings.git.smartCommit"
@@ -180,6 +182,13 @@ final class AppSettings {
     var chatKVBits: Int {
         get { defaults.integer(forKey: Key.chatKVBits) == 4 ? 4 : 8 }
         set { set(newValue == 4 ? 4 : 8, Key.chatKVBits) }
+    }
+
+    /// The most storage the context cache (the agent's memory and saved model states) may take:
+    /// 2 GB unless changed, 256 MB to 10 GB.
+    var contextCacheLimit: Int64 {
+        get { min(ContextCache.maximumLimit, max(256 * 1_048_576, Int64(defaults.integer(forKey: Key.contextCacheLimit)))) }
+        set { set(Int(min(ContextCache.maximumLimit, max(256 * 1_048_576, newValue))), Key.contextCacheLimit) }
     }
 
     /// Whether the Chat agent reasons before it answers.

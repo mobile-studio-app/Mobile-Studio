@@ -76,7 +76,7 @@ enum UserSettingsFiles {
         "workbench.colorTheme", "workbench.iconTheme", "editor.fontSize", "editor.tabSize", "editor.wordWrap", "files.autoSave",
         "editor.formatOnSave", "mobileStudio.codeSuggestions", "mobileStudio.ai.model", "mobileStudio.ai.mergeModel", "mobileStudio.ai.chatModel", "mobileStudio.ai.chat.contextSize",
         "mobileStudio.ai.chat.subagentModel", "mobileStudio.ai.chat.parallelSubagents", "mobileStudio.ai.chat.mode", "mobileStudio.ai.chat.thinking", "mobileStudio.ai.chat.cacheBits",
-        "mobileStudio.ai.downloadOverMobileData", "mobileStudio.luajit.jit", "git.enableSmartCommit",
+        "mobileStudio.ai.downloadOverMobileData", "mobileStudio.ai.contextCacheMB", "mobileStudio.luajit.jit", "git.enableSmartCommit",
     ]
 
     static func appValues() -> [String: Any] {
@@ -99,6 +99,7 @@ enum UserSettingsFiles {
             "mobileStudio.ai.chat.thinking": s.chatThinking,
             "mobileStudio.ai.chat.cacheBits": s.chatKVBits,
             "mobileStudio.ai.downloadOverMobileData": s.downloadOverCellular,
+            "mobileStudio.ai.contextCacheMB": Int(s.contextCacheLimit / 1_048_576),
             "mobileStudio.luajit.jit": s.useJIT,
             "git.enableSmartCommit": s.smartCommit,
         ]
@@ -135,11 +136,24 @@ enum UserSettingsFiles {
         }
         if let on = bool("editor.formatOnSave"), on != s.formatOnSave { s.formatOnSave = on }
         if let on = bool("mobileStudio.codeSuggestions"), on != s.codeSuggestions { s.codeSuggestions = on }
-        if let raw = values["mobileStudio.ai.model"] as? String, let choice = AIModelChoice(rawValue: raw), choice != s.aiModel { s.aiModel = choice }
-        if let raw = values["mobileStudio.ai.mergeModel"] as? String, let choice = AIModelChoice(rawValue: raw) { s.aiMergeModel = choice }
-        if let raw = values["mobileStudio.ai.chatModel"] as? String, let choice = AIModelChoice(rawValue: raw), choice != s.chatModel { s.chatModel = choice }
+        // A model by its id, or by its tier's name ("smart"): the tier's code or chat model.
+        func pickedModel(_ key: String, chat: Bool) -> AIModelChoice? {
+            guard let raw = values[key] as? String else { return nil }
+            if let tier = AITier(rawValue: raw.lowercased()) { return chat ? tier.chatChoice : tier.codeChoice }
+            return AIModelChoice(rawValue: raw)
+        }
+        if let choice = pickedModel("mobileStudio.ai.model", chat: false), choice != s.aiModel { s.aiModel = choice }
+        if let choice = pickedModel("mobileStudio.ai.mergeModel", chat: false) { s.aiMergeModel = choice }
+        if let choice = pickedModel("mobileStudio.ai.chatModel", chat: true), choice != s.chatModel { s.chatModel = choice }
         if let size = int("mobileStudio.ai.chat.contextSize"), size != s.chatContextSize { s.chatContextSize = size }
-        if let raw = values["mobileStudio.ai.chat.subagentModel"] as? String, AIModelChoice(rawValue: raw) != s.subagentModel { s.subagentModel = AIModelChoice(rawValue: raw) }
+        if let mb = int("mobileStudio.ai.contextCacheMB"), Int64(mb) * 1_048_576 != s.contextCacheLimit {
+            s.contextCacheLimit = Int64(mb) * 1_048_576
+            ContextCache.shared.limitChanged()
+        }
+        if values["mobileStudio.ai.chat.subagentModel"] is String {
+            let sub = pickedModel("mobileStudio.ai.chat.subagentModel", chat: true)
+            if sub != s.subagentModel { s.subagentModel = sub }
+        }
         if let count = int("mobileStudio.ai.chat.parallelSubagents"), count != s.subagentParallel { s.subagentParallel = count }
         if let mode = values["mobileStudio.ai.chat.mode"] as? String, ["manual", "edit", "auto", "turbo"].contains(mode), mode != s.chatMode { s.chatMode = mode }
         if let on = bool("mobileStudio.ai.chat.thinking"), on != s.chatThinking { s.chatThinking = on }

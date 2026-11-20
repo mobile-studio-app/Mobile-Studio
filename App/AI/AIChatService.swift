@@ -19,7 +19,7 @@ struct ChatReply {
 }
 
 /// The Chat panel's conversations and its agent's subagents, with Apple Intelligence or a model
-/// downloaded in Settings → Advanced, which run on the device; or a cloud model the user set up
+/// of a tier (AITier), which run on the device; or a cloud model the user set up
 /// with their own key (CloudChat), the one case where the conversation leaves the device.
 /// Requests have ids, so several can run at once (subagents): Apple Intelligence and cloud requests
 /// run side by side, and each local model is loaded once with its requests taking turns.
@@ -53,6 +53,8 @@ final class AIChatService {
         /// Apple Intelligence.
         var subagent = false
         var reasoning: LocalModel.Reasoning = .none
+        /// Its tier's name ("Smart"); nil for a cloud model.
+        var tier: String? = nil
     }
 
     struct ContextSize {
@@ -100,22 +102,24 @@ final class AIChatService {
         return min(wanted, usable.max() ?? 2048, model.maxContext)
     }
 
-    /// The models the Chat panel offers: Apple Intelligence, the downloaded chat models, and the
-    /// downloaded code models (which answer less well, but can).
+    /// The models the Chat panel offers: the four tiers (one not downloaded yet is "suggested":
+    /// picking it opens Settings → AI to get it; one this device can't run isn't ready), then cloud
+    /// models the user set up.
     var options: [Option] {
-        let reason = AppleIntelligenceEngine.unavailableReason
-        var list = [Option(choice: .appleIntelligence, name: "Apple Intelligence", detail: reason ?? "Built into iOS",
-                           ready: reason == nil, contexts: [ContextSize(tokens: Self.appleContextSize, bytes: 0, fits: true)], subagent: reason == nil)]
-        for model in AIModelCatalog.all where model.isDownloaded && (model.chats || model.completes) {
-            let detail = model.isSupported ? (model.chats ? model.detail : "\(model.detail) · a code model, chats less well") : model.requirementText
-            list.append(Option(choice: model.choice, name: model.chats ? model.name : "\(model.name) (\(model.detail))", detail: detail,
-                               ready: model.isSupported, contexts: contexts(for: model), agent: model.agent,
-                               subagent: model.agent || model.subagent, reasoning: model.reasoning))
-        }
-        for model in AIModelCatalog.chatModels where !model.isDownloaded && model.isSupported {
-            list.append(Option(choice: model.choice, name: model.name,
-                               detail: "\(AIModelCatalog.suggestion(for: model) ?? model.detail) · \(model.sizeText)",
-                               ready: false, contexts: [], suggested: true))
+        var list: [Option] = []
+        for tier in AITier.allCases {
+            guard let model = AIModelCatalog.model(for: tier.chatChoice) else {
+                let reason = AppleIntelligenceEngine.unavailableReason
+                list.append(Option(choice: .appleIntelligence, name: tier.name, detail: reason ?? "Apple Intelligence · built into iOS",
+                                   ready: reason == nil, contexts: [ContextSize(tokens: Self.appleContextSize, bytes: 0, fits: true)],
+                                   subagent: reason == nil, tier: tier.name))
+                continue
+            }
+            let detail = !model.isSupported ? "\(model.name) · \(model.requirementText)"
+                : model.isDownloaded ? model.name : "\(model.name) · \(model.sizeText) download"
+            list.append(Option(choice: model.choice, name: tier.name, detail: detail, ready: model.isSupported && model.isDownloaded,
+                               contexts: model.isDownloaded ? contexts(for: model) : [], suggested: !model.isDownloaded && model.isSupported,
+                               agent: model.agent, subagent: model.agent || model.subagent, reasoning: model.reasoning, tier: tier.name))
         }
         for provider in CloudProvider.allCases where provider.isConfigured {
             list.append(Option(choice: provider.choice, name: provider.displayName, detail: "Cloud · sends your code to \(provider.name)",
@@ -135,14 +139,30 @@ final class AIChatService {
     }
 
     /// Frees the chat models (memory warning, a game, or code suggestions needing the memory).
-    func unload() {
+    /// `keepingState`: what each had read goes to the context cache first, so coming back doesn't
+    /// mean reading the conversation again (not on a memory warning, when the memory is needed now).
+    func unload(keepingState: Bool = false) {
         cancel()
+        if keepingState { saveStates() }
         engines = [:]
     }
 
     /// Frees the chat models unless they're answering: AI Suggestions are about to load theirs.
     func releaseIdleEngine() {
-        if !isBusy { engines = [:] }
+        guard !isBusy else { return }
+        saveStates()
+        engines = [:]
+    }
+
+    /// What each loaded model has read goes to the context cache (the app is going into the
+    /// background, where iOS may close it). `done` runs on the main queue once it's written.
+    func saveStates(then done: (() -> Void)? = nil) {
+        let group = DispatchGroup()
+        for engine in engines.values {
+            group.enter()
+            engine.saveState { group.leave() }
+        }
+        if let done { group.notify(queue: .main, execute: done) }
     }
 
     /// Answers `messages` (the last is the user's) with `choice` (the Chat model when nil). `onText`
@@ -185,8 +205,12 @@ final class AIChatService {
             }
             return
         }
-        guard let model = AIModelCatalog.model(for: choice), model.chats || model.completes, model.isDownloaded else {
-            return completion(.failure(Self.error("Pick a chat model in the menu above. Download one in Settings → Advanced → AI Models.")))
+        guard let model = AIModelCatalog.model(for: choice), model.chats || model.completes else {
+            return completion(.failure(Self.error("Pick Nano, Light, Standard or Smart in the menu above.")))
+        }
+        guard model.isDownloaded else {
+            let tier = model.tier.map { "\($0.name) (\(model.name))" } ?? model.name
+            return completion(.failure(Self.error("\(tier) isn't downloaded yet: get it in Settings → AI, or pick another tier.")))
         }
         guard model.isSupported else { return completion(.failure(Self.error("\(model.name): \(model.requirementText)"))) }
         // Loading a model that doesn't fit gets the app closed by iOS: say so instead.
@@ -203,6 +227,7 @@ final class AIChatService {
         let size = effectiveContext(for: model, wanted: contextSize ?? AppSettings.shared.chatContextSize)
         let bits = AppSettings.shared.chatKVBits
         if (engines[model.id]?.contextSize ?? 0) < size || engines[model.id]?.kvBits != bits {
+            engines[model.id]?.saveState()
             engines[model.id] = nil
             engines[model.id] = LlamaChatEngine(model: model, contextSize: size, kvBits: bits)
         }
@@ -247,6 +272,9 @@ final class LlamaChatEngine {
     private var snapshots = false
     private var snapshot: [UInt8] = []
     private var snapshotTokens: [llama_token] = []
+    /// Where this model's states go in the context cache: they only load into the same model,
+    /// context size and cache precision.
+    private var stateKey: String { "\(model.id)-\(context.map { llama_n_ctx($0) } ?? UInt32(contextSize))-\(kvBits)" }
 
     init(model: LocalModel, contextSize: Int, kvBits: Int = 8) {
         self.model = model
@@ -257,6 +285,21 @@ final class LlamaChatEngine {
     deinit {
         if let context { llama_free(context) }
         if let llamaModel { llama_model_free(llamaModel) }
+    }
+
+    /// The last conversation's state goes to the context cache (when it's long enough to be worth
+    /// it), after any answer being written. The engine stays alive until it's handed over.
+    func saveState(then done: (() -> Void)? = nil) {
+        queue.async {
+            self.saveSnapshot()
+            if let done { ContextCache.shared.afterWrites(done) }
+        }
+    }
+
+    /// On `queue`.
+    private func saveSnapshot() {
+        guard snapshots, !snapshot.isEmpty else { return }
+        ContextCache.shared.saveState(stateKey, tokens: snapshotTokens, data: snapshot)
     }
 
     func respond(_ messages: [ChatMessage], maxTokens: Int, thinking: Bool = false, stop: [String] = [], cancel: CompletionCancel,
@@ -327,6 +370,7 @@ final class LlamaChatEngine {
     private func format(_ messages: [ChatMessage], thinking: Bool) -> String {
         switch model.format {
         case .gemma4: return Self.gemma4(messages, thinking: thinking)
+        case .lfm3: return Self.lfm3(messages, thinking: thinking)
         case .template: return applyTemplate(messages)
         case .thinkPrefill:
             // Earlier answers start as this one does (an empty thought unless they kept theirs), so the
@@ -353,6 +397,18 @@ final class LlamaChatEngine {
             out += "<|turn>\(m.role == "assistant" ? "model" : m.role)\n\(content)<turn|>\n"
         }
         return out + "<|turn>model\n"
+    }
+
+    /// LFM3: ChatML, with earlier answers starting with their thought (an empty one unless they kept
+    /// theirs) as its template writes them, and this answer opened to reason or not.
+    private static func lfm3(_ messages: [ChatMessage], thinking: Bool) -> String {
+        var out = ""
+        for m in messages {
+            var content = m.content
+            if m.role == "assistant" && !content.hasPrefix("<think>") { content = "<think></think>" + content }
+            out += "<|im_start|>\(m.role)\n\(content)<|im_end|>\n"
+        }
+        return out + "<|im_start|>assistant\n" + (thinking ? "<think>" : "<think></think>")
     }
 
     private func applyTemplate(_ messages: [ChatMessage]) -> String {
@@ -433,6 +489,9 @@ final class LlamaChatEngine {
                     common = snapshotTokens.count
                 } else {
                     llama_memory_clear(memory, true)
+                    // Another conversation (a subagent, another chat): the one the model had goes to
+                    // the context cache, to go on from when it comes back.
+                    saveSnapshot()
                 }
             } else {
                 if !llama_memory_seq_rm(memory, 0, Int32(common), -1) {
@@ -440,6 +499,18 @@ final class LlamaChatEngine {
                     common = 0
                 }
                 cached.removeSubrange(common...)
+            }
+        }
+        // Nothing to go on from (a model just loaded, or a conversation it doesn't have): what it
+        // read for this conversation before, from the context cache, if that's there.
+        if snapshots, common == 0, prompt.count > ContextCache.minimumStateTokens,
+           let saved = ContextCache.shared.loadState(stateKey, prompt: prompt) {
+            if saved.data.withUnsafeBufferPointer({ llama_state_seq_set_data(ctx, $0.baseAddress, $0.count, 0) }) > 0 {
+                cached = saved.tokens
+                common = saved.tokens.count
+            } else {
+                llama_memory_clear(memory, true)
+                cached = []
             }
         }
         var index = common
@@ -476,7 +547,14 @@ final class LlamaChatEngine {
         let gemma = model.format == .gemma4
         let reasons = model.reasoning != .none && !gemma
         let sampler = llama_sampler_chain_init(llama_sampler_chain_default_params())
-        if gemma {
+        if model.sampling == .lfm {
+            // LFM3, as its makers suggest for chat, tools and code: temperature 0.1, top-k 50, and a
+            // repetition penalty of 1.1 over the last 256 tokens.
+            llama_sampler_chain_add(sampler, llama_sampler_init_penalties(llama_vocab_n_tokens(vocab), 256, 1.1, 0, 0))
+            llama_sampler_chain_add(sampler, llama_sampler_init_top_k(50))
+            llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.1))
+            llama_sampler_chain_add(sampler, llama_sampler_init_dist(UInt32.random(in: 0...UInt32.max - 1)))
+        } else if gemma {
             // Gemma 4: temperature 1, top-k 64, top-p 0.95.
             llama_sampler_chain_add(sampler, llama_sampler_init_top_k(64))
             llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.95, 1))

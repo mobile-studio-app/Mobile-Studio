@@ -824,9 +824,10 @@ final class IDEViewController: UIViewController, DuoLayoutManagerDelegate, UIGes
 
         do {
             appendLog("▶ Running \(project.lastPathComponent) with \(rt.manifest.displayName)")
-            // The game shares the app's memory budget; a local AI model reloads when it's next needed.
+            // The game shares the app's memory budget; a local AI model reloads when it's next needed,
+            // and Chat's goes on from what it had read (kept in the context cache).
             AICompletionService.shared.unload()
-            AIChatService.shared.unload()
+            AIChatService.shared.unload(keepingState: true)
             try runtimeHost.start(runtime: rt, project: project, debugConfig: debug ? BreakpointStore.shared.debugConfig : nil,
                                   arguments: nodeArguments(for: rt))
             if debug { beginDebugSession() }
