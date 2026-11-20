@@ -920,7 +920,7 @@ async function send() {
   const text = input.value.trim();
   if (!text || busy) return;
   input.value = '';
-  if (text === '/compact') { busy = true; updateControls(); await compact('asked'); busy = false; updateControls(); return; }
+  if (text === '/compact') { busy = true; updateControls(); await compact('asked'); busy = false; updateControls(); saveChat(); return; }
   if (text === '/clear' || text === '/new') { newChat(); return; }
   const context = fileContext();
   projectList = canAgent() ? await projectFiles() : [];
@@ -933,6 +933,8 @@ async function send() {
   render();
   busy = true;
   stopped = false;
+  chatId = chatId || 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  changeSet = canAgent() ? { files: new Map(), commands: false } : null;
   updateControls();
   const seen = new Map();   // this question's tool calls, to catch the agent going in circles
   let repeats = 0;
@@ -1016,7 +1018,207 @@ async function send() {
     liveText = null;
     updateControls();
     render();
+    await showChanges();
+    saveChat();
   }
+}
+
+// MARK: - The agent's changes
+
+// What each file the agent changed while answering a question was before (null: it didn't
+// exist), so its changes can be reviewed and undone when it's done. Commands' changes aren't known.
+let changeSet = null;   // { files: Map path → before, commands: bool }
+
+/** The files a call changes, before it does: their contents now. */
+async function recordBefore(call) {
+  if (!changeSet) return;
+  if (call.tool === 'run_command') { changeSet.commands = true; return; }
+  const kind = TOOL[call.tool] && TOOL[call.tool].kind;
+  if (kind !== 'edit' && kind !== 'delete') return;
+  const paths = [];
+  const withFolder = async (p) => {
+    const inside = (await projectFiles()).filter((f) => f.startsWith(p + '/'));
+    return inside.length ? inside : [p];
+  };
+  if (call.tool === 'move_file') {
+    const from = cleanPath(call.from);
+    const to = cleanPath(call.to);
+    for (const f of await withFolder(from)) paths.push(f, to + f.slice(from.length));
+  } else if (call.tool === 'copy_file') paths.push(cleanPath(call.to));
+  else if (call.tool === 'delete_file') paths.push(...await withFolder(cleanPath(call.path)));
+  else if (call.tool !== 'create_folder') paths.push(cleanPath(call.path));
+  for (const p of paths) {
+    if (!p || changeSet.files.has(p)) continue;
+    let before = null;
+    try { before = await readText(p); } catch (e) { /* new */ }
+    changeSet.files.set(p, typeof before === 'string' ? before : null);
+  }
+}
+
+/** When the agent is done: a card of what it changed, if anything. */
+async function showChanges() {
+  if (!changeSet) return;
+  const files = [];
+  for (const [path, before] of changeSet.files) {
+    let after = null;
+    try { after = await readText(path); } catch (e) { /* gone */ }
+    if (typeof after !== 'string') after = null;
+    if (after !== before) files.push({ path, before, after, state: 'changed' });
+  }
+  const commands = changeSet.commands;
+  changeSet = null;
+  if (files.length) addCard({ type: 'changes', files, commands });
+}
+
+/** "+3 −1", "new" or "deleted", for a changed file. */
+function changeSize(f) {
+  if (f.before === null) return `new, ${linesOf(f.after).length} lines`;
+  if (f.after === null) return 'deleted';
+  const a = linesOf(f.before);
+  const b = linesOf(f.after);
+  let start = 0;
+  while (start < a.length && start < b.length && a[start] === b[start]) start++;
+  let endA = a.length, endB = b.length;
+  while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) { endA--; endB--; }
+  return `+${endB - start} −${endA - start}`;
+}
+
+function changesCard(card) {
+  const r = card.record;
+  const el = element('div', 'chat-tool chat-changes');
+  const left = r.files.filter((f) => f.state !== 'undone');
+  el.append(element('div', 'chat-tool-title', left.length
+    ? `The agent changed ${r.files.length} file${r.files.length === 1 ? '' : 's'}`
+    : 'The agent\'s changes were undone'));
+  for (const f of r.files) {
+    const row = element('div', 'chat-change' + (f.state === 'undone' ? ' undone' : ''));
+    row.append(element('span', 'chat-change-path', f.path), element('span', 'chat-change-size', f.state === 'undone' ? 'undone' : changeSize(f)));
+    if (f.state !== 'undone') {
+      if (f.after !== null) {
+        const diff = element('button', 'chat-small', 'Diff');
+        diff.title = 'Compare with the file before the agent changed it';
+        diff.addEventListener('click', () => (api.openDiff ? api.openDiff({ path: f.path, original: f.before ?? '', title: `${f.path.split('/').pop()} (agent's changes)` }) : api.openFile(f.path)));
+        row.append(diff);
+      }
+      const undo = element('button', 'chat-small', f.state === 'confirm' ? 'Undo Anyway' : 'Undo');
+      undo.addEventListener('click', () => undoChange(card, [f]));
+      row.append(undo);
+      if (f.state === 'confirm') row.append(element('div', 'chat-change-note', 'It has changed since the agent changed it: undoing loses that too.'));
+    }
+    el.append(row);
+  }
+  if (left.length > 1) {
+    const all = element('button', 'chat-small', 'Undo All');
+    all.addEventListener('click', () => undoChange(card, left));
+    el.append(all);
+  }
+  if (r.commands) el.append(element('div', 'chat-change-note', 'Changes made by commands it ran aren\'t listed and can\'t be undone here.'));
+  return el;
+}
+
+/** Puts files back as they were before the agent changed them. One that has changed since asks first
+ * (its row says so, and Undo Anyway goes ahead). */
+async function undoChange(card, files) {
+  let asked = false;
+  for (const f of files) {
+    let now = null;
+    try { now = await readText(f.path); } catch (e) { /* gone */ }
+    if (typeof now !== 'string') now = null;
+    if (now !== f.after && f.state !== 'confirm' && now !== f.before) {
+      f.state = 'confirm';
+      asked = true;
+      continue;
+    }
+    try {
+      if (f.before === null) {
+        if (now !== null) {
+          await api.native({ cmd: 'fs', op: 'delete', path: f.path });
+          api.pathMoved?.(f.path, null);
+        }
+      } else if (now !== f.before) {
+        await writeText(f.path, f.before);
+      }
+      f.state = 'undone';
+    } catch (e) {
+      f.state = 'changed';
+      notice(`Couldn't undo ${f.path}: ${e && e.message ? e.message : e}`);
+    }
+  }
+  redrawCard(card);
+  saveChat();
+  if (asked) scrollToEnd();
+}
+
+// MARK: - Saved chats
+
+// Each chat is saved, per project, after every answer (ChatHistory.swift, apart from the context
+// cache), and the history button reopens one.
+let chatId = null;
+
+function saveChat() {
+  if (!chatId || !messages.length) return;
+  const first = messages.find((m) => m.role === 'user' && !m.kind);
+  const title = String(first ? first.shown ?? first.content : 'Chat').replace(/\s+/g, ' ').trim().slice(0, 80) || 'Chat';
+  const chat = { version: 1, title, model: settings.selected, messages, cards: cards.map((c) => ({ at: c.at, ...c.record })) };
+  api.native({ cmd: 'chats', op: 'save', id: chatId, chat }).catch(() => {});
+}
+
+async function openChatFromHistory(id) {
+  if (busy) return;
+  const chat = await api.native({ cmd: 'chats', op: 'load', id }).catch(() => null);
+  if (!chat || !Array.isArray(chat.messages)) { notice('That chat couldn\'t be opened.'); return; }
+  messages = chat.messages;
+  cards = [];
+  for (const record of Array.isArray(chat.cards) ? chat.cards : []) {
+    const { at, ...rest } = record;
+    const card = { at, record: rest, el: null };
+    card.el = drawCard(card);
+    cards.push(card);
+  }
+  chatId = id;
+  requestStart = messages.length;
+  allowedThisChat.clear();
+  $('chat-history').hidden = true;
+  render();
+}
+
+/** The history panel: this project's chats, newest first. */
+async function showHistory() {
+  const panel = $('chat-history');
+  if (!panel.hidden) { panel.hidden = true; return; }
+  $('chat-settings').hidden = true;
+  panel.hidden = false;
+  panel.replaceChildren(element('div', 'chat-setting-note', 'Loading…'));
+  const list = await api.native({ cmd: 'chats', op: 'list' }).catch(() => []);
+  panel.replaceChildren();
+  const chats = Array.isArray(list) ? list : [];
+  if (!chats.length) { panel.append(element('div', 'chat-setting-note', 'No saved chats in this project yet.')); return; }
+  for (const c of chats) {
+    const row = element('div', 'chat-history-row' + (c.id === chatId ? ' current' : ''));
+    const open = element('button', 'chat-history-open');
+    open.append(element('span', 'chat-history-title', c.title), element('span', 'chat-history-date', when(c.updated)));
+    open.addEventListener('click', () => openChatFromHistory(c.id));
+    const del = element('button', 'chat-icon codicon', '');
+    del.title = 'Delete Chat';
+    del.setAttribute('aria-label', `Delete chat: ${c.title}`);
+    del.addEventListener('click', async () => {
+      await api.native({ cmd: 'chats', op: 'delete', id: c.id }).catch(() => {});
+      if (c.id === chatId) chatId = null;
+      row.remove();
+    });
+    row.append(open, del);
+    panel.append(row);
+  }
+}
+
+/** "Today 14:02", "Yesterday", "3 Nov". */
+function when(ms) {
+  const d = new Date(ms);
+  const today = new Date();
+  const days = Math.round((new Date(today.toDateString()) - new Date(d.toDateString())) / 86400000);
+  if (days === 0) return 'Today ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  if (days === 1) return 'Yesterday';
+  return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 }
 
 /** One tool call: approval when the mode asks for it, then the result for the model. */
@@ -1028,6 +1230,7 @@ async function perform(call) {
     if (decision === 'deny') { toolCard(result, 'denied'); return `${call.tool}: The user didn't allow this.`; }
     if (decision === 'always') allowedThisChat.add(call.tool);
   }
+  await recordBefore(call);
   let output;
   try {
     output = await result.apply();
@@ -1050,7 +1253,9 @@ function stop() {
 
 export function newChat() {
   if (busy) stop();
+  saveChat();
   messages = [];
+  chatId = null;
   allowedThisChat.clear();
   if (pane) render();
 }
@@ -1102,7 +1307,7 @@ function build() {
   });
   const options = element('button', 'chat-icon codicon', '');
   options.title = 'Chat Settings';
-  options.addEventListener('click', () => { $('chat-settings').hidden = !$('chat-settings').hidden; });
+  options.addEventListener('click', () => { $('chat-history').hidden = true; $('chat-settings').hidden = !$('chat-settings').hidden; });
   const fresh = element('button', 'chat-icon codicon', '');
   fresh.title = 'New Chat';
   fresh.addEventListener('click', () => newChat());
@@ -1110,9 +1315,12 @@ function build() {
   close.title = 'Close Chat';
   close.addEventListener('click', () => closeChat());
   // The icons are font glyphs: VoiceOver reads these names instead.
-  for (const button of [options, fresh, close]) button.setAttribute('aria-label', button.title);
+  const history = element('button', 'chat-icon codicon', '');
+  history.title = 'Chat History';
+  history.addEventListener('click', () => showHistory());
+  for (const button of [options, history, fresh, close]) button.setAttribute('aria-label', button.title);
   model.setAttribute('aria-label', 'Chat model');
-  header.append(model, options, fresh, close);
+  header.append(model, options, history, fresh, close);
 
   // How full the model's context is.
   const meter = element('div', 'chat-meter');
@@ -1120,6 +1328,11 @@ function build() {
   meter.title = 'Context used. /compact summarises the conversation to free it.';
   meter.setAttribute('role', 'status');
   meter.append(element('div', 'chat-meter-bar'), element('span', 'chat-meter-text'));
+
+  // Saved chats (showHistory).
+  const historyPanel = element('div', 'chat-settings chat-history');
+  historyPanel.id = 'chat-history';
+  historyPanel.hidden = true;
 
   const panel = element('div', 'chat-settings');
   panel.id = 'chat-settings';
@@ -1176,7 +1389,7 @@ function build() {
   row.append(mode, think, context, sendButton);
   form.append(text, row);
 
-  pane.append(header, meter, panel, log, form);
+  pane.append(header, meter, historyPanel, panel, log, form);
   $('editor-container').append(pane);
   render();
 }
@@ -1455,36 +1668,64 @@ function bubble(message) {
   return el;
 }
 
-const cards = [];   // tool cards and approvals, kept across renders
+// Cards between the messages: tool results, notes, subagents' progress and the agent's changes.
+// Each has a record (plain data, saved with the chat) it's drawn from, and is drawn after the
+// message it came with (`at`).
+let cards = [];   // { at, el, record }
+
+/** Adds a card after the latest message. */
+function addCard(record) {
+  const card = { at: messages.length, record, el: null };
+  card.el = drawCard(card);
+  cards.push(card);
+  $('chat-log').append(card.el);
+  scrollToEnd();
+  return card;
+}
+
+function drawCard(card) {
+  const r = card.record;
+  if (r.type === 'note') return element('div', 'chat-note', r.text);
+  if (r.type === 'subagents') {
+    const el = element('div', 'chat-tool');
+    el.append(element('div', 'chat-tool-title', `Subagents (${r.tasks.length})`));
+    r.tasks.forEach((task, i) => el.append(element('div', 'chat-subagent', `${i + 1}. ${task.slice(0, 80)} — ${r.states[i]}`)));
+    return el;
+  }
+  if (r.type === 'changes') return changesCard(card);
+  const el = element('div', `chat-tool ${r.state}`);
+  el.append(element('div', 'chat-tool-title', (r.state === 'done' ? '✓ ' : '✕ ') + r.summary + (r.state === 'denied' ? ' (not allowed)' : '')));
+  if (r.preview && r.preview.text) {
+    const details = element('details');
+    details.append(element('summary', null, `Changes from line ${r.preview.line}`), element('pre', 'chat-diff', r.preview.text));
+    el.append(details);
+  } else if (r.output) {
+    const details = element('details');
+    details.append(element('summary', null, 'Output'), element('pre', 'chat-diff', r.output));
+    el.append(details);
+  }
+  if (r.path && r.state === 'done' && r.preview) {
+    const open = element('button', 'chat-small', 'Open');
+    open.addEventListener('click', () => api.openFile(r.path));
+    el.append(open);
+  }
+  return el;
+}
+
+/** Draws a card again after its record changed. */
+function redrawCard(card) {
+  const el = drawCard(card);
+  card.el.replaceWith(el);
+  card.el = el;
+}
 
 function toolCard(result, state, output) {
-  const card = element('div', `chat-tool ${state}`);
-  card.append(element('div', 'chat-tool-title', (state === 'done' ? '✓ ' : '✕ ') + result.summary + (state === 'denied' ? ' (not allowed)' : '')));
-  if (result.preview && result.preview.text) {
-    const details = element('details');
-    details.append(element('summary', null, `Changes from line ${result.preview.line}`), element('pre', 'chat-diff', result.preview.text));
-    card.append(details);
-  } else if (output) {
-    const details = element('details');
-    details.append(element('summary', null, 'Output'), element('pre', 'chat-diff', output));
-    card.append(details);
-  }
-  if (result.path && state === 'done' && result.preview) {
-    const open = element('button', 'chat-small', 'Open');
-    open.addEventListener('click', () => api.openFile(result.path));
-    card.append(open);
-  }
-  cards.push({ at: messages.length, el: card });
-  $('chat-log').append(card);
-  scrollToEnd();
+  addCard({ type: 'tool', state, summary: result.summary, preview: result.preview || null, output: output ? clip(output, 8000) : null, path: result.path || null });
 }
 
 /** A note in the chat that stays where it is when the chat is drawn again. */
 function noteCard(text) {
-  const card = element('div', 'chat-note', text);
-  cards.push({ at: messages.length, el: card });
-  $('chat-log').append(card);
-  scrollToEnd();
+  addCard({ type: 'note', text });
 }
 
 /** Asks the user about a call: resolves 'allow', 'always' or 'deny'. */
@@ -1515,17 +1756,8 @@ function approval(call, result) {
 }
 
 function progressCard(tasks) {
-  const card = element('div', 'chat-tool');
-  card.append(element('div', 'chat-tool-title', `Subagents (${tasks.length})`));
-  const rows = tasks.map((task, i) => {
-    const r = element('div', 'chat-subagent', `${i + 1}. ${task.slice(0, 80)} — waiting`);
-    card.append(r);
-    return r;
-  });
-  cards.push({ at: messages.length, el: card });
-  $('chat-log').append(card);
-  scrollToEnd();
-  return { set: (i, state) => { rows[i].textContent = `${i + 1}. ${tasks[i].slice(0, 80)} — ${state}`; } };
+  const card = addCard({ type: 'subagents', tasks, states: tasks.map(() => 'waiting') });
+  return { set: (i, state) => { card.record.states[i] = state; redrawCard(card); } };
 }
 
 function notice(text) {
@@ -1542,7 +1774,7 @@ function render() {
   if (!pane) return;
   const log = $('chat-log');
   if (!messages.length && liveText == null) {
-    cards.length = 0;
+    cards = [];
     log.replaceChildren(element('div', 'chat-empty',
       (canAgent()
         ? 'Ask about your code, or tell the agent what to change: it reads, searches and edits the project, runs commands and sends research to subagents. '

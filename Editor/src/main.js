@@ -532,6 +532,8 @@ setupChat({
   save: () => save(),
   // The agent moved or deleted a file: its tabs follow, as when the Explorer does it.
   pathMoved: (from, to) => pathMoved(from, to),
+  // Reviewing the agent's changes: the file, editable, against what it was before.
+  openDiff: (request) => openDiff(request),
 });
 addCommands([
   { command: 'workbench.action.chat.open', title: 'Chat: Open Chat', keybinding: '⌃⌘I', run: () => openChat() },

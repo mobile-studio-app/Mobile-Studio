@@ -45,6 +45,14 @@ window.webkit = { messageHandlers: { duocode: { postMessage: async (m) => {
   if (m.cmd === 'stat') { if (m.path in f) return { size: f[m.path].length }; throw new Error('not found'); }
   if (m.cmd === 'write') { f[m.path] = m.contents; return true; }
   if (m.cmd === 'list') return Object.keys(f);
+  if (m.cmd === 'chats') {
+    // Saved chats (ChatHistory.swift), in memory.
+    const chats = (window.__chats = window.__chats || {});
+    if (m.op === 'save') { chats[m.id] = { ...JSON.parse(JSON.stringify(m.chat)), updated: Date.now() }; return true; }
+    if (m.op === 'load') { if (!chats[m.id]) throw new Error(`There's no chat ${m.id}.`); return JSON.parse(JSON.stringify(chats[m.id])); }
+    if (m.op === 'delete') { delete chats[m.id]; return true; }
+    if (m.op === 'list') return Object.entries(chats).map(([id, c]) => ({ id, title: c.title, updated: c.updated, count: c.messages.length })).sort((a, b) => b.updated - a.updated);
+  }
   if (m.cmd === 'memory') {
     // The Chat agent's long-term memory (ContextCache.swift), in memory: notes and set-aside text.
     const store = (window.__memory = window.__memory || []);

@@ -160,6 +160,22 @@
   .chat-diff { margin: 4px 0 0; padding: 6px; max-height: 220px; overflow: auto; background: var(--chrome); border-radius: 4px; font: 11px ui-monospace, Menlo, monospace; white-space: pre; }
   .chat-subagent { color: var(--muted); padding: 1px 0; }
   .chat-note { margin: 0 0 10px; color: var(--muted); font-size: 12px; font-style: italic; text-align: center; }
+  /* chat.js: the agent's changes, to review and undo. */
+  .chat-changes { border-color: color-mix(in srgb, var(--accent, #0a84ff) 60%, var(--border-strong)); }
+  .chat-change { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 3px 0; border-top: 1px solid var(--border); }
+  .chat-change .chat-small { margin-top: 0; padding: 3px 8px; }
+  .chat-change-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, Menlo, monospace; }
+  .chat-change-size { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .chat-change.undone .chat-change-path { text-decoration: line-through; color: var(--muted); }
+  .chat-change-note { flex-basis: 100%; color: var(--muted); font-size: 11px; }
+  /* chat.js: saved chats. */
+  .chat-history { max-height: 50%; overflow: auto; gap: 2px; }
+  .chat-history-row { display: flex; align-items: center; gap: 4px; }
+  .chat-history-row.current .chat-history-title { color: var(--accent, #0a84ff); }
+  .chat-history-open { flex: 1; min-width: 0; display: flex; justify-content: space-between; gap: 8px; padding: 6px 4px; background: none; border: 0; border-radius: 4px; color: var(--text); font: 12px -apple-system, system-ui, sans-serif; text-align: left; }
+  .chat-history-open:active { background: color-mix(in srgb, var(--fg) 10%, transparent); }
+  .chat-history-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chat-history-date { flex: none; color: var(--muted); }
   /* blame.js: who last changed the cursor's line. */
   .cm-blame { margin-left: 2.5em; color: var(--muted); opacity: 0.65; font-style: italic; white-space: nowrap; cursor: pointer; -webkit-user-select: none; user-select: none; }
   /* diffview.js: the side-by-side diff. */

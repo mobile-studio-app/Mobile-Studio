@@ -453,6 +453,9 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 // The Chat agent's long-term memory for this project, in the context cache: save,
                 // search, read, list and delete (chat.js's remember, recall, load_memory and forget).
                 ContextCache.shared.memory(body["op"] as? String ?? "", body, project: store.currentProject, reply: replyHandler)
+            case "chats":
+                // The Chat panel's saved chats for this project (ChatHistory), apart from the context cache.
+                ChatHistory.shared.handle(body["op"] as? String ?? "", body, project: store.currentProject, reply: replyHandler)
             case "aiChatCancel":
                 AIChatService.shared.cancel(body["id"] as? String)
                 replyHandler(true, nil)
