@@ -24,9 +24,11 @@ jobs:
   # Node.js for iOS with ICU, built from source in two cached halves: compiling (about 25
   # minutes; scripts/compile-nodejs.sh) and linking the framework (scripts/build-nodejs.sh).
   # Once the framework is cached this job only checks for it. Its own job: it needs an older
-  # Xcode than the app.
+  # Xcode than the app. Always on Apple silicon: Node's build tools (V8's and ICU's) run on the Mac
+  # building them, and on an Intel Mac they come out a mix of x86_64 and arm64 (the iPhone's) that
+  # doesn't link; on Apple silicon the two are the same.
   node:
-    runs-on: ${{ inputs.runner || 'macos-15-intel' }}
+    runs-on: macos-15
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
