@@ -1556,7 +1556,8 @@ function build() {
 function saveSetting(change) {
   Object.assign(settings, change);
   api.native({ cmd: 'aiChatSettings', ...change }).catch(() => {});
-  if ('contextSize' in change || 'kvBits' in change) loadSettings();
+  // These change what fits (and Faster answers, whether its draft is here): asked again.
+  if ('contextSize' in change || 'kvBits' in change || 'fasterAnswers' in change) loadSettings();
   updateControls();
   updateMeter();
   renderSettings();
@@ -1663,6 +1664,20 @@ function renderSettings() {
     row('Cache precision', select([[8, '8-bit (best)'], [4, 'Smaller (about 1.3× the context)']], settings.kvBits,
       (v) => saveSetting({ kvBits: Number(v) })),
       'How precisely the model remembers what it has read. Smaller keeps half of it at 4 bits, fitting about a third more context, a little less accurately.');
+    // Faster answers (speculative decoding, AIChatService): Standard and Smart.
+    const faster = info.fasterAnswers || 'unavailable';
+    if (faster !== 'unavailable') {
+      row('Faster answers', select([['off', 'Off'], ['on', 'On (experimental)']], faster === 'off' ? 'off' : 'on',
+        (v) => saveSetting({ fasterAnswers: v === 'on' })),
+      'A small draft model (Qwen3.5 0.8B, 0.5 GB) guesses a few words ahead and this model checks them all at once. The answers are the same, often sooner.');
+      const notes = {
+        download: 'Faster answers needs its 0.5 GB draft model: it downloads in the background (Settings → AI shows its progress).',
+        downloading: 'The draft model is downloading; answers come the usual way until it\'s here.',
+        wontFit: 'There isn\'t room for the draft model beside this one at this context size, so answers come the usual way. A smaller context makes room.',
+        on: 'Experimental: if answers go wrong, turn this off and tell us.',
+      };
+      if (notes[faster]) panel.append(element('div', 'chat-setting-note', notes[faster]));
+    }
     // iOS gives an app only part of the device's memory unless the app keeps its increased memory
     // limit when it's installed (some sideloading tools drop it).
     if (settings.memoryAvailable && settings.physicalMemory && settings.memoryAvailable < settings.physicalMemory * 0.55) {

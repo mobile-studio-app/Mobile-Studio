@@ -226,10 +226,11 @@ final class AIChatService {
         // new cache precision) reloads it.
         let size = effectiveContext(for: model, wanted: contextSize ?? AppSettings.shared.chatContextSize)
         let bits = AppSettings.shared.chatKVBits
-        if (engines[model.id]?.contextSize ?? 0) < size || engines[model.id]?.kvBits != bits {
+        let draft = fasterAnswersDraft(for: model, context: size)
+        if (engines[model.id]?.contextSize ?? 0) < size || engines[model.id]?.kvBits != bits || engines[model.id]?.draftModel?.id != draft?.id {
             engines[model.id]?.saveState()
             engines[model.id] = nil
-            engines[model.id] = LlamaChatEngine(model: model, contextSize: size, kvBits: bits)
+            engines[model.id] = LlamaChatEngine(model: model, contextSize: size, kvBits: bits, draft: draft)
         }
         guard let engine = engines[model.id] else { return }
         let cancel = CompletionCancel()
@@ -242,6 +243,31 @@ final class AIChatService {
                 completion(result)
             }
         })
+    }
+
+    /// Faster answers' draft model for `model`: when the setting is on, the model has one, it's
+    /// downloaded, and both fit in memory with room for the recurrent states kept to take back
+    /// wrong guesses (about 300 MB, generously).
+    func fasterAnswersDraft(for model: LocalModel, context: Int) -> LocalModel? {
+        guard AppSettings.shared.chatFasterAnswers, let id = model.draft, let choice = AIModelChoice(rawValue: id),
+              let draft = AIModelCatalog.model(for: choice), draft.isDownloaded, draft.isSupported else { return nil }
+        let needed = Self.memory(of: model, context: context) + Self.memory(of: draft, context: context) + 300_000_000
+        return Double(needed) < Double(memoryForChat) * 0.9 ? draft : nil
+    }
+
+    /// Faster answers for the Chat panel: "off", "unavailable" (the model has no draft), "download"
+    /// (on, the draft not downloaded yet), "downloading", "wontFit" or "on".
+    func fasterAnswersState(for choice: AIModelChoice) -> String {
+        guard let model = AIModelCatalog.model(for: choice), let id = model.draft, let draftChoice = AIModelChoice(rawValue: id),
+              let draft = AIModelCatalog.model(for: draftChoice) else { return "unavailable" }
+        guard AppSettings.shared.chatFasterAnswers else { return "off" }
+        switch ModelDownloadManager.shared.state(for: draft) {
+        case .downloading, .verifying: return "downloading"
+        case .downloaded: break
+        default: return "download"
+        }
+        let context = effectiveContext(for: model, wanted: AppSettings.shared.chatContextSize)
+        return fasterAnswersDraft(for: model, context: context) == nil ? "wontFit" : "on"
     }
 
     static func error(_ message: String) -> NSError {
@@ -274,15 +300,32 @@ final class LlamaChatEngine {
     private var snapshotTokens: [llama_token] = []
     /// Where this model's states go in the context cache: they only load into the same model,
     /// context size and cache precision.
-    private var stateKey: String { "\(model.id)-\(context.map { llama_n_ctx($0) } ?? UInt32(contextSize))-\(kvBits)" }
+    private var stateKey: String {
+        "\(model.id)-\(context.map { llama_n_ctx($0) } ?? UInt32(contextSize))-\(kvBits)" + (draftModel != nil ? "-rs\(Self.draftLength)" : "")
+    }
 
-    init(model: LocalModel, contextSize: Int, kvBits: Int = 8) {
+    /// Faster answers (speculative decoding): a small model with the same vocabulary guesses up to
+    /// `draftLength` tokens ahead, and this one reads them all in one pass, keeping its own token at
+    /// each place for as long as the guesses agree (so the answer is the one it would have written).
+    /// Both caches drop what was guessed wrong; a hybrid model (Qwen3.5) keeps that many recurrent
+    /// states to make that possible (n_rs_seq).
+    let draftModel: LocalModel?
+    static let draftLength = 4
+    private var draftLlama: OpaquePointer?
+    private var draftContext: OpaquePointer?
+    /// What the draft's cache holds.
+    private var draftTokens: [llama_token] = []
+
+    init(model: LocalModel, contextSize: Int, kvBits: Int = 8, draft: LocalModel? = nil) {
         self.model = model
         self.contextSize = contextSize
         self.kvBits = kvBits
+        self.draftModel = draft
     }
 
     deinit {
+        if let draftContext { llama_free(draftContext) }
+        if let draftLlama { llama_model_free(draftLlama) }
         if let context { llama_free(context) }
         if let llamaModel { llama_model_free(llamaModel) }
     }
@@ -350,6 +393,9 @@ final class LlamaChatEngine {
         contextParams.n_ubatch = 512
         contextParams.n_threads = threads
         contextParams.n_threads_batch = threads
+        // Faster answers: room to take back wrong guesses from a recurrent model's state.
+        let recurrent = llama_model_is_recurrent(loaded) || llama_model_is_hybrid(loaded)
+        if draftModel != nil && recurrent { contextParams.n_rs_seq = UInt32(Self.draftLength) }
         guard let ctx = llama_init_from_model(loaded, contextParams) else {
             llama_model_free(loaded)
             throw Self.error("Not enough memory to run \(model.name).")
@@ -359,9 +405,58 @@ final class LlamaChatEngine {
         vocab = llama_model_get_vocab(loaded)
         template = llama_model_chat_template(loaded, nil).map { String(cString: $0) }
         cached = []
-        snapshots = llama_model_is_recurrent(loaded) || llama_model_is_hybrid(loaded) || model.slidingWindow > 0
+        snapshots = recurrent || model.slidingWindow > 0
         snapshot = []
         snapshotTokens = []
+        loadDraft(contextParams)
+    }
+
+    /// The draft model, with a context like this one's. Without it (it didn't load), answers come
+    /// the usual way.
+    private func loadDraft(_ params: llama_context_params) {
+        guard let draft = draftModel, draft.isDownloaded else { return }
+        var modelParams = llama_model_default_params()
+        modelParams.n_gpu_layers = 99
+        guard let loaded = llama_model_load_from_file(draft.localURL.path, modelParams) else { return }
+        var contextParams = params
+        contextParams.n_rs_seq = llama_model_is_recurrent(loaded) || llama_model_is_hybrid(loaded) ? UInt32(Self.draftLength) : 0
+        guard let ctx = llama_init_from_model(loaded, contextParams) else {
+            llama_model_free(loaded)
+            return
+        }
+        draftLlama = loaded
+        draftContext = ctx
+        draftTokens = []
+    }
+
+    /// The draft reads what this model has (`tokens`), going on from what it read before where it
+    /// can. False when it couldn't.
+    private func syncDraft(_ tokens: [llama_token]) -> Bool {
+        guard let dctx = draftContext else { return false }
+        let memory = llama_get_memory(dctx)
+        var common = 0
+        while common < draftTokens.count, common < tokens.count, draftTokens[common] == tokens[common] { common += 1 }
+        if common < draftTokens.count {
+            if !llama_memory_seq_rm(memory, 0, Int32(common), -1) {
+                llama_memory_clear(memory, true)
+                common = 0
+            }
+            draftTokens.removeSubrange(common...)
+        }
+        var index = common
+        while index < tokens.count {
+            let count = min(512, tokens.count - index)
+            var chunk = Array(tokens[index..<(index + count)])
+            let rc = chunk.withUnsafeMutableBufferPointer { llama_decode(dctx, llama_batch_get_one($0.baseAddress, Int32(count))) }
+            guard rc == 0 else {
+                llama_memory_clear(memory, true)
+                draftTokens = []
+                return false
+            }
+            draftTokens += chunk
+            index += count
+        }
+        return true
     }
 
     // MARK: - Prompt
@@ -572,6 +667,12 @@ final class LlamaChatEngine {
         }
         defer { llama_sampler_free(sampler) }
 
+        // Faster answers: the draft model guesses ahead, when it's loaded and has read the prompt.
+        if draftContext != nil, syncDraft(prompt) {
+            return try speculate(ctx: ctx, vocab: vocab, sampler: sampler, maxTokens: maxTokens, thinking: thinking, stop: stop,
+                                 cancel: cancel, onText: onText, promptTokens: promptTokens, dropped: dropped)
+        }
+
         var output: [UInt8] = []
         var stopped: String?
         for _ in 0..<maxTokens {
@@ -580,18 +681,9 @@ final class LlamaChatEngine {
             if llama_vocab_is_eog(vocab, token) { break }
             output += piece(token)
             let text = shown(output)
-            // A stop text: the answer ends before it (the token isn't kept, so the next turn's prompt
-            // goes on from the answer as it's shown).
-            // Only the answer can end at one, not the thinking before it (which may mention them).
-            if !stop.isEmpty {
-                let opensThinking = (thinking && model.format == .thinkPrefill) || text.contains("<think>")
-                let answer: Substring? = text.range(of: "</think>", options: .backwards).map { text[$0.upperBound...] }
-                    ?? (opensThinking ? nil : text[...])
-                if let answer, let end = stop.first(where: { answer.suffix(96).contains($0) }),
-                   let at = answer.range(of: end, options: .backwards) {
-                    stopped = String(text[..<at.lowerBound])
-                    break
-                }
+            if let end = stopText(text, at: stop, thinking: thinking) {
+                stopped = end
+                break
             }
             onText(text)
             let rc = llama_decode(ctx, llama_batch_get_one(&token, 1))
@@ -604,6 +696,124 @@ final class LlamaChatEngine {
             cached.append(token)
         }
         return ChatReply(text: stopped ?? shown(output), promptTokens: promptTokens, dropped: dropped)
+    }
+
+    /// A stop text: the answer ends before it (the token isn't kept, so the next turn's prompt goes on
+    /// from the answer as it's shown). Only the answer can end at one, not the thinking before it
+    /// (which may mention them). The answer up to it, or nil.
+    private func stopText(_ text: String, at stop: [String], thinking: Bool) -> String? {
+        guard !stop.isEmpty else { return nil }
+        let opensThinking = (thinking && model.format == .thinkPrefill) || text.contains("<think>")
+        let answer: Substring? = text.range(of: "</think>", options: .backwards).map { text[$0.upperBound...] }
+            ?? (opensThinking ? nil : text[...])
+        guard let answer, let end = stop.first(where: { answer.suffix(96).contains($0) }),
+              let at = answer.range(of: end, options: .backwards) else { return nil }
+        return String(text[..<at.lowerBound])
+    }
+
+    /// The answer with the draft model guessing ahead (see `draftModel`). The prompt is read by both;
+    /// `sampler` is this model's, so each token kept is the one it would have written itself.
+    private func speculate(ctx: OpaquePointer, vocab: OpaquePointer, sampler: UnsafeMutablePointer<llama_sampler>, maxTokens: Int,
+                           thinking: Bool, stop: [String], cancel: CompletionCancel, onText: (String) -> Void,
+                           promptTokens: Int, dropped: Int) throws -> ChatReply {
+        guard let dctx = draftContext else { throw Self.error("\(model.name)'s draft model isn't loaded.") }
+        let memory = llama_get_memory(ctx)
+        let draftMemory = llama_get_memory(dctx)
+        let greedy = llama_sampler_init_greedy()
+        defer { llama_sampler_free(greedy) }
+        let k = Self.draftLength
+        var batch = llama_batch_init(Int32(k + 1), 0, 1)
+        defer { llama_batch_free(batch) }
+
+        var output: [UInt8] = []
+        var stoppedAt: String?
+        var produced = 0
+        var going = true
+        // Adds a token to the answer: the answer so far to show, or nil when it ends there.
+        let add = { (token: llama_token) -> String? in
+            if llama_vocab_is_eog(vocab, token) || produced >= maxTokens { return nil }
+            output += self.piece(token)
+            produced += 1
+            let text = self.shown(output)
+            if let end = self.stopText(text, at: stop, thinking: thinking) {
+                stoppedAt = end
+                return nil
+            }
+            return text
+        }
+
+        // The first token, from the prompt (decoded by neither model yet).
+        var last = llama_sampler_sample(sampler, ctx, -1)
+        if let text = add(last) { onText(text) } else { going = false }
+        while going && !cancel.isCancelled {
+            // The draft catches up with what this model has read, then guesses on from `last`.
+            if draftTokens.count < cached.count, !syncDraft(cached) { break }
+            var guesses: [llama_token] = []
+            var next = last
+            for _ in 0..<k {
+                var token = next
+                guard llama_decode(dctx, llama_batch_get_one(&token, 1)) == 0 else { break }
+                draftTokens.append(token)
+                let guess = llama_sampler_sample(greedy, dctx, -1)
+                if llama_vocab_is_eog(vocab, guess) { break }
+                guesses.append(guess)
+                next = guess
+            }
+
+            // This model reads `last` and the guesses in one pass, with logits at each.
+            let start = Int32(cached.count)
+            let reading = [last] + guesses
+            batch.n_tokens = Int32(reading.count)
+            for (i, token) in reading.enumerated() {
+                batch.token[i] = token
+                batch.pos[i] = start + Int32(i)
+                batch.n_seq_id[i] = 1
+                batch.seq_id[i]![0] = 0
+                batch.logits[i] = 1
+            }
+            let rc = llama_decode(ctx, batch)
+            guard rc == 0 else {
+                llama_memory_clear(memory, true)
+                cached = []
+                if output.isEmpty && !cancel.isCancelled { throw Self.error("\(model.name) failed while answering (\(rc)).") }
+                break
+            }
+            cached += reading
+
+            // Its own token at each place, for as long as the guesses agree; then one more.
+            var kept: [llama_token] = []
+            var agreed = true
+            for i in 0..<guesses.count {
+                let token = llama_sampler_sample(sampler, ctx, Int32(i))
+                kept.append(token)
+                if token != guesses[i] || llama_vocab_is_eog(vocab, token) { agreed = false; break }
+            }
+            if agreed { kept.append(llama_sampler_sample(sampler, ctx, Int32(guesses.count))) }
+
+            // What was guessed wrong goes from both caches (`last` and the agreed guesses stay).
+            let end = start + Int32(kept.count)
+            if Int(end) < cached.count {
+                guard llama_memory_seq_rm(memory, 0, end, -1) else {
+                    llama_memory_clear(memory, true)
+                    cached = []
+                    break
+                }
+                cached.removeSubrange(Int(end)...)
+            }
+            if draftTokens.count > Int(end) {
+                if llama_memory_seq_rm(draftMemory, 0, end, -1) {
+                    draftTokens.removeSubrange(Int(end)...)
+                } else {
+                    llama_memory_clear(draftMemory, true)
+                    draftTokens = []
+                }
+            }
+            for token in kept where going {
+                if let text = add(token) { onText(text) } else { going = false }
+            }
+            last = kept[kept.count - 1]
+        }
+        return ChatReply(text: stoppedAt ?? shown(output), promptTokens: promptTokens, dropped: dropped)
     }
 
     /// The answer as Chat shows it: Gemma 4's thought channel as <think> … </think>, without its other markers.

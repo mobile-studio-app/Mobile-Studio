@@ -55,6 +55,7 @@ final class AppSettings {
             Key.chatMode: "edit",
             Key.chatThinking: false,
             Key.chatKVBits: 8,
+            Key.chatFasterAnswers: false,
             Key.contextCacheLimit: ContextCache.defaultLimit,
             Key.useJIT: true,
             Key.downloadOverCellular: false,
@@ -82,6 +83,7 @@ final class AppSettings {
         static let chatMode = "settings.ai.chatMode"
         static let chatThinking = "settings.ai.chatThinking"
         static let chatKVBits = "settings.ai.chatKVBits"
+        static let chatFasterAnswers = "settings.ai.chatFasterAnswers"
         static let contextCacheLimit = "settings.ai.contextCacheLimit"
         static let useJIT = "settings.run.jit"
         static let downloadOverCellular = "settings.ai.cellular"
@@ -182,6 +184,13 @@ final class AppSettings {
     var chatKVBits: Int {
         get { defaults.integer(forKey: Key.chatKVBits) == 4 ? 4 : 8 }
         set { set(newValue == 4 ? 4 : 8, Key.chatKVBits) }
+    }
+
+    /// Faster answers (experimental): a small draft model guesses ahead for Standard and Smart, which
+    /// check its guesses in one pass (speculative decoding; the answers are the same).
+    var chatFasterAnswers: Bool {
+        get { defaults.bool(forKey: Key.chatFasterAnswers) }
+        set { set(newValue, Key.chatFasterAnswers) }
     }
 
     /// The most storage the context cache (the agent's memory and saved model states) may take:

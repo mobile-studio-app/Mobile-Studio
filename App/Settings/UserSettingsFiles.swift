@@ -75,7 +75,7 @@ enum UserSettingsFiles {
     private static let appKeys: Set<String> = [
         "workbench.colorTheme", "workbench.iconTheme", "editor.fontSize", "editor.tabSize", "editor.wordWrap", "files.autoSave",
         "editor.formatOnSave", "mobileStudio.codeSuggestions", "mobileStudio.ai.model", "mobileStudio.ai.mergeModel", "mobileStudio.ai.chatModel", "mobileStudio.ai.chat.contextSize",
-        "mobileStudio.ai.chat.subagentModel", "mobileStudio.ai.chat.parallelSubagents", "mobileStudio.ai.chat.mode", "mobileStudio.ai.chat.thinking", "mobileStudio.ai.chat.cacheBits",
+        "mobileStudio.ai.chat.subagentModel", "mobileStudio.ai.chat.parallelSubagents", "mobileStudio.ai.chat.mode", "mobileStudio.ai.chat.thinking", "mobileStudio.ai.chat.cacheBits", "mobileStudio.ai.chat.fasterAnswers",
         "mobileStudio.ai.downloadOverMobileData", "mobileStudio.ai.contextCacheMB", "mobileStudio.luajit.jit", "git.enableSmartCommit",
     ]
 
@@ -98,6 +98,7 @@ enum UserSettingsFiles {
             "mobileStudio.ai.chat.mode": s.chatMode,
             "mobileStudio.ai.chat.thinking": s.chatThinking,
             "mobileStudio.ai.chat.cacheBits": s.chatKVBits,
+            "mobileStudio.ai.chat.fasterAnswers": s.chatFasterAnswers,
             "mobileStudio.ai.downloadOverMobileData": s.downloadOverCellular,
             "mobileStudio.ai.contextCacheMB": Int(s.contextCacheLimit / 1_048_576),
             "mobileStudio.luajit.jit": s.useJIT,
@@ -157,6 +158,7 @@ enum UserSettingsFiles {
         if let count = int("mobileStudio.ai.chat.parallelSubagents"), count != s.subagentParallel { s.subagentParallel = count }
         if let mode = values["mobileStudio.ai.chat.mode"] as? String, ["manual", "edit", "auto", "turbo"].contains(mode), mode != s.chatMode { s.chatMode = mode }
         if let on = bool("mobileStudio.ai.chat.thinking"), on != s.chatThinking { s.chatThinking = on }
+        if let on = bool("mobileStudio.ai.chat.fasterAnswers"), on != s.chatFasterAnswers { s.chatFasterAnswers = on }
         if let bits = int("mobileStudio.ai.chat.cacheBits"), [4, 8].contains(bits), bits != s.chatKVBits { s.chatKVBits = bits }
         if let on = bool("mobileStudio.ai.downloadOverMobileData"), on != s.downloadOverCellular { s.downloadOverCellular = on }
         if let on = bool("mobileStudio.luajit.jit"), on != s.useJIT { s.useJIT = on }

@@ -40,6 +40,9 @@ struct LocalModel {
     var format: PromptFormat = .template
     /// How its answers are sampled.
     var sampling: Sampling = .standard
+    /// A small model with the same vocabulary that can draft for it (Faster answers: speculative
+    /// decoding, AIChatService), by id.
+    var draft: String? = nil
 
     enum PromptFormat {
         /// The model's own chat template (llama.cpp's built-in version of it).
@@ -210,7 +213,7 @@ enum AIModelCatalog {
                    url: hf("unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf"),
                    sha256: "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
                    bytes: 2_740_937_888, minimumMemory: 6_000_000_000, chats: true, license: "Apache 2.0", trainedContext: 262144, kvBytesPerToken: 32768,
-                   agent: true, subagent: true, reasoning: .optional, format: .thinkPrefill),
+                   agent: true, subagent: true, reasoning: .optional, format: .thinkPrefill, draft: draftID),
         LocalModel(id: "qwen3.5-9b", name: "Qwen3.5 9B", detail: "Qwen's agent",
                    // IQ4_XS: about Q4's quality in half a gigabyte less, which is what fits a 12 GB phone's
                    // share of memory.
@@ -218,10 +221,21 @@ enum AIModelCatalog {
                    url: hf("unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-IQ4_XS.gguf"),
                    sha256: "7e918aeca06c52bcb528ea6b04b4ec957e75ee8c0a73138854c0dfcf371ea429",
                    bytes: 5_168_653_536, minimumMemory: 10_000_000_000, chats: true, license: "Apache 2.0", trainedContext: 262144, kvBytesPerToken: 32768,
-                   agent: true, subagent: true, reasoning: .optional, format: .thinkPrefill),
+                   agent: true, subagent: true, reasoning: .optional, format: .thinkPrefill, draft: draftID),
     ]
 
-    static let all = [codeLight, fast, regular] + chatModels
+    /// Faster answers' draft model: Qwen3.5 0.8B guesses a few tokens ahead and Qwen3.5 4B or 9B checks
+    /// them in one pass (same vocabulary). Not a tier of its own; it downloads when Faster answers is on.
+    static let draftID = "qwen3.5-0.8b-draft"
+    static let draft = LocalModel(
+        id: draftID, name: "Qwen3.5 0.8B", detail: "Draft model for faster answers",
+        fileName: "Qwen3.5-0.8B-Q4_K_M.gguf",
+        url: hf("unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf"),
+        sha256: "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517",
+        bytes: 532_517_120, minimumMemory: 6_000_000_000, license: "Apache 2.0", trainedContext: 262144, kvBytesPerToken: 12288,
+        reasoning: .optional, format: .thinkPrefill)
+
+    static let all = [codeLight, fast, regular] + chatModels + [draft]
 
     /// Models the catalog used to have: their files, deleted at launch, and the model that takes
     /// over a setting that named one. Before the tiers, Settings → Advanced offered many models;

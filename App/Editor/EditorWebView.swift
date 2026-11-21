@@ -426,6 +426,7 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                               "models": AIChatService.shared.options.map {
                                   ["id": $0.choice.rawValue, "name": $0.name, "detail": $0.detail, "ready": $0.ready, "suggested": $0.suggested, "cloud": $0.cloud,
                                    "agent": $0.agent, "subagent": $0.subagent, "reasoning": $0.reasoning.rawValue, "tier": $0.tier ?? "",
+                                   "fasterAnswers": AIChatService.shared.fasterAnswersState(for: $0.choice),
                                    "contexts": $0.contexts.map { ["tokens": $0.tokens, "bytes": $0.bytes, "fits": $0.fits] }]
                               },
                               "subagentContextSize": s.subagentContextSize,
@@ -446,6 +447,15 @@ final class EditorWebView: NSObject, WKScriptMessageHandlerWithReply {
                 if body["contextSize"] != nil || body["subagentContextSize"] != nil { AIChatService.shared.releaseIdleEngine() }
                 if let mode = body["mode"] as? String { s.chatMode = mode }
                 if let thinking = body["thinking"] as? Bool { s.chatThinking = thinking }
+                // Faster answers: on downloads the draft model if it isn't here; either way the model
+                // loads again with or without it when next asked.
+                if let faster = body["fasterAnswers"] as? Bool {
+                    s.chatFasterAnswers = faster
+                    if faster, !AIModelCatalog.draft.isDownloaded, AIModelCatalog.draft.isSupported {
+                        ModelDownloadManager.shared.download(AIModelCatalog.draft)
+                    }
+                    AIChatService.shared.releaseIdleEngine()
+                }
                 // A new precision takes effect when the model next loads.
                 if let bits = body["kvBits"] as? Int { s.chatKVBits = bits; AIChatService.shared.releaseIdleEngine() }
                 replyHandler(true, nil)
