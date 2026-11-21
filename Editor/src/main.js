@@ -15,7 +15,7 @@ import { languageFor } from './languages.js';
 import { settings, settingsExtensions, settingsEffects, updateSettings } from './settings.js';
 import { aiCompletion } from './ai-complete.js';
 import { symbolAt } from './lua-intel.js';
-import { longPressDocs, hideDocsSheet } from './docs.js';
+import { showDocsSheet, hideDocsSheet } from './docs.js';
 import { kindOf, ICONS, showBinary, showError, hideViewer } from './viewer.js';
 import { mergeConflicts, mergeInfo } from './conflicts.js';
 import { loadExtensions } from './ext/registry.js';
@@ -35,7 +35,9 @@ import { postToHost, extensionFileAt } from './ext/host.js';
 import { setupNavigation, goToDefinition, findReferences, renameSymbol, fallbackDefinitions } from './navigate.js';
 import { openSideBySide, closeSideBySide, isSideBySide, wantsSideBySide, setSideBySidePreference } from './diffview.js';
 import { setupBlame, fileHistory } from './blame.js';
-import { setupChat, toggleChat, openChat, newChat, chatEvent, chatSelectionChanged } from './chat.js';
+import { setupChat, toggleChat, openChat, newChat, chatEvent, chatSelectionChanged, editWithAI, stopEdit } from './chat.js';
+import { setupInlineEdit, inlineEditExtension, startInlineEdit } from './inlineedit.js';
+import { setupContextMenu, contextMenuExtension } from './contextmenu.js';
 import { setupLanguageFeatures, languageFeatures, quickFix, peekDefinition, closePeekView } from './langfeatures.js';
 import { setupMarkdownPreview, setPreview, refreshPreview, fileOpened, previewMode, previewSaved } from './mdpreview.js';
 import { extensionKeys, buildExtensionKeymap, currentExtensionKeymap } from './ext/keybindings.js';
@@ -53,7 +55,7 @@ import { nodeAddress, nodeJob, hostDiagnostics, checkNodeHost, didChangeFile, di
 import { addCommands } from './palette.js';
 import { customEditorsFor } from './ext/registry.js';
 import { quickPick } from './ext/ui.js';
-import { openCustomEditor, openWebviewView, viewChildren, viewInvoke, viewMenu, viewExpand, viewCheck, explorerMenu, runForResource, fileDecorations } from './ext/host.js';
+import { openCustomEditor, openWebviewView, viewChildren, viewInvoke, viewMenu, viewExpand, viewCheck, explorerMenu, runForResource, fileDecorations, editorContextItems } from './ext/host.js';
 import { breakpointGutterHandlers, toggleBreakpointAtCursor, debugExtensions, showBreakpoints, showPausedLine, showInlineValues, debugValueAt } from './debug.js';
 
 const native = (msg) => window.webkit.messageHandlers.duocode.postMessage(msg);
@@ -139,10 +141,10 @@ function baseExtensions(path) {
     diffSlot.of([]),
     merge.extensions,
     aiCompletion(native, setAIBusy, () => current),
-    longPressDocs((state, pos) => {
-      if (debugPaused) return debugValueAt(debugApi, state, pos);
-      return isLua ? symbolAt(state, pos) || hoverAt(state, pos) : hoverAt(state, pos);
-    }, openURL),
+    // Right click, or a finger held still: the editor's context menu (contextmenu.js), with the
+    // symbol's docs first when it has any.
+    contextMenuExtension(),
+    inlineEditExtension(),
     debugExtensions(debugApi),
     gitGutter,
     hostExtensions(),
@@ -535,7 +537,21 @@ setupChat({
   // Reviewing the agent's changes: the file, editable, against what it was before.
   openDiff: (request) => openDiff(request),
 });
+// The context menu's docs: a debug value while paused, else LÖVE's docs or an extension's hover.
+const docsAt = (state, pos) => {
+  if (debugPaused) return debugValueAt(debugApi, state, pos);
+  return languageName === 'Lua' ? symbolAt(state, pos) || hoverAt(state, pos) : hoverAt(state, pos);
+};
+setupContextMenu({
+  runCommand: (name) => (name === 'workbench.action.showCommands' ? commandPalette() : runAnyCommand(name, [])),
+  extensionItems: () => editorContextItems(),
+  native,
+  docsAt,
+  showDocs: (sym) => showDocsSheet(sym, openURL),
+});
+setupInlineEdit({ edit: (request) => editWithAI(request), stop: () => stopEdit(), current: () => (readOnly ? null : current) });
 addCommands([
+  { command: 'mobilestudio.chat.inlineEdit', title: 'Chat: Edit with AI', keybinding: '⌘I', run: () => { if (current && !readOnly) startInlineEdit(view); } },
   { command: 'workbench.action.chat.open', title: 'Chat: Open Chat', keybinding: '⌃⌘I', run: () => openChat() },
   { command: 'workbench.action.chat.newChat', title: 'Chat: New Chat', run: () => { newChat(); openChat(); } },
   { command: 'mobilestudio.chat.explain', title: 'Chat: Explain This Code', run: () => openChat('Explain this code.') },

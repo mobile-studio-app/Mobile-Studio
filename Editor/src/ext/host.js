@@ -1494,15 +1494,13 @@ export function renderEditorTitle() {
   });
 }
 
-// editor/context: right-click (a trackpad or mouse) opens the extensions' commands for the file.
-const editorContextMenu = EditorView.domEventHandlers({
-  contextmenu(e, view) {
-    if (!app || view !== app.view || !app.current() || !menuItems('editor/context', editorKeys()).length) return false;
-    e.preventDefault();
-    editorMenu(view, false);
-    return true;
-  },
-});
+/** editor/context: the extensions' commands for the open file, for the editor's context menu
+ * (contextmenu.js): [{ label, run }]. */
+export function editorContextItems() {
+  if (!app || !app.current()) return [];
+  const path = app.current();
+  return menuItems('editor/context', editorKeys()).map((item) => ({ label: item.title, run: () => runForResource(item.command, path) }));
+}
 
 /** The Explorer's extension commands for a file or folder: [{ command, title, icon, group }]. */
 export function explorerMenu(path, isFolder) {
@@ -1639,7 +1637,6 @@ export function hostExtensions() {
     extensionLint,
     decorationLayer,
     languageFeatureExtensions,
-    editorContextMenu,
     EditorView.baseTheme({
       '.cm-ext-unnecessary': { opacity: '.6', backgroundImage: 'none !important' },
       '.cm-ext-deprecated': { textDecoration: 'line-through' },

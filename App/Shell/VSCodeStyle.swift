@@ -118,6 +118,7 @@ enum Codicon: UInt32 {
     case debugStepInto = 0xEAD4, debugStepOut = 0xEAD5, debugRestart = 0xEAD2, debugStackframe = 0xEB8B
     case debugBreakpointConditional = 0xEAA7, debugBreakpointLog = 0xEAAB, circleOutline = 0xEABC, closeAll = 0xEAC1
     case eye = 0xEA70, newFolder = 0xEA80, filter = 0xEAF1, gitPullRequest = 0xEA64, tag = 0xEA66
+    case sparkle = 0xEC10
 
     /// The branch glyph; VS Code draws branches with the source control icon.
     static let gitBranch = Codicon.sourceControl

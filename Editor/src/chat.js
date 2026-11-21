@@ -240,8 +240,9 @@ function withoutThinking(text) {
 /** Asks the model; `onText` gets the answer as it's written. Resolves with { text, error, stopped,
  * promptTokens, dropped }: how long the prompt really was, and how many old turns didn't fit.
  * `stop`: texts the answer ends before (where a model starts writing a tool's results itself). */
-function ask(chat, { model, maxTokens, onText, contextSize, thinking = false, stop } = {}) {
+function ask(chat, { model, maxTokens, onText, contextSize, thinking = false, stop, onStart } = {}) {
   const id = 'c' + nextId++;
+  if (onStart) onStart(id);
   return new Promise((resolve) => {
     requests.set(id, { resolve, onText });
     api.native({ cmd: 'aiChat', id, messages: chat, model: model || undefined, maxTokens: maxTokens || 1536, contextSize: contextSize || settings.contextSize, thinking, stop })
@@ -922,7 +923,8 @@ async function send() {
   input.value = '';
   if (text === '/compact') { busy = true; updateControls(); await compact('asked'); busy = false; updateControls(); saveChat(); return; }
   if (text === '/clear' || text === '/new') { newChat(); return; }
-  const context = fileContext();
+  hideMentions();
+  const context = [fileContext(), await mentionedFiles(text)].filter(Boolean).join('\n');
   projectList = canAgent() ? await projectFiles() : [];
   const notes = canAgent() ? await api.native({ cmd: 'memory', op: 'list', limit: 200 }).catch(() => []) : [];
   memoryNotes = (Array.isArray(notes) ? notes : []).filter((n) => n.kind === 'note');
@@ -1251,6 +1253,159 @@ function stop() {
   for (const card of document.querySelectorAll('.chat-approval:not(.decided)')) card.decide && card.decide('deny');
 }
 
+// MARK: - @-mentions
+
+// Typing @ in the message suggests the project's files; each file mentioned (@src/main.lua) goes with
+// the question, its contents within a third of the context in all.
+let mentionList = null;   // { el, files, index, start }
+let mentionFiles = null;  // the project's files, while the suggestions are open
+
+/** The @word being typed before the caret: { start, query }, or null. */
+function mentionAtCaret() {
+  const input = $('chat-text');
+  const upTo = input.value.slice(0, input.selectionStart);
+  const m = /(^|\s)@([^\s@]*)$/.exec(upTo);
+  return m ? { start: upTo.length - m[2].length - 1, query: m[2] } : null;
+}
+
+async function showMentions() {
+  const at = mentionAtCaret();
+  if (!at) { hideMentions(); return; }
+  if (!mentionFiles) mentionFiles = await projectFiles();
+  const q = at.query.toLowerCase();
+  const name = (f) => f.split('/').pop().toLowerCase();
+  const files = mentionFiles.filter((f) => f.toLowerCase().includes(q))
+    .sort((a, b) => (name(b).startsWith(q) - name(a).startsWith(q)) || a.length - b.length || a.localeCompare(b)).slice(0, 8);
+  if (!files.length || !mentionAtCaret()) { hideMentions(); return; }
+  if (!mentionList) {
+    const el = element('div', 'chat-mentions');
+    el.setAttribute('role', 'listbox');
+    el.setAttribute('aria-label', 'Files to mention');
+    $('chat-text').before(el);
+    mentionList = { el };
+  }
+  Object.assign(mentionList, { files, index: 0 });
+  drawMentions();
+}
+
+function drawMentions() {
+  const { el, files, index } = mentionList;
+  el.replaceChildren(...files.map((f, i) => {
+    const row = element('button', 'chat-mention' + (i === index ? ' selected' : ''));
+    row.setAttribute('role', 'option');
+    row.setAttribute('aria-selected', String(i === index));
+    row.append(element('span', 'chat-mention-name', f.split('/').pop()), element('span', 'chat-mention-path', f));
+    row.addEventListener('mousedown', (e) => { e.preventDefault(); pickMention(f); });
+    return row;
+  }));
+}
+
+function hideMentions() {
+  if (mentionList) mentionList.el.remove();
+  mentionList = null;
+  mentionFiles = null;
+}
+
+function pickMention(file) {
+  const input = $('chat-text');
+  const at = mentionAtCaret();
+  if (!at) { hideMentions(); return; }
+  const before = input.value.slice(0, at.start);
+  const after = input.value.slice(input.selectionStart).replace(/^ /, '');
+  input.value = `${before}@${file} ${after}`;
+  const caret = before.length + file.length + 2;
+  input.setSelectionRange(caret, caret);
+  hideMentions();
+  input.focus();
+}
+
+/** Arrows, Enter/Tab and Escape while the suggestions are open: true when the key was theirs. */
+function mentionKey(e) {
+  if (!mentionList) return false;
+  const { files } = mentionList;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    mentionList.index = (mentionList.index + (e.key === 'ArrowDown' ? 1 : files.length - 1)) % files.length;
+    drawMentions();
+  } else if ((e.key === 'Enter' || e.key === 'Tab') && !e.isComposing) {
+    pickMention(files[mentionList.index]);
+  } else if (e.key === 'Escape') {
+    hideMentions();
+  } else {
+    return false;
+  }
+  e.preventDefault();
+  return true;
+}
+
+/** The files a message mentions (that exist), with their contents, for the question. */
+async function mentionedFiles(text) {
+  const wanted = [...new Set([...text.matchAll(/(^|\s)@([^\s@]+)/g)].map((m) => cleanPath(m[2].replace(/[.,;:!?)]+$/, ''))))];
+  if (!wanted.length) return '';
+  const files = new Set(await projectFiles());
+  const found = wanted.filter((f) => files.has(f)).slice(0, 8);
+  if (!found.length) return '';
+  const room = Math.floor(contextLimit() * 3.5 / 3 / found.length);
+  const fence = '```';
+  const parts = [];
+  for (const f of found) {
+    let body;
+    try { body = await readText(f); } catch (e) { continue; }
+    if (typeof body !== 'string') continue;
+    const lang = f.includes('.') ? f.split('.').pop() : '';
+    const cut = body.length > room ? `, the first ${room} of its ${body.length} characters` : '';
+    parts.push(`(Mentioned: ${f}${cut}.)\n${fence}${lang}\n${body.slice(0, room)}\n${fence}`);
+  }
+  return parts.join('\n');
+}
+
+// MARK: - Inline edits
+
+/**
+ * Changes one piece of a file as `instruction` says, with the Chat model and no tools (inlineedit.js,
+ * ⌘I in the editor). `code` is the piece ('' to write code at that point), `before` and `after` the
+ * file around it. Resolves with { code } or { error }; `onText` gets the answer as it's written.
+ */
+export async function editWithAI({ instruction, code, path, before, after, onText }) {
+  await fetchSettings();
+  const lang = path && path.includes('.') ? path.split('.').pop() : '';
+  // As much around it as fits a third of the context.
+  const room = Math.max(1500, Math.floor(contextLimit() * 3.5 / 3));
+  const shownBefore = before.length > room * 0.6 ? '…\n' + before.slice(-room * 0.6) : before;
+  const shownAfter = after.length > room * 0.4 ? after.slice(0, room * 0.4) + '\n…' : after;
+  const system = 'You edit code in Mobile Studio, a code editor. You get a file with the part to change between <<<CHANGE>>> and '
+    + '<<<END>>>, and an instruction. Reply with only the new code for that part, in one fenced code block, with no explanation. '
+    + 'Keep its indentation and style, and don\'t repeat the code around it. If the part is empty, write the code to insert there.';
+  const user = `${path || 'The file'}:\n\`\`\`${lang}\n${shownBefore}<<<CHANGE>>>\n${code}<<<END>>>\n${shownAfter}\n\`\`\`\n\n`
+    + `Instruction: ${instruction}\n\nReply with the code that replaces the part between <<<CHANGE>>> and <<<END>>>.`;
+  const maxTokens = Math.max(1024, Math.min(4096, Math.floor(contextLimit() / 4)));
+  const reply = await ask([{ role: 'system', content: system }, { role: 'user', content: user }], { maxTokens, onText, onStart: (id) => { editRequest = id; } });
+  editRequest = null;
+  if (reply.error) return { error: reply.error };
+  if (reply.stopped) return { error: 'Stopped.' };
+  const answer = withoutThinking(reply.text || '');
+  const fenced = /```[^\n]*\n([\s\S]*?)(```|$)/.exec(answer);
+  let out = (fenced ? fenced[1] : answer).replace(/<<<(CHANGE|END)>>>/g, '');
+  if (!out.trim()) return { error: `${modelInfo(settings.selected).name || 'The model'} gave no code.` };
+  // Ends as the part did, and indented as it was when the model dropped the indentation.
+  out = out.replace(/\n+$/, '') + (code.endsWith('\n') || !code ? '\n' : '');
+  const indent = (text) => Math.min(...text.split('\n').filter((l) => l.trim()).map((l) => /^\s*/.exec(l)[0].length));
+  const was = code.trim() ? /^\s*/.exec(code.split('\n').find((l) => l.trim()))[0] : '';
+  if (was && indent(out) === 0) out = out.split('\n').map((l) => (l.trim() ? was + l : l)).join('\n');
+  return { code: out };
+}
+
+let editRequest = null;   // the inline edit being written
+
+/** Stops the inline edit being written (not the agent). */
+export function stopEdit() {
+  const id = editRequest;
+  const request = id && requests.get(id);
+  if (!request) return;
+  api.native({ cmd: 'aiChatCancel', id }).catch(() => {});
+  requests.delete(id);
+  request.resolve({ text: '', stopped: true });
+}
+
 export function newChat() {
   if (busy) stop();
   saveChat();
@@ -1357,8 +1512,12 @@ function build() {
   text.setAttribute('autocapitalize', 'sentences');
   text.addEventListener('keydown', (e) => {
     e.stopPropagation();
+    if (mentionKey(e)) return;
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
   });
+  // @ suggests the project's files (showMentions, mentionKey).
+  text.addEventListener('input', () => showMentions());
+  text.addEventListener('blur', () => setTimeout(hideMentions, 150));
   const mode = element('select', 'chat-mode');
   mode.id = 'chat-mode';
   mode.title = 'What the agent may do without asking';
@@ -1403,10 +1562,16 @@ function saveSetting(change) {
   renderSettings();
 }
 
-async function loadSettings() {
+/** The models and settings from the app, without the panel (inline edits use them too). */
+async function fetchSettings() {
   const info = await api.native({ cmd: 'aiChatModels' }).catch(() => null);
-  if (!info) return;
+  if (!info) return false;
   settings = { ...settings, ...info, models: info.models || [] };
+  return true;
+}
+
+async function loadSettings() {
+  if (!await fetchSettings() || !pane) return;
   const select = $('chat-model');
   select.replaceChildren();
   // The four tiers, in order. One not downloaded yet opens Settings → AI, where it downloads (or,

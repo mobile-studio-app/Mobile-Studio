@@ -66,6 +66,8 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
     private let branchButton = UIButton(type: .custom)
     private let commitButton = VSButton(split: true)
     private let syncButton = VSButton(split: false)
+    private let generateButton = UIButton(type: .system)
+    private let generating = UIActivityIndicatorView(style: .medium)
     private let inputStack = UIStackView()
     private let tableView = UITableView(frame: .zero, style: .plain)
     private let welcome = UIStackView()
@@ -129,6 +131,22 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
         inputStack.isLayoutMarginsRelativeArrangement = true
         inputStack.layoutMargins = UIEdgeInsets(top: 0, left: 12, bottom: 8, right: 12)
         [branchButton, messageView, validationLabel, commitButton, syncButton].forEach(inputStack.addArrangedSubview)
+        // ✨ in the message box's corner: Generate Commit Message, as in VS Code.
+        generating.isHidden = true
+        generateButton.setImage(Codicon.sparkle.image(14).withRenderingMode(.alwaysTemplate), for: .normal)
+        generateButton.tintColor = VS.foreground.withAlphaComponent(0.75)
+        generateButton.accessibilityLabel = "Generate Commit Message"
+        generateButton.isPointerInteractionEnabled = true
+        generateButton.addAction(UIAction { [weak self] _ in self?.generateCommitMessage() }, for: .touchUpInside)
+        generateButton.translatesAutoresizingMaskIntoConstraints = false
+        inputStack.addSubview(generateButton)
+        NSLayoutConstraint.activate([
+            generateButton.topAnchor.constraint(equalTo: messageView.topAnchor, constant: 1),
+            generateButton.trailingAnchor.constraint(equalTo: messageView.trailingAnchor, constant: -1),
+            generateButton.widthAnchor.constraint(equalToConstant: 28),
+            generateButton.heightAnchor.constraint(equalToConstant: 26),
+        ])
+        messageView.textContainerInset.right += 24
         inputStack.setCustomSpacing(4, after: branchButton)
         inputStack.setCustomSpacing(0, after: messageView)
         inputStack.setCustomSpacing(6, after: validationLabel)
@@ -420,6 +438,93 @@ final class SourceControlPanelView: UIView, UITableViewDataSource, UITableViewDe
         } else {
             sync()
         }
+    }
+
+    // MARK: - Generate Commit Message
+
+    private static let commitMessageRequest = "scm-commit-message"
+
+    /// ✨: the Chat model writes a message for what's staged (or, with nothing staged, every change),
+    /// in the style of the repository's recent messages, into the message box as it's written. Tapping
+    /// again while it writes stops it.
+    private func generateCommitMessage() {
+        if !generating.isHidden {
+            AIChatService.shared.cancel(Self.commitMessageRequest)
+            return
+        }
+        saveEdits { [weak self] in
+            guard let self, let repo = self.repo else { return }
+            let status = repo.status()
+            var diff = repo.patch(.staged)
+            if diff.isEmpty { diff = repo.patch(.workingTree) }
+            // New files git doesn't track yet aren't in a diff: their names, then.
+            let untracked = status.changedFiles.filter { $0.status == .untracked }.map(\.path)
+            guard !diff.isEmpty || !untracked.isEmpty else { return self.showAlert("There are no changes to describe.") }
+            // As much of the diff as fits the model (Apple Intelligence's context is small).
+            let room = AppSettings.shared.chatModel == .appleIntelligence ? 6000 : 16000
+            if diff.count > room { diff = String(diff.prefix(room)) + "\n… (the rest of the diff is left out)" }
+            let recent = repo.log(limit: 6).map { "- " + ($0.message.split(separator: "\n").first.map(String.init) ?? "") }.filter { $0.count > 2 }
+            var prompt = "Write a git commit message for these changes.\n\n"
+            if !recent.isEmpty { prompt += "This repository's recent commit messages, for their style:\n\(recent.joined(separator: "\n"))\n\n" }
+            if !untracked.isEmpty { prompt += "New files: \(untracked.prefix(30).joined(separator: ", "))\n\n" }
+            prompt += "```diff\n\(diff)\n```\n\nReply with only the message: a summary line of at most 72 characters, then, if the "
+                + "change needs it, a blank line and a few short lines saying what changed and why. No quotes, no Markdown, no preamble."
+            let messages = [
+                ChatMessage(role: "system", content: "You write clear, concise git commit messages from diffs."),
+                ChatMessage(role: "user", content: prompt),
+            ]
+            let before = self.messageView.text ?? ""
+            self.setGenerating(true)
+            AIChatService.shared.respond(id: Self.commitMessageRequest, choice: AppSettings.shared.chatModel, contextSize: nil, messages,
+                                         maxTokens: 400, onText: { [weak self] text in
+                self?.messageView.text = Self.commitMessage(text)
+            }, completion: { [weak self] result in
+                guard let self else { return }
+                self.setGenerating(false)
+                switch result {
+                case .success(let reply):
+                    let message = Self.commitMessage(reply.text)
+                    self.messageView.text = message.isEmpty ? before : message
+                    self.setValidation(nil)
+                case .failure(let error):
+                    self.messageView.text = before
+                    self.showAlert("Couldn't write a commit message: \(error.localizedDescription)")
+                }
+            })
+        }
+    }
+
+    /// A model's answer as a commit message: without its thinking, fences, quotes or "Commit message:".
+    private static func commitMessage(_ text: String) -> String {
+        var t = text
+        if let end = t.range(of: "</think>") { t = String(t[end.upperBound...]) } else if t.contains("<think>") { return "" }
+        t = t.replacingOccurrences(of: "```[a-z]*", with: "", options: .regularExpression).replacingOccurrences(of: "```", with: "")
+        t = t.trimmingCharacters(in: .whitespacesAndNewlines)
+        t = t.replacingOccurrences(of: "^(commit message|message)\\s*:\\s*", with: "", options: [.regularExpression, .caseInsensitive])
+        if t.count > 1, let first = t.first, let last = t.last, (first == "\"" && last == "\"") || (first == "'" && last == "'") {
+            t = String(t.dropFirst().dropLast())
+        }
+        return t.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func setGenerating(_ on: Bool) {
+        generating.isHidden = !on
+        if on {
+            if generating.superview == nil {
+                generating.translatesAutoresizingMaskIntoConstraints = false
+                generating.hidesWhenStopped = false
+                inputStack.addSubview(generating)
+                NSLayoutConstraint.activate([
+                    generating.centerXAnchor.constraint(equalTo: generateButton.centerXAnchor),
+                    generating.centerYAnchor.constraint(equalTo: generateButton.centerYAnchor),
+                ])
+            }
+            generating.startAnimating()
+        } else {
+            generating.stopAnimating()
+        }
+        generateButton.alpha = on ? 0.15 : 1
+        generateButton.accessibilityLabel = on ? "Stop Generating Commit Message" : "Generate Commit Message"
     }
 
     // MARK: - Commit

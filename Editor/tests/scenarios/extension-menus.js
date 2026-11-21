@@ -89,12 +89,12 @@ scenario(async () => {
   [...document.querySelectorAll('.qi-item')].find((e) => e.textContent.includes('Lua Context Thing')).click();
   check('and runs the one picked', await until(async () => ((await run('menus.ran')) || []).includes('context main.lua')), JSON.stringify(await run('menus.ran')));
 
-  // Right-click in the editor: editor/context.
+  // Right-click in the editor: the context menu, with editor/context's items in it.
   view().contentDOM.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
-  check('right-clicking the editor shows editor/context', await until(() => [...document.querySelectorAll('.qi-item')].some((e) => e.textContent.includes('Lua Context Thing'))));
-  document.querySelector('.qi-backdrop')?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-  document.querySelector('.qi-input')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  await until(() => !document.querySelector('.qi'));
+  const contextItem = () => [...document.querySelectorAll('.ctx-menu .ctx-item')].find((e) => e.textContent.includes('Lua Context Thing'));
+  check('right-clicking the editor shows editor/context in its menu', await until(() => contextItem()));
+  contextItem().click();
+  check('and runs the one picked from there', await until(async () => ((await run('menus.ran')) || []).filter((r) => r === 'context main.lua').length >= 2), JSON.stringify(await run('menus.ran')));
 
   // setContext changes what `when` allows.
   await run('menus.enable');

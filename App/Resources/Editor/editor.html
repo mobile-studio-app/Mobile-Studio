@@ -160,6 +160,25 @@
   .chat-diff { margin: 4px 0 0; padding: 6px; max-height: 220px; overflow: auto; background: var(--chrome); border-radius: 4px; font: 11px ui-monospace, Menlo, monospace; white-space: pre; }
   .chat-subagent { color: var(--muted); padding: 1px 0; }
   .chat-note { margin: 0 0 10px; color: var(--muted); font-size: 12px; font-style: italic; text-align: center; }
+  /* contextmenu.js: the editor's context menu (right click, or a finger held still). */
+  .ctx-menu { position: fixed; z-index: 1000; min-width: 220px; max-width: calc(100vw - 8px); max-height: calc(100vh - 8px); overflow: auto; padding: 4px 0; background: var(--chrome); border: 1px solid var(--border-strong); border-radius: 6px; box-shadow: 0 6px 24px rgba(0,0,0,.35); font: 13px -apple-system, system-ui, sans-serif; }
+  .ctx-item { display: flex; width: 100%; justify-content: space-between; gap: 24px; padding: 6px 14px; background: none; border: 0; color: var(--text); font: inherit; text-align: left; }
+  .ctx-item:hover, .ctx-item:focus { background: var(--accent, #0a84ff); color: #fff; outline: none; }
+  .ctx-item[aria-disabled="true"] { opacity: .4; }
+  .ctx-item[aria-disabled="true"]:hover { background: none; color: var(--text); }
+  .ctx-keys { color: var(--muted); }
+  .ctx-item:hover .ctx-keys, .ctx-item:focus .ctx-keys { color: inherit; }
+  .ctx-separator { height: 1px; margin: 4px 0; background: var(--border); }
+  /* inlineedit.js: Edit with AI (⌘I). */
+  .cm-ai-edit { margin: 4px 0; padding: 6px 8px; border: 1px solid var(--accent, #0a84ff); border-radius: 6px; background: var(--chrome); font: 12px -apple-system, system-ui, sans-serif; }
+  .cm-ai-input { width: 100%; box-sizing: border-box; padding: 5px 6px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; font: 13px -apple-system, system-ui, sans-serif; }
+  .cm-ai-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+  .cm-ai-status { flex: 1; min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cm-ai-error { color: #f14c4c; white-space: normal; }
+  .cm-ai-button { background: color-mix(in srgb, var(--fg) 10%, transparent); color: var(--text); border: 0; border-radius: 4px; padding: 4px 10px; font: 12px -apple-system, system-ui, sans-serif; }
+  .cm-ai-removed { margin: 0 0 4px; padding: 4px 6px; background: rgba(241, 76, 76, .14); color: var(--muted); text-decoration: line-through; border-radius: 4px; font: 12px ui-monospace, Menlo, monospace; white-space: pre-wrap; }
+  .cm-ai-added { background: rgba(80, 200, 120, .14); }
+  .cm-ai-target { background: color-mix(in srgb, var(--accent, #0a84ff) 12%, transparent); }
   /* chat.js: the agent's changes, to review and undo. */
   .chat-changes { border-color: color-mix(in srgb, var(--accent, #0a84ff) 60%, var(--border-strong)); }
   .chat-change { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 3px 0; border-top: 1px solid var(--border); }
@@ -168,6 +187,12 @@
   .chat-change-size { color: var(--muted); font-variant-numeric: tabular-nums; }
   .chat-change.undone .chat-change-path { text-decoration: line-through; color: var(--muted); }
   .chat-change-note { flex-basis: 100%; color: var(--muted); font-size: 11px; }
+  /* chat.js: @-mentions of the project's files. */
+  .chat-mentions { display: grid; max-height: 200px; overflow: auto; margin-bottom: 4px; padding: 2px; background: var(--chrome); border: 1px solid var(--border-strong); border-radius: 6px; }
+  .chat-mention { display: flex; align-items: baseline; gap: 8px; padding: 5px 8px; background: none; border: 0; border-radius: 4px; color: var(--text); font: 12px -apple-system, system-ui, sans-serif; text-align: left; }
+  .chat-mention.selected { background: var(--accent, #0a84ff); color: #fff; }
+  .chat-mention-path { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chat-mention.selected .chat-mention-path { color: inherit; opacity: .8; }
   /* chat.js: saved chats. */
   .chat-history { max-height: 50%; overflow: auto; gap: 2px; }
   .chat-history-row { display: flex; align-items: center; gap: 4px; }

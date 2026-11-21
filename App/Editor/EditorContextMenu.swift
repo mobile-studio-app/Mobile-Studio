@@ -25,6 +25,7 @@ final class EditorWKWebView: WKWebView {
                 action("Format Document", "text.alignleft", "editor.action.formatDocument"),
             ]),
             UIMenu(options: .displayInline, children: [
+                action("Edit with AI…", "sparkles", "mobilestudio.chat.inlineEdit"),
                 action("Explain with Chat", "bubble.left.and.text.bubble.right", "mobilestudio.chat.explain"),
                 action("Fix with Chat", "wand.and.stars", "mobilestudio.chat.fix"),
             ]),
