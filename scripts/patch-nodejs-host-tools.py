@@ -10,7 +10,9 @@ in object file built for 'iOS'". This applies V8's override to every host target
 The architecture too: on an Intel Mac, ICU's host libraries came out arm64 (the iPhone's) while
 gen-regexp-special-case linked as x86_64, and ICU's symbols were "not found for architecture
 x86_64". Apple silicon runners hid it, as the two are the same there. Host tools are built for
-the Mac this runs on.
+the Mac this runs on. 'ARCHS=' replaces the iOS block's list: a plain 'ARCHS' merges with it into
+['arm64', 'x86_64'], and gyp builds anything but one architecture as i386, which the macOS SDK
+no longer has ("symbol(s) not found for architecture i386").
 
 usage: patch-nodejs-host-tools.py <node source>/common.gypi
 """
@@ -29,7 +31,7 @@ override = f"""          ['_toolset=="host" and host_os=="mac"', {{
               'SDKROOT': '',
               'IPHONEOS_DEPLOYMENT_TARGET': '',
               'MACOSX_DEPLOYMENT_TARGET': '10.15',
-              'ARCHS': ['{arch}'],
+              'ARCHS=': ['{arch}'],
             }},
           }}],
 """
